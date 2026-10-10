@@ -3,7 +3,7 @@
 /** 价格：查询 / 保存 / 历史 / 趋势 / 比价 / 导出 / 导入 */
 
 const express = require('express');
-const { db, upsertServer, findServerId, findDictId, createDictItem } = require('../db');
+const { db, upsertServer, findServerId, findDictId, createDictItem, nowText } = require('../db');
 const {
   ok, fail, asyncHandler, cleanName, isBlank, parsePrice,
   isUniqueConstraintError,
@@ -125,20 +125,21 @@ router.post('/', asyncHandler((req, res) => {
   );
   const upsert = db.prepare(
     `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(server_id, city_id, commodity_id)
      DO UPDATE SET buy_price = excluded.buy_price, sell_price = excluded.sell_price,
-                   operator = excluded.operator, updated_at = datetime('now','localtime')`
+                   operator = excluded.operator, updated_at = excluded.updated_at`
   );
   const remove = db.prepare(
     'DELETE FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
   );
   const logHistory = db.prepare(
-    `INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const summary = { saved: 0, updated: 0, created: 0, cleared: 0 };
+  const t = nowText(); // 同一次保存共用一个北京时间戳
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -148,22 +149,22 @@ router.post('/', asyncHandler((req, res) => {
       if (buy == null && sell == null) {
         if (existing) {
           remove.run(serverId, cityId, commodityId);
-          if (existing.buy != null) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator);
-          if (existing.sell != null) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, null, operator);
+          if (existing.buy != null) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator, t);
+          if (existing.sell != null) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, null, operator, t);
           summary.cleared += 1;
         }
         continue;
       }
 
-      upsert.run(serverId, cityId, commodityId, buy, sell, operator);
+      upsert.run(serverId, cityId, commodityId, buy, sell, operator, t);
       if (existing) {
         summary.updated += 1;
-        if (existing.buy !== buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator);
-        if (existing.sell !== sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator);
+        if (existing.buy !== buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator, t);
+        if (existing.sell !== sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator, t);
       } else {
         summary.created += 1;
-        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, buy, operator);
-        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, sell, operator);
+        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, buy, operator, t);
+        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, sell, operator, t);
       }
       summary.saved += 1;
     }
@@ -435,36 +436,37 @@ router.post('/import', asyncHandler((req, res) => {
 
   const upsert = db.prepare(
     `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(server_id, city_id, commodity_id)
      DO UPDATE SET buy_price = excluded.buy_price, sell_price = excluded.sell_price,
-                   operator = excluded.operator, updated_at = datetime('now','localtime')`
+                   operator = excluded.operator, updated_at = excluded.updated_at`
   );
   const getExisting = db.prepare(
     'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
   );
   const logHistory = db.prepare(
-    `INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   let created = 0;
   let updated = 0;
   let newDictCount = unknown.length;
+  const t = nowText();
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const p of parsed) {
       const commodityId = findDictId('commodity', p.commodity);
       const existing = getExisting.get(serverId, cityId, commodityId);
-      upsert.run(serverId, cityId, commodityId, p.buy, p.sell, operator);
+      upsert.run(serverId, cityId, commodityId, p.buy, p.sell, operator, t);
       if (existing) {
         updated += 1;
-        if (existing.buy !== p.buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, p.buy, operator);
-        if (existing.sell !== p.sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, p.sell, operator);
+        if (existing.buy !== p.buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, p.buy, operator, t);
+        if (existing.sell !== p.sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, p.sell, operator, t);
       } else {
         created += 1;
-        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, p.buy, operator);
-        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, p.sell, operator);
+        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, p.buy, operator, t);
+        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, p.sell, operator, t);
       }
     }
     db.exec('COMMIT');

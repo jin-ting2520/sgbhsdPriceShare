@@ -177,16 +177,23 @@ trimHistory();
 
 /* ------------------------------ 通用工具 ------------------------------ */
 
+/** 当前时间：固定北京时间（UTC+8），不依赖系统 TZ / 容器 tzdata */
 function nowText() {
-  return db.prepare("SELECT datetime('now', 'localtime') AS t").get().t;
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).format(new Date());
 }
 
 /** 按名称取/建区服 */
 function upsertServer(name) {
+  const t = nowText();
   db.prepare(
-    `INSERT INTO servers (name, created_at, updated_at) VALUES (?, datetime('now','localtime'), datetime('now','localtime'))
-     ON CONFLICT(name) DO UPDATE SET updated_at = datetime('now','localtime')`
-  ).run(name);
+    `INSERT INTO servers (name, created_at, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at`
+  ).run(name, t, t);
   return db.prepare('SELECT id FROM servers WHERE name = ?').get(name).id;
 }
 
@@ -203,9 +210,10 @@ function findDictId(type, name) {
 /** 创建字典项（城池/商品可重复时抛冲突错误） */
 function createDictItem(type, name, burden = null) {
   const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM dict_items WHERE type = ?').get(type).m;
+  const t = nowText();
   const info = db.prepare(
-    'INSERT INTO dict_items (type, name, sort_order, burden) VALUES (?, ?, ?, ?)'
-  ).run(type, name, maxSort + 1, burden == null || burden === '' ? null : Number(burden));
+    'INSERT INTO dict_items (type, name, sort_order, burden, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(type, name, maxSort + 1, burden == null || burden === '' ? null : Number(burden), t, t);
   return db.prepare('SELECT * FROM dict_items WHERE id = ?').get(info.lastInsertRowid);
 }
 

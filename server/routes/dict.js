@@ -3,7 +3,7 @@
 /** 字典管理：城池 / 商品 */
 
 const express = require('express');
-const { db, createDictItem } = require('../db');
+const { db, createDictItem, nowText } = require('../db');
 const {
   ok, fail, asyncHandler, cleanName, isBlank,
   isUniqueConstraintError,
@@ -111,8 +111,8 @@ router.put('/:id', asyncHandler((req, res) => {
   if (!patches.length) return fail(res, 400, '没有需要更新的字段');
 
   try {
-    db.prepare(`UPDATE dict_items SET ${patches.map(p => p.sql).join(', ')}, updated_at = datetime('now','localtime') WHERE id = ?`)
-      .run(...patches.map(p => p.v), id);
+    db.prepare(`UPDATE dict_items SET ${patches.map(p => p.sql).join(', ')}, updated_at = ? WHERE id = ?`)
+      .run(...patches.map(p => p.v), nowText(), id);
   } catch (err) {
     if (isUniqueConstraintError(err)) return fail(res, 409, '同名项已存在，不能重复', 40901);
     throw err;
