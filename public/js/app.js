@@ -118,10 +118,10 @@ createApp({
       localStorage.removeItem(NICK_KEY)
     }
 
-    /* ---------- 区服输入联想 ---------- */
+    /* ---------- 区服输入联想（纯数字） ---------- */
     const searchServers = (query, cb) => {
       api(`/api/servers${query ? `?keyword=${encodeURIComponent(query)}` : ''}`)
-        .then(res => cb(res.items.map(i => ({ value: i.name }))))
+        .then(res => cb(res.items.filter(i => /^\d+$/.test(i.name)).map(i => ({ value: i.name }))))
         .catch(() => cb([]))
     }
 
@@ -271,25 +271,14 @@ createApp({
     const canSave = computed(() => queried.value && changedCount.value > 0)
 
     const stats = computed(() => {
-      let filled = 0, buySum = 0, buyN = 0, sellSum = 0, sellN = 0, profitSum = 0, profitN = 0, bad = 0
+      let filled = 0, bad = 0
       for (const r of rows.value) {
         const b = numOrNull(r.buy)
         const s = numOrNull(r.sell)
         if (b != null || s != null) filled++
-        if (b != null) { buySum += b; buyN++ }
-        if (s != null) { sellSum += s; sellN++ }
-        const p = calcRowProfit(r)
-        if (p != null) { profitSum += p; profitN++ }
         if (b != null && s != null && b > s) bad++
       }
-      const avg = (sum, n) => (n ? (sum / n).toFixed(2) : '-')
-      return {
-        filled,
-        avgBuy: avg(buySum, buyN),
-        avgSell: avg(sellSum, sellN),
-        avgProfit: avg(profitSum, profitN),
-        badCount: bad,
-      }
+      return { filled, badCount: bad }
     })
 
     /* ---------- 保存 ---------- */
@@ -680,7 +669,7 @@ createApp({
       // 恢复上次搜索条件
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-        if (saved.server) form.server = saved.server
+        if (saved.server) form.server = String(saved.server).replace(/\D/g, '')
         if (saved.city) form.city = saved.city
         if (saved.commodity) form.commodity = saved.commodity
       } catch (e) { /* ignore */ }

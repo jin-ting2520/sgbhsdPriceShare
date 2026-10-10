@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#9e2b25">
-  <title>SGBHSD 物价共享平台</title>
+  <title>三国冰河时代富甲天下跑商价格分享</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/element-plus/index.css">
@@ -28,7 +28,7 @@
   <div v-if="!entered" class="login-page">
     <div class="login-card">
       <div class="login-logo">价</div>
-      <div class="login-title">SGBHSD 物价共享平台</div>
+      <div class="login-title">三国冰河时代富甲天下跑商价格分享</div>
 <el-input v-model="nicknameInput" placeholder="输入你的三国冰河时代昵称" size="large"
         maxlength="20" show-word-limit clearable @keyup.enter="enterSite"></el-input>
       <el-button type="primary" size="large" style="width:100%;margin-top:14px"
@@ -47,7 +47,7 @@
     <div class="brand">
       <div class="logo">价</div>
       <div>
-        <div class="title">SGBHSD 物价共享平台</div>
+        <div class="title">三国冰河时代富甲天下跑商价格分享</div>
         <div class="subtitle">城池 · 商品 买卖价格录入 / 查询 / 共享</div>
       </div>
     </div>
@@ -74,8 +74,9 @@
           <el-col :xs="24" :sm="8">
             <el-form-item>
               <template #label><span class="req-star">区服</span>（必填）</template>
-<el-autocomplete v-model="form.server" :fetch-suggestions="searchServers"
-                placeholder="请输入区服，如：S1 / 008服" clearable style="width:100%"
+<el-autocomplete :model-value="form.server" :fetch-suggestions="searchServers"
+                placeholder="纯数字，如 1344" clearable style="width:100%"
+                @update:model-value="v => form.server = String(v).replace(/\D/g, '')"
                 @keyup.enter="onQuery"></el-autocomplete>
             </el-form-item>
           </el-col>
@@ -135,11 +136,8 @@
       <div class="statusbar" style="margin-bottom:12px">
         <span>商品 <b>{{ rows.length }}</b> 项</span>
         <span>已填写 <b class="ok">{{ stats.filled }}</b> 项</span>
-        <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
-        <span>平均买价 <b>{{ stats.avgBuy }}</b></span>
-        <span>平均卖价 <b>{{ stats.avgSell }}</b></span>
-        <span>平均利润 <b>{{ stats.avgProfit }}</b></span>
-        <span v-if="stats.badCount" class="danger">买价高于卖价 {{ stats.badCount }} 项，请检查</span>
+          <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
+          <span v-if="stats.badCount" class="danger">买价高于卖价 {{ stats.badCount }} 项，请检查</span>
         <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
       </div>
 
@@ -254,7 +252,7 @@
       <template #header><b style="font-size:14px">操作说明</b></template>
       <ol class="help-steps">
         <li><b>输入昵称</b>：进入页面时输入你的三国冰河时代昵称，点击「进入」即可开始使用；昵称会缓存在本机，刷新无需重复输入。</li>
-        <li><b>选择区服</b>：输入区服名称（如 S1、008服），支持历史联想。</li>
+        <li><b>选择区服</b>：输入纯数字区服编号（如 1344），支持历史联想。</li>
         <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称按 <b>Enter</b> 即可写入字典表。</li>
         <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；下拉项显示每个商品的负重。</li>
         <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/利润/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>

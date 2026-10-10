@@ -1,6 +1,6 @@
 'use strict';
 
-/** SGBHSD 物价共享平台 —— Express 入口 */
+/** 三国冰河时代富甲天下跑商价格分享 —— Express 入口 */
 
 const express = require('express');
 const nodePath = require('node:path');
@@ -42,7 +42,7 @@ app.use((err, req, res, next) => {
 // 供测试复用（不自动监听）
 if (require.main === module) {
   app.listen(PORT, HOST, () => {
-    console.log(`SGBHSD 物价共享平台已启动: http://localhost:${PORT}`);
+    console.log(`三国冰河时代富甲天下跑商价格分享已启动: http://localhost:${PORT}`);
   });
 }
 

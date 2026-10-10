@@ -1,7 +1,7 @@
 {
-  "name": "SGBHSD 物价共享平台",
-  "short_name": "物价共享",
-  "description": "三国群英传 HD 物价共享：区服/城池/商品买卖价录入查询",
+  "name": "三国冰河时代富甲天下跑商价格分享",
+  "short_name": "富甲天下",
+  "description": "三国冰河时代富甲天下跑商价格：区服/城池/商品买卖价录入查询",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f4f0",

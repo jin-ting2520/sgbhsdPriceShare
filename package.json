@@ -2,7 +2,7 @@
   "name": "sgbhsd-price-share",
   "version": "1.0.0",
   "private": true,
-  "description": "SGBHSD 物价共享平台：城池/商品买卖价格录入、查询与共享 (Node.js + SQLite + Vue3 + Element Plus)",
+  "description": "三国冰河时代富甲天下跑商价格分享：城池/商品买卖价格录入、查询与共享 (Node.js + SQLite + Vue3 + Element Plus)",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",

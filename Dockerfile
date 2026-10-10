@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-########## SGBHSD 物价共享平台 镜像 ##########
+########## 三国冰河时代富甲天下跑商价格分享 镜像 ##########
 # 基于 Node 24（内置 node:sqlite，零原生编译依赖），单容器即可运行
 FROM node:24-alpine
 

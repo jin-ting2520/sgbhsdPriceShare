@@ -1,4 +1,4 @@
-# SGBHSD 物价共享平台 —— Docker Compose 一键部署
+# 三国冰河时代富甲天下跑商价格分享 —— Docker Compose 一键部署
 # 用法：docker compose up -d --build
 #       或直接执行 ./deploy.sh（Linux/macOS） / .\deploy.ps1（Windows）
 

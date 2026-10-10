@@ -1,4 +1,4 @@
-/* SGBHSD 物价共享平台 Service Worker
+/* 三国冰河时代富甲天下跑商价格分享 Service Worker
    策略：静态资源缓存优先（刷新即更新），API 一律走网络。 */
 
 const CACHE = 'sgbhsd-price-v1'

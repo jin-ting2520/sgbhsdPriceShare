@@ -1,6 +1,6 @@
 # 部署指南（Docker）
 
-SGBHSD 物价共享平台为**单容器 Node.js 应用**（内置 SQLite，无外部数据库依赖），支持 Docker / Docker Compose 一键部署。
+三国冰河时代富甲天下跑商价格分享为**单容器 Node.js 应用**（内置 SQLite，无外部数据库依赖），支持 Docker / Docker Compose 一键部署。
 
 ---
 
