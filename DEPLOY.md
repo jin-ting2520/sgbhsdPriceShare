@@ -123,6 +123,7 @@ docker compose up -d --build    # 重建并滚动重启，数据不受影响
 | 容器启动即退出 / 反复重启 | `docker compose logs app` 查看报错；端口被占用时改 `PORT` |
 | 状态显示 `unhealthy` | 检查 `/api/health`（容器内自动探活），确认 Node 版本支持 `node:sqlite`（≥22.5，镜像内为 24） |
 | 数据没保存下来 | 确认 `./data` 卷挂载存在；容器内数据库路径为 `/app/data/price.db` |
+| 启动报 `unable to open database file`（errcode 14） | 挂载的 `./data` 目录无写权限。新镜像入口脚本会自动 `chown` 数据卷；如仍失败，宿主机执行 `mkdir -p data backup`，Linux 上再 `sudo chown 1000:1000 data backup`；若设置了 `PRICE_DB`，确认其父目录存在 |
 | 换了电脑 / 清了浏览器缓存要重新输昵称 | 正常现象：昵称只存在浏览器本机（localStorage），输入一次后刷新页面免重复输入 |
 
 ## 8. 本地开发（非 Docker）

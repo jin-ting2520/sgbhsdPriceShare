@@ -11,17 +11,22 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
+# su-exec：入口脚本降权使用（root 启动修卷权限 → 以 node 用户运行）
+RUN apk add --no-cache su-exec
+
 # 仅先复制依赖描述文件，利用镜像缓存
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # 应用代码（.dockerignore 已排除 node_modules / data 等）
 COPY . .
+RUN chmod +x docker-entrypoint.sh
 
-# SQLite 数据目录：以非 root 用户运行，保证卷挂载后可写
+# SQLite 数据目录（挂载卷场景由入口脚本再次确保权限）
 RUN mkdir -p /app/data /app/backup && chown -R node:node /app/data /app/backup
 
-USER node
+# 入口以 root 启动：mkdir/chown 挂载的数据卷后，su-exec 降权为 node 用户运行
+ENTRYPOINT ["./docker-entrypoint.sh"]
 
 EXPOSE 3000
 

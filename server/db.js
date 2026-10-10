@@ -14,13 +14,22 @@ const nodePath = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const DATA_DIR = nodePath.join(__dirname, '..', 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
 // PRICE_DB 便于测试使用独立临时库
 const DB_FILE = process.env.PRICE_DB
   ? nodePath.resolve(process.env.PRICE_DB)
   : nodePath.join(DATA_DIR, 'price.db');
+// 确保数据库所在目录存在（含 PRICE_DB 指向自定义路径的场景）
+fs.mkdirSync(nodePath.dirname(DB_FILE), { recursive: true });
 
-const db = new DatabaseSync(DB_FILE);
+let db;
+try {
+  db = new DatabaseSync(DB_FILE);
+} catch (err) {
+  console.error(`[db] 无法打开数据库文件: ${DB_FILE}`);
+  console.error(`[db] ${err.message}`);
+  console.error('[db] 常见原因：数据目录不存在或无写权限（Docker 挂载卷场景：Linux 上可执行 mkdir -p data && chown 1000:1000 data；或检查 PRICE_DB 路径）。');
+  throw err;
+}
 
 db.exec(`
 PRAGMA journal_mode = WAL;
