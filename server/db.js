@@ -5,8 +5,8 @@
  * 表结构：
  *  - dict_items    字典表（城池 / 商品）
  *  - servers       区服表（自由文本输入的区服自动登记）
- *  - prices        价格表（区服 + 城池 + 商品 唯一，买价 / 卖价）
- *  - price_history 价格变更流水
+ *  - prices        价格表（区服 + 城池 + 商品 唯一，买价 / 卖价 / 更新人）
+ *  - price_history 价格变更流水（含操作人昵称）
  */
 
 const fs = require('node:fs');
@@ -15,7 +15,10 @@ const { DatabaseSync } = require('node:sqlite');
 
 const DATA_DIR = nodePath.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
-const DB_FILE = nodePath.join(DATA_DIR, 'price.db');
+// PRICE_DB 便于测试使用独立临时库
+const DB_FILE = process.env.PRICE_DB
+  ? nodePath.resolve(process.env.PRICE_DB)
+  : nodePath.join(DATA_DIR, 'price.db');
 
 const db = new DatabaseSync(DB_FILE);
 
@@ -29,6 +32,7 @@ CREATE TABLE IF NOT EXISTS dict_items (
   type       TEXT    NOT NULL CHECK (type IN ('city', 'commodity')),
   name       TEXT    NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  burden     REAL,                                    -- 负重（商品）：利润 = (卖价-买价)/负重
   status     INTEGER NOT NULL DEFAULT 1,          -- 1 启用 / 0 停用
   created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
@@ -49,6 +53,7 @@ CREATE TABLE IF NOT EXISTS prices (
   commodity_id INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
   buy_price    REAL,
   sell_price   REAL,
+  operator     TEXT,                                    -- 最后更新人
   updated_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   UNIQUE (server_id, city_id, commodity_id)
 );
@@ -62,10 +67,25 @@ CREATE TABLE IF NOT EXISTS price_history (
   field        TEXT    NOT NULL,                        -- buy_price / sell_price
   old_value    REAL,
   new_value    REAL,
+  operator     TEXT,                                    -- 操作人（更新人昵称）
   created_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(server_id, city_id, created_at DESC);
 `);
+
+/* 存量库迁移：补 price_history.operator / dict_items.burden / prices.operator 列 */
+const historyCols = db.prepare('PRAGMA table_info(price_history)').all().map(c => c.name);
+if (!historyCols.includes('operator')) {
+  db.exec('ALTER TABLE price_history ADD COLUMN operator TEXT');
+}
+const dictCols = db.prepare('PRAGMA table_info(dict_items)').all().map(c => c.name);
+if (!dictCols.includes('burden')) {
+  db.exec('ALTER TABLE dict_items ADD COLUMN burden REAL');
+}
+const priceCols = db.prepare('PRAGMA table_info(prices)').all().map(c => c.name);
+if (!priceCols.includes('operator')) {
+  db.exec('ALTER TABLE prices ADD COLUMN operator TEXT');
+}
 
 /* ------------------------------ 种子数据 ------------------------------ */
 
@@ -77,11 +97,25 @@ const CITY_LIST = [
   '广汉', '朐县', '西城', '房陵',
 ];
 
-const COMMODITY_LIST = [
-  '谷物', '黏土', '葡萄', '铁矿石', '铜矿石', '硬木', '棉花', '茶叶', '药材',
-  '香料', '蜂蜜', '盐', '米酒', '陶器', '葡萄酒', '兵器', '铜器', '工具',
-  '布帛', '蜀锦', '漆器', '玉器', '海南珍珠', '金银器',
+/** 内置商品及负重（负重用于计算利润：卖价-买价 后按负重折算） */
+const COMMODITY_SEED = [
+  { name: '谷物', burden: 10 }, { name: '黏土', burden: 15 }, { name: '葡萄', burden: 10 },
+  { name: '铁矿石', burden: 34 }, { name: '铜矿石', burden: 35 }, { name: '硬木', burden: 15 },
+  { name: '棉花', burden: 13 }, { name: '茶叶', burden: 13 }, { name: '药材', burden: 11 },
+  { name: '香料', burden: 10 }, { name: '毛皮', burden: 18 }, { name: '蜂蜜', burden: 29 },
+  { name: '盐', burden: 35 }, { name: '米酒', burden: 30 }, { name: '陶器', burden: 30 },
+  { name: '葡萄酒', burden: 30 }, { name: '兵器', burden: 52 }, { name: '铜器', burden: 55 },
+  { name: '工具', burden: 50 }, { name: '布帛', burden: 16 }, { name: '蜀锦', burden: 10 },
+  { name: '漆器', burden: 32 }, { name: '玉器', burden: 32 }, { name: '海南珍珠', burden: 12 },
+  { name: '金银器', burden: 27 },
 ];
+
+/** 利润 =（卖价 - 买价）/ 负重 */
+function calcProfit(buy, sell, burden) {
+  if (buy == null || sell == null || burden == null || !(burden > 0)) return null;
+  const v = (sell - buy) / burden;
+  return Math.round(v * 100) / 100;
+}
 
 function seedIfEmpty() {
   const row = db.prepare('SELECT COUNT(*) AS n FROM dict_items').get();
@@ -90,9 +124,44 @@ function seedIfEmpty() {
     'INSERT INTO dict_items (type, name, sort_order) VALUES (?, ?, ?)'
   );
   CITY_LIST.forEach((name, i) => insert.run('city', name, i + 1));
-  COMMODITY_LIST.forEach((name, i) => insert.run('commodity', name, i + 1));
+  COMMODITY_SEED.forEach((c, i) => insert.run('commodity', c.name, i + 1));
 }
 seedIfEmpty();
+
+/**
+ * 商品字典补齐 / 负重维护：
+ *  - 缺失的内置商品自动插入（含负重，如新增的「毛皮」）
+ *  - 内置商品负重随代码更新
+ *  - 内置商品排序对齐字典顺序，用户自建商品排在其后
+ */
+function ensureCommoditiesWithBurden() {
+  const findByName = db.prepare("SELECT id, burden FROM dict_items WHERE type = 'commodity' AND name = ?");
+  const insert = db.prepare(
+    'INSERT INTO dict_items (type, name, sort_order, burden) VALUES (?, ?, ?, ?)'
+  );
+
+  COMMODITY_SEED.forEach((c, i) => {
+    const row = findByName.get(c.name);
+    if (row) {
+      if (row.burden !== c.burden) {
+        db.prepare('UPDATE dict_items SET burden = ?, sort_order = ? WHERE id = ?').run(c.burden, i + 1, row.id);
+      }
+    } else {
+      insert.run('commodity', c.name, i + 1, c.burden);
+    }
+  });
+
+  // 重新对齐排序：内置 1..N，用户自建的按原顺序接在后面
+  const names = COMMODITY_SEED.map(c => c.name);
+  const extras = db.prepare(
+    `SELECT id FROM dict_items WHERE type = 'commodity' AND name NOT IN (${names.map(() => '?').join(',')})
+      ORDER BY sort_order, id`
+  ).all(...names);
+  extras.forEach((row, i) => {
+    db.prepare('UPDATE dict_items SET sort_order = ? WHERE id = ?').run(names.length + i + 1, row.id);
+  });
+}
+ensureCommoditiesWithBurden();
 
 // 历史流水只保留最近 2000 条
 function trimHistory() {
@@ -130,11 +199,11 @@ function findDictId(type, name) {
 }
 
 /** 创建字典项（城池/商品可重复时抛冲突错误） */
-function createDictItem(type, name) {
+function createDictItem(type, name, burden = null) {
   const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM dict_items WHERE type = ?').get(type).m;
   const info = db.prepare(
-    'INSERT INTO dict_items (type, name, sort_order) VALUES (?, ?, ?)'
-  ).run(type, name, maxSort + 1);
+    'INSERT INTO dict_items (type, name, sort_order, burden) VALUES (?, ?, ?, ?)'
+  ).run(type, name, maxSort + 1, burden == null || burden === '' ? null : Number(burden));
   return db.prepare('SELECT * FROM dict_items WHERE id = ?').get(info.lastInsertRowid);
 }
 
@@ -147,6 +216,7 @@ module.exports = {
   findServerId,
   findDictId,
   createDictItem,
+  calcProfit,
+  COMMODITY_LIST: COMMODITY_SEED.map(c => c.name),
   CITY_LIST,
-  COMMODITY_LIST,
 };

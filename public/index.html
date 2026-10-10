@@ -5,12 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#9e2b25">
   <title>SGBHSD 物价共享平台</title>
-
-  <!-- Element Plus 样式（本地 node_modules，无外网依赖） -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/element-plus/index.css">
   <link rel="stylesheet" href="/css/app.css">
   <style>[v-cloak]{display:none}</style>
-
   <script type="importmap">
   {
     "imports": {
@@ -25,7 +24,25 @@
 <body>
 <div id="app" v-cloak>
 
-  <!-- ================= 顶栏 ================= -->
+  <!-- ================= 昵称入口 ================= -->
+  <div v-if="!entered" class="login-page">
+    <div class="login-card">
+      <div class="login-logo">价</div>
+      <div class="login-title">SGBHSD 物价共享平台</div>
+<el-input v-model="nicknameInput" placeholder="输入你的三国冰河时代昵称" size="large"
+        maxlength="20" show-word-limit clearable @keyup.enter="enterSite"></el-input>
+      <el-button type="primary" size="large" style="width:100%;margin-top:14px"
+        :loading="entering" @click="enterSite">进 入</el-button>
+      <p class="login-hint">
+        输入游戏内昵称即可进入，无需注册。<br>
+        你录入的价格会以该昵称作为更新人，并缓存在本机，刷新页面无需重复输入。
+      </p>
+    </div>
+  </div>
+
+  <!-- ================= 主界面 ================= -->
+  <template v-else>
+
   <header class="topbar">
     <div class="brand">
       <div class="logo">价</div>
@@ -38,8 +55,13 @@
     <div class="tools">
       <el-button size="small" @click="openDict">字典</el-button>
       <el-button size="small" @click="openHistory">日志</el-button>
+      <el-button size="small" @click="openTrend">趋势</el-button>
+      <el-button size="small" @click="openMatrix">比价</el-button>
       <el-button size="small" @click="openImport">导入</el-button>
       <el-button size="small" @click="exportCsv">导出</el-button>
+      <el-button size="small" style="margin-left:4px" @click="switchNickname">
+        {{ nickname }} <span style="font-size:10px;color:#999">切换昵称</span>
+      </el-button>
     </div>
   </header>
 
@@ -52,61 +74,42 @@
           <el-col :xs="24" :sm="8">
             <el-form-item>
               <template #label><span class="req-star">区服</span>（必填）</template>
-              <el-autocomplete
-                v-model="form.server"
-                :fetch-suggestions="searchServers"
-                placeholder="请输入区服，如：S1 / 008服"
-                clearable
-                style="width:100%"
-                @keyup.enter="onQuery" />
+<el-autocomplete v-model="form.server" :fetch-suggestions="searchServers"
+                placeholder="请输入区服，如：S1 / 008服" clearable style="width:100%"
+                @keyup.enter="onQuery"></el-autocomplete>
             </el-form-item>
           </el-col>
-
           <el-col :xs="24" :sm="8">
             <el-form-item>
               <template #label><span class="req-star">城池</span>（必选，可输入新名称后回车新增）</template>
-              <el-select
-                ref="citySelect"
-                v-model="form.city"
-                filterable
-                clearable
-                allow-create
-                default-first-option
-                placeholder="请选择城池"
-                style="width:100%"
+              <el-select ref="citySelect" v-model="form.city" filterable clearable
+                allow-create default-first-option placeholder="请选择城池" style="width:100%"
                 @change="onDictChange('city', $event)">
-                <el-option v-for="c in cities" :key="c.id" :label="c.name" :value="c.name" />
+<el-option v-for="c in cities" :key="c.id" :label="c.name" :value="c.name"></el-option>
               </el-select>
             </el-form-item>
           </el-col>
-
           <el-col :xs="24" :sm="8">
             <el-form-item>
               <template #label>商品（可选，留空展示全部商品）</template>
-              <el-select
-                ref="commoditySelect"
-                v-model="form.commodity"
-                filterable
-                clearable
-                allow-create
-                default-first-option
-                placeholder="全部商品（可输入新名称后回车新增）"
-                style="width:100%"
-                @change="onDictChange('commodity', $event)">
-                <el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name" />
+              <el-select ref="commoditySelect" v-model="form.commodity" filterable clearable
+                allow-create default-first-option placeholder="全部商品（可输入新名称后回车新增）"
+                style="width:100%" @change="onDictChange('commodity', $event)">
+                <el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name">
+                  <span>{{ c.name }}</span>
+                  <span v-if="c.burden != null" style="color:#999;font-size:12px;margin-left:6px">负重 {{ c.burden }}</span>
+                </el-option>
               </el-select>
             </el-form-item>
           </el-col>
         </el-row>
-
         <div class="search-actions">
           <el-button type="primary" :loading="loading" @click="onQuery">查 询</el-button>
           <el-button @click="onReset">重 置</el-button>
         </div>
-
         <p style="margin:10px 0 0;font-size:12px;color:var(--ink-2);line-height:1.7">
-          提示：城池 / 商品数据来自字典表，可直接输入新名称并按 <b>Enter</b>，
-          或输入名称后直接点击「保存」即可加入字典；未提交到字典的名称无法保存价格。
+          提示：城池 / 商品数据来自字典表，输入新名称后按 <b>Enter</b> 或点「保存」即可写入字典；
+          利润 =（卖价 - 买价）÷ 负重，负重可在「字典」中维护。
         </p>
       </el-form>
     </el-card>
@@ -135,60 +138,71 @@
         <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
         <span>平均买价 <b>{{ stats.avgBuy }}</b></span>
         <span>平均卖价 <b>{{ stats.avgSell }}</b></span>
-        <span>平均差价 <b>{{ stats.avgSpread }}</b></span>
+        <span>平均利润 <b>{{ stats.avgProfit }}</b></span>
         <span v-if="stats.badCount" class="danger">买价高于卖价 {{ stats.badCount }} 项，请检查</span>
         <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
       </div>
 
       <!-- 桌面端：表格 -->
-      <el-table class="desktop-table" :data="rows" size="default" border stripe style="width:100%"
-        :row-class-name="rowClass">
-        <el-table-column label="区服" width="110" align="center">
+      <el-table class="desktop-table" :data="rows" size="default" border stripe
+        style="width:100%" :row-class-name="rowClass">
+        <el-table-column label="区服" width="100" align="center">
           <template #default>{{ queried ? form.server : '-' }}</template>
         </el-table-column>
-        <el-table-column label="城池" width="110" align="center">
+        <el-table-column label="城池" width="100" align="center">
           <template #default>{{ queried ? form.city : '-' }}</template>
         </el-table-column>
-        <el-table-column label="商品" min-width="170">
+        <el-table-column label="商品" min-width="150">
           <template #default="scope">
             <div class="commodity-cell">
-              <span class="name">{{ scope.row.commodity }}<span v-if="isDirty(scope.row)" class="dirty-dot">*</span></span>
-              <span class="time" v-if="scope.row.updatedAt">更新于 {{ scope.row.updatedAt }}</span>
+              <span class="name">
+                {{ scope.row.commodity }}
+                <span class="burden-tag" v-if="scope.row.burden != null">负重{{ scope.row.burden }}</span>
+                <span v-if="isDirty(scope.row)" class="dirty-dot">*</span>
+              </span>
               <span class="spread-warn" v-if="spreadWarn(scope.row)" title="买价高于卖价，请确认是否录入有误">买≥卖</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="买价" width="150">
+        <el-table-column label="买价" width="130">
           <template #default="scope">
             <span v-if="!queried">-</span>
             <div v-else class="price-input">
-              <el-input
-                v-model="scope.row.buy"
-                placeholder="-"
-                clearable
-                inputmode="decimal"
-                @input="onPriceInput(scope.row, 'buy', $event)"
-                @blur="onPriceBlur(scope.row, 'buy')" />
+<el-input :model-value="scope.row.buy" placeholder="买价" inputmode="decimal" size="small"
+            @input="onPriceInput(scope.row, 'buy', $event)"
+            @blur="onPriceBlur(scope.row, 'buy')"></el-input>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="卖价" width="150">
+        <el-table-column label="卖价" width="130">
           <template #default="scope">
             <span v-if="!queried">-</span>
             <div v-else class="price-input">
-              <el-input
-                v-model="scope.row.sell"
-                placeholder="-"
-                clearable
-                inputmode="decimal"
-                @input="onPriceInput(scope.row, 'sell', $event)"
-                @blur="onPriceBlur(scope.row, 'sell')" />
+<el-input :model-value="scope.row.sell" placeholder="卖价" inputmode="decimal" size="small"
+            @input="onPriceInput(scope.row, 'sell', $event)"
+            @blur="onPriceBlur(scope.row, 'sell')"></el-input>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="利润" width="90" align="right">
+          <template #default="scope">
+            <span :class="profitClass(scope.row)">{{ profitText(scope.row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="150" align="center">
+          <template #default="scope">
+            <span class="meta-cell">{{ scope.row.updatedAt || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="更新人" width="90" align="center">
+          <template #default="scope">
+            <span class="meta-cell">{{ scope.row.operator || '-' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="快捷" width="86" align="center" v-if="queried">
           <template #default="scope">
-            <el-button link type="primary" size="small" :disabled="scope.$index === 0" @click="copyPrev(scope.$index)">同上一行</el-button>
+            <el-button link type="primary" size="small" :disabled="scope.$index === 0"
+              @click="copyPrev(scope.$index)">同上一行</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -197,31 +211,41 @@
       <div class="mobile-cards" v-if="isMobile">
         <div class="m-row" v-for="(row, i) in rows" :key="row.commodityId" :class="{ dirty: isDirty(row) }">
           <div class="m-row__head">
-            <span class="name">{{ row.commodity }}<span v-if="isDirty(row)" class="dirty-dot">*</span></span>
-            <span class="spread-warn" v-if="spreadWarn(row)" title="买价高于卖价，请确认是否录入有误">买≥卖</span>
+            <span class="name">
+              {{ row.commodity }}
+              <span class="burden-tag" v-if="row.burden != null">负重{{ row.burden }}</span>
+              <span v-if="isDirty(row)" class="dirty-dot">*</span>
+            </span>
+            <span class="spread-warn" v-if="spreadWarn(row)" title="买价高于卖价">买≥卖</span>
             <span class="time" v-if="row.updatedAt && queried">{{ row.updatedAt.slice(5, 16) }}</span>
             <span class="time" v-else-if="!queried">-</span>
           </div>
           <div class="m-row__inputs" v-if="queried">
             <div>
               <div class="field-label">买价</div>
-              <el-input v-model="row.buy" placeholder="-" clearable inputmode="decimal"
-                @input="onPriceInput(row, 'buy', $event)" @blur="onPriceBlur(row, 'buy')" />
+<el-input :model-value="row.buy" placeholder="买价" inputmode="decimal"
+                @input="onPriceInput(row, 'buy', $event)" @blur="onPriceBlur(row, 'buy')"></el-input>
             </div>
             <div>
               <div class="field-label">卖价</div>
-              <el-input v-model="row.sell" placeholder="-" clearable inputmode="decimal"
-                @input="onPriceInput(row, 'sell', $event)" @blur="onPriceBlur(row, 'sell')" />
+<el-input :model-value="row.sell" placeholder="卖价" inputmode="decimal"
+                @input="onPriceInput(row, 'sell', $event)" @blur="onPriceBlur(row, 'sell')"></el-input>
             </div>
           </div>
           <div class="m-row__inputs" v-else>
             <div><div class="field-label">买价</div><div style="padding:6px 2px;color:var(--ink-2)">-</div></div>
             <div><div class="field-label">卖价</div><div style="padding:6px 2px;color:var(--ink-2)">-</div></div>
           </div>
+          <div class="m-row__meta" v-if="queried">
+            <span>利润 <b :class="profitClass(row)">{{ profitText(row) }}</b></span>
+            <span v-if="row.operator">更新人 {{ row.operator }}</span>
+            <span v-else>未录入</span>
+          </div>
           <div class="m-row__ops" v-if="queried">
             <button :disabled="i === 0" @click="copyPrev(i)">同上一行</button>
             <button @click="clearRow(row)">清空本行</button>
-          </div>        </div>
+          </div>
+        </div>
       </div>
     </el-card>
 
@@ -229,15 +253,15 @@
     <el-card id="help-card" shadow="never">
       <template #header><b style="font-size:14px">操作说明</b></template>
       <ol class="help-steps">
-        <li><b>选择区服</b>：输入区服名称（如 S1、008服），支持从历史区服中快速选择。</li>
-        <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称后按 <b>Enter</b> 即可写入字典表。</li>
-        <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；输入新商品名称后按 <b>Enter</b> 即可写入字典表。</li>
-        <li><b>点击查询</b>：区服与城池将填充进列表，买价/卖价从数据库带出，查不到价格显示 “-”。</li>
-        <li><b>填写价格</b>：直接在买价/卖价输入框中录入数字，可用「同上一行」快速复制。</li>
-        <li><b>点击保存</b>：表格右上角「保存」按钮 → 弹窗确认变更明细 → 确认后写入数据库。</li>
-        <li><b>字典管理</b>：右上角「字典管理」可新增/重命名/停用/删除 城池、商品、区服（已被引用的项不可删除）。</li>
+        <li><b>输入昵称</b>：进入页面时输入你的三国冰河时代昵称，点击「进入」即可开始使用；昵称会缓存在本机，刷新无需重复输入。</li>
+        <li><b>选择区服</b>：输入区服名称（如 S1、008服），支持历史联想。</li>
+        <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称按 <b>Enter</b> 即可写入字典表。</li>
+        <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；下拉项显示每个商品的负重。</li>
+        <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/利润/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>
+        <li><b>填写价格</b>：直接在买价/卖价输入框录入；利润（卖价-买价）÷负重自动计算；支持「同上一行」。</li>
+        <li><b>点击保存</b>：右上角「保存」→ 弹窗确认变更明细 → 确认后写入数据库，记录更新时间与更新人。</li>
+        <li><b>字典管理</b>：「字典」可新增/改名/维护负重/启停/删除城池与商品；被价格引用的项不可删除。</li>
       </ol>
-
       <div class="help-grid">
         <div class="help-item">
           <h4>清空输入</h4>
@@ -249,11 +273,19 @@
         </div>
         <div class="help-item">
           <h4>批量导入</h4>
-          <p>「批量导入」支持粘贴“商品 + 买价 + 卖价”多行数据（制表符/逗号/空格分隔），未知商品可自动创建。</p>
+          <p>「导入」支持粘贴“商品 买价 卖价 负重”多行数据（制表符/逗号/空格分隔），未知商品可自动创建。</p>
         </div>
         <div class="help-item">
-          <h4>更新日志</h4>
-          <p>「更新日志」记录每次买价/卖价的变更前后值与时间，便于回溯价格走势。</p>
+          <h4>日志 / 趋势 / 比价</h4>
+          <p>「日志」查看改价前后值与操作人；「趋势」看某商品价格曲线；「比价」看同一商品在所有城池的价格。</p>
+        </div>
+        <div class="help-item">
+          <h4>更新人昵称</h4>
+          <p>价格的「更新人」即你进入时输入的昵称；想换名字点右上角「切换昵称」即可，历史记录会保留原昵称。</p>
+        </div>
+        <div class="help-item">
+          <h4>负重与利润</h4>
+          <p>每个商品有负重（如谷物10、兵器52），利润 =（卖价 - 买价）÷ 负重；负重可在字典中修改，导入时也可带负重。</p>
         </div>
       </div>
     </el-card>
@@ -267,28 +299,34 @@
   </div>
 
   <!-- ================= 保存确认弹窗 ================= -->
-  <el-dialog v-model="saveVisible" title="确认更新价格" width="620px" :fullscreen="isMobile" top="8vh">
+  <el-dialog v-model="saveVisible" title="确认更新价格" width="680px" :fullscreen="isMobile" top="8vh">
     <div class="confirm-summary">
       将保存 <b>{{ form.server }}</b> · <b>{{ form.city }}</b> 的 <b>{{ changedRows.length }}</b> 条价格：
     </div>
     <div class="confirm-list" v-if="changedRows.length">
       <el-table :data="changedRows" size="small">
-        <el-table-column label="商品" prop="commodity" min-width="120" />
-        <el-table-column label="买价（原 → 新）" min-width="150">
+<el-table-column label="商品" prop="commodity" min-width="100"></el-table-column>
+        <el-table-column label="负重" width="60" align="right">
+          <template #default="s">{{ s.row.burden ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column label="买价（原 → 新）" min-width="140">
           <template #default="s">
-            <span :class="{ 'danger-tag': s.row.buy !== s.row._baseBuy }">
+            <span :class="{ 'danger-tag': !s.row.buy && s.row._baseBuy !== '-' }">
               {{ s.row._baseBuy || '-' }} → {{ s.row.buy || '-' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="卖价（原 → 新）" min-width="150">
+        <el-table-column label="卖价（原 → 新）" min-width="140">
           <template #default="s">
-            <span :class="{ 'danger-tag': s.row.sell !== s.row._baseSell }">
+            <span :class="{ 'danger-tag': !s.row.sell && s.row._baseSell !== '-' }">
               {{ s.row._baseSell || '-' }} → {{ s.row.sell || '-' }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="80" align="center">
+        <el-table-column label="利润" width="70" align="right">
+          <template #default="s">{{ profitText(s.row) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="70" align="center">
           <template #default="s">
             <el-tag size="small" :type="rowOpType(s.row)" effect="plain">{{ rowOpText(s.row) }}</el-tag>
           </template>
@@ -302,23 +340,23 @@
   </el-dialog>
 
   <!-- ================= 字典管理弹窗 ================= -->
-  <el-dialog v-model="dictVisible" title="字典管理" width="900px" :fullscreen="isMobile" top="6vh">
+  <el-dialog v-model="dictVisible" title="字典管理" width="960px" :fullscreen="isMobile" top="6vh">
     <el-tabs v-model="dictTab">
-      <!-- 城池 -->
       <el-tab-pane :label="`城池（${dictData.city.length}）`" name="city">
         <div style="display:flex;gap:8px;margin-bottom:10px">
-          <el-input v-model="newCity" placeholder="输入新城池名称" maxlength="20" show-word-limit @keyup.enter="addDictItem('city')" />
+<el-input v-model="newCity" placeholder="新城池名称" style="width:220px"
+            @keyup.enter="addDictItem('city')"></el-input>
           <el-button type="primary" @click="addDictItem('city')">新增</el-button>
         </div>
         <el-table :data="dictData.city" size="small" max-height="46vh">
           <el-table-column label="城池名称" min-width="150">
             <template #default="s">
-              <el-input v-model="s.row._draft" size="small" @change="saveDictRename(s.row)" @blur="saveDictRename(s.row)" />
+<el-input v-model="s.row._draft" size="small" @change="saveDictRename(s.row)" @blur="saveDictRename(s.row)"></el-input>
             </template>
           </el-table-column>
           <el-table-column label="启用" width="70" align="center">
             <template #default="s">
-              <el-switch v-model="s.row.status" :active-value="1" :inactive-value="0" @change="toggleDict(s.row)" />
+<el-switch v-model="s.row.status" :active-value="1" :inactive-value="0" @change="toggleDict(s.row)"></el-switch>
             </template>
           </el-table-column>
           <el-table-column label="价格引用" width="90" align="center">
@@ -334,21 +372,28 @@
         </el-table>
       </el-tab-pane>
 
-      <!-- 商品 -->
       <el-tab-pane :label="`商品（${dictData.commodity.length}）`" name="commodity">
         <div style="display:flex;gap:8px;margin-bottom:10px">
-          <el-input v-model="newCommodity" placeholder="输入新商品名称" maxlength="20" show-word-limit @keyup.enter="addDictItem('commodity')" />
+<el-input v-model="newCommodity" placeholder="新商品名称" style="width:220px"
+            @keyup.enter="addDictItem('commodity')"></el-input>
+<el-input v-model="newBurden" placeholder="负重（选填）" style="width:130px" inputmode="decimal"></el-input>
           <el-button type="primary" @click="addDictItem('commodity')">新增</el-button>
         </div>
         <el-table :data="dictData.commodity" size="small" max-height="46vh">
-          <el-table-column label="商品名称" min-width="150">
+          <el-table-column label="商品名称" min-width="130">
             <template #default="s">
-              <el-input v-model="s.row._draft" size="small" @change="saveDictRename(s.row)" @blur="saveDictRename(s.row)" />
+<el-input v-model="s.row._draft" size="small" @change="saveDictRename(s.row)" @blur="saveDictRename(s.row)"></el-input>
+            </template>
+          </el-table-column>
+          <el-table-column label="负重" width="110" align="center">
+            <template #default="s">
+<el-input v-model="s.row._burdenDraft" placeholder="负重" size="small" inputmode="decimal"
+            style="width:90px" @change="saveDictBurden(s.row)"></el-input>
             </template>
           </el-table-column>
           <el-table-column label="启用" width="70" align="center">
             <template #default="s">
-              <el-switch v-model="s.row.status" :active-value="1" :inactive-value="0" @change="toggleDict(s.row)" />
+<el-switch v-model="s.row.status" :active-value="1" :inactive-value="0" @change="toggleDict(s.row)"></el-switch>
             </template>
           </el-table-column>
           <el-table-column label="价格引用" width="90" align="center">
@@ -364,12 +409,11 @@
         </el-table>
       </el-tab-pane>
 
-      <!-- 区服 -->
       <el-tab-pane :label="`区服（${serverList.length}）`" name="server">
         <el-table :data="serverList" size="small" max-height="46vh">
-          <el-table-column label="区服名称" prop="name" min-width="120" />
-          <el-table-column label="价格条数" prop="priceCount" width="100" align="center" />
-          <el-table-column label="最近更新" prop="lastUsedAt" min-width="160" />
+<el-table-column label="区服名称" prop="name" min-width="120"></el-table-column>
+<el-table-column label="价格条数" prop="priceCount" width="100" align="center"></el-table-column>
+<el-table-column label="最近使用" prop="lastUsedAt" min-width="160"></el-table-column>
           <el-table-column label="操作" width="100" align="center">
             <template #default="s">
               <el-button link type="danger" size="small" @click="removeServer(s.row)">删除</el-button>
@@ -384,7 +428,7 @@
   </el-dialog>
 
   <!-- ================= 更新日志弹窗 ================= -->
-  <el-dialog v-model="historyVisible" title="更新日志" width="760px" :fullscreen="isMobile" top="8vh">
+  <el-dialog v-model="historyVisible" title="更新日志" width="780px" :fullscreen="isMobile" top="8vh">
     <div class="confirm-summary" v-if="!queried">请先在上方选择区服与城池并查询，再查看该范围的价格变更日志。</div>
     <template v-else>
       <div class="confirm-summary">
@@ -392,19 +436,18 @@
         <el-button link type="primary" size="small" @click="loadHistory">刷新</el-button>
       </div>
       <el-table :data="historyList" size="small" max-height="50vh">
-        <el-table-column label="时间" prop="createdAt" width="160" />
-        <el-table-column label="商品" prop="commodity" min-width="90" />
-        <el-table-column label="字段" width="90">
+<el-table-column label="时间" prop="createdAt" width="155"></el-table-column>
+<el-table-column label="商品" prop="commodity" min-width="90"></el-table-column>
+        <el-table-column label="字段" width="70">
           <template #default="s">{{ s.row.field === 'buy_price' ? '买价' : '卖价' }}</template>
         </el-table-column>
-        <el-table-column label="原值" width="90">
+        <el-table-column label="原值" width="80">
           <template #default="s">{{ s.row.oldValue ?? '-' }}</template>
         </el-table-column>
-        <el-table-column label="新值" width="90">
-          <template #default="s">
-            <b :class="s.row.newValue == null ? 'danger-tag' : ''">{{ s.row.newValue ?? '-' }}</b>
-          </template>
+        <el-table-column label="新值" width="80">
+          <template #default="s"><b :class="s.row.newValue == null ? 'danger-tag' : ''">{{ s.row.newValue ?? '-' }}</b></template>
         </el-table-column>
+<el-table-column label="操作人" prop="operator" width="100"></el-table-column>
       </el-table>
     </template>
     <template #footer>
@@ -412,17 +455,144 @@
     </template>
   </el-dialog>
 
+  <!-- ================= 价格趋势弹窗 ================= -->
+  <el-dialog v-model="trendVisible" title="价格趋势" width="820px" :fullscreen="isMobile" top="6vh">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <el-select v-model="trendCommodity" filterable placeholder="选择商品" style="width:170px"
+        @change="loadTrend">
+<el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name"></el-option>
+      </el-select>
+      <el-select v-model="trendDays" style="width:120px" @change="loadTrend">
+<el-option label="近 7 天" :value="7"></el-option>
+<el-option label="近 30 天" :value="30"></el-option>
+<el-option label="近 90 天" :value="90"></el-option>
+      </el-select>
+      <el-button :loading="trendLoading" @click="loadTrend">刷新</el-button>
+    </div>
+
+    <div v-if="!queried" class="confirm-summary">请先在上方选择区服与城池并查询。</div>
+    <template v-else>
+      <div class="confirm-summary">
+        {{ form.server }} · {{ form.city }} · <b>{{ trendCommodity || '请选择商品' }}</b>
+        <span v-if="trendData.burden != null">（负重 {{ trendData.burden }}）</span>
+      </div>
+
+      <!-- 汇总 -->
+      <div class="statusbar" style="margin-bottom:12px" v-if="trendData.summary && trendData.summary.count">
+        <span>最新买价 <b>{{ trendData.summary.lastBuy ?? '-' }}</b></span>
+        <span>最新卖价 <b>{{ trendData.summary.lastSell ?? '-' }}</b></span>
+        <span>买价区间 <b>{{ trendData.summary.minBuy ?? '-' }} ~ {{ trendData.summary.maxBuy ?? '-' }}</b></span>
+        <span>卖价区间 <b>{{ trendData.summary.minSell ?? '-' }} ~ {{ trendData.summary.maxSell ?? '-' }}</b></span>
+        <span v-if="trendData.summary.buyChangePct != null">
+          买价涨跌 <b :class="trendData.summary.buyChangePct >= 0 ? 'ok' : 'danger'">{{ trendData.summary.buyChangePct }}%</b>
+        </span>
+        <span v-if="trendData.summary.sellChangePct != null">
+          卖价涨跌 <b :class="trendData.summary.sellChangePct >= 0 ? 'ok' : 'danger'">{{ trendData.summary.sellChangePct }}%</b>
+        </span>
+      </div>
+
+      <!-- SVG 折线图 -->
+      <div class="chart-box" v-if="trendPoints.length">
+        <svg :viewBox="'0 0 ' + trendChart.W + ' ' + trendChart.H" class="trend-svg" preserveAspectRatio="none">
+          <!-- 横向网格线 -->
+          <line v-for="g in trendChart.grid" :key="'g' + g.y" :x1="28" :x2="trendChart.W - 10"
+            :y1="g.y" :y2="g.y" stroke="#e6e3dc" stroke-dasharray="4 4" />
+          <text v-for="g in trendChart.grid" :key="'gl' + g.y" :x="24" :y="g.y + 4"
+            text-anchor="end" font-size="11" fill="#6b7280">{{ g.label }}</text>
+          <!-- 买价线 -->
+          <path v-if="trendChart.buyPath" :d="trendChart.buyPath" fill="none"
+            stroke="#2563eb" stroke-width="2.5" />
+          <!-- 卖价线 -->
+          <path v-if="trendChart.sellPath" :d="trendChart.sellPath" fill="none"
+            stroke="#ea580c" stroke-width="2.5" />
+          <!-- 数据点 -->
+          <circle v-for="(d, idx) in trendChart.buyDots" :key="'bd' + idx" :cx="d.x" :cy="d.y" r="3"
+            fill="#2563eb"><title>{{ d.tip }}</title></circle>
+          <circle v-for="(d, idx) in trendChart.sellDots" :key="'sd' + idx" :cx="d.x" :cy="d.y" r="3"
+            fill="#ea580c"><title>{{ d.tip }}</title></circle>
+          <!-- X 轴标签 -->
+          <text v-for="l in trendChart.xLabels" :key="'x' + l.x" :x="l.x" :y="trendChart.H - 4"
+            :text-anchor="l.anchor" font-size="11" fill="#6b7280">{{ l.label }}</text>
+        </svg>
+        <div class="chart-legend">
+          <span class="legend-dot" style="background:#2563eb"></span>买价
+          <span class="legend-dot" style="background:#ea580c"></span>卖价
+          <span style="margin-left:12px;color:var(--ink-2);font-size:12px">
+            共 {{ trendPoints.length }} 个数据点，鼠标悬停查看明细
+          </span>
+        </div>
+      </div>
+      <div v-else class="empty-tip" style="padding:18px">该时间范围内暂无价格变更记录</div>
+    </template>
+    <template #footer>
+      <el-button @click="trendVisible = false">关 闭</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- ================= 跨城池比价弹窗 ================= -->
+  <el-dialog v-model="matrixVisible" title="跨城池比价" width="860px" :fullscreen="isMobile" top="6vh">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">
+      <el-select v-model="matrixCommodity" filterable placeholder="选择商品" style="width:170px"
+        @change="loadMatrix">
+<el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name"></el-option>
+      </el-select>
+      <el-button :loading="matrixLoading" @click="loadMatrix">刷新</el-button>
+    </div>
+
+    <div v-if="!matrixData.items" class="confirm-summary">请选择商品查看各城池价格。</div>
+    <template v-else>
+      <div class="confirm-summary">
+        {{ matrixData.server }} · <b>{{ matrixData.commodity }}</b>
+        <span v-if="matrixData.burden != null">（负重 {{ matrixData.burden }}，利润 =（卖价-买价）÷ 负重）</span>
+      </div>
+      <div class="statusbar" style="margin-bottom:12px" v-if="matrixData.summary">
+        <span>有价城池 <b>{{ matrixData.summary.pricedCount }}/{{ matrixData.summary.cityCount }}</b></span>
+        <span>最低买价 <b class="ok">{{ matrixData.summary.minBuy ?? '-' }}</b></span>
+        <span>最高卖价 <b class="ok">{{ matrixData.summary.maxSell ?? '-' }}</b></span>
+        <span v-if="matrixData.summary.bestBuyCity">最便宜买入：<b class="ok">{{ matrixData.summary.bestBuyCity }}</b></span>
+        <span v-if="matrixData.summary.bestSellCity">最高价卖出：<b class="ok">{{ matrixData.summary.bestSellCity }}</b></span>
+        <span>买价差 <b>{{ matrixData.summary.buySpread ?? '-' }}</b></span>
+      </div>
+      <el-table :data="matrixData.items" size="small" max-height="46vh" border stripe
+        :default-sort="{ prop: 'buy', order: 'ascending' }">
+<el-table-column label="城池" prop="city" min-width="90" fixed></el-table-column>
+        <el-table-column label="买价" prop="buy" width="90" align="right" sortable>
+          <template #default="s">
+            <b :class="s.row.buy != null && s.row.buy === matrixData.summary.minBuy ? 'best-cell' : ''">
+              {{ s.row.buy ?? '-' }}
+            </b>
+          </template>
+        </el-table-column>
+        <el-table-column label="卖价" prop="sell" width="90" align="right" sortable>
+          <template #default="s">
+            <b :class="s.row.sell != null && s.row.sell === matrixData.summary.maxSell ? 'best-cell' : ''">
+              {{ s.row.sell ?? '-' }}
+            </b>
+          </template>
+        </el-table-column>
+        <el-table-column label="利润" width="80" align="right">
+          <template #default="s">{{ s.row.profit ?? '-' }}</template>
+        </el-table-column>
+<el-table-column label="更新时间" prop="updatedAt" width="150" align="center"></el-table-column>
+<el-table-column label="更新人" prop="operator" width="90" align="center"></el-table-column>
+      </el-table>
+    </template>
+    <template #footer>
+      <el-button @click="matrixVisible = false">关 闭</el-button>
+    </template>
+  </el-dialog>
+
   <!-- ================= 批量导入弹窗 ================= -->
   <el-dialog v-model="importVisible" title="批量导入价格" width="680px" :fullscreen="isMobile" top="8vh">
     <div class="confirm-summary">
-      粘贴多行数据到下方（每行：<b>商品 + 买价 + 卖价</b>，支持制表符 / 逗号 / 空格分隔），导入到
+      粘贴多行数据到下方（每行：<b>商品 + 买价 + 卖价 + [负重]</b>，制表符 / 逗号 / 空格分隔），导入到
       <b>{{ form.server || '未选择区服' }}</b> · <b>{{ form.city || '未选择城池' }}</b>。
     </div>
-    <el-input v-model="importText" type="textarea" :rows="10"
-      placeholder="示例：&#10;谷物	12.5	15&#10;黏土 5 6&#10;盐,3,4" />
+<el-input v-model="importText" type="textarea" :rows="7"
+      placeholder="每行：商品 买价 卖价 [负重]，如：毛皮 10.5 15 18（制表符 / 逗号 / 空格分隔）"></el-input>
     <div style="display:flex;align-items:center;gap:16px;margin-top:10px">
-      <el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品" />
-      <div class="spacer" style="flex:1"></div>
+<el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品"></el-switch>
+      <div style="flex:1"></div>
       <el-button type="primary" :loading="importing" @click="submitImport">开始导入</el-button>
     </div>
     <template #footer>
@@ -430,6 +600,7 @@
     </template>
   </el-dialog>
 
+  </template>
 </div>
 
 <script type="module" src="/js/app.js"></script>

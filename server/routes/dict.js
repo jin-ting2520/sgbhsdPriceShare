@@ -14,6 +14,15 @@ const router = express.Router();
 const VALID_TYPES = new Set(['city', 'commodity']);
 const TYPE_NAMES = { city: '城池', commodity: '商品' };
 
+/** 负重校验：空 -> null；否则须为 0 < x <= 9999 的数字 */
+function parseBurden(v) {
+  if (v === '' || v == null) return { value: null, error: null };
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return { value: null, error: '负重必须是大于 0 的数字' };
+  if (n > 9999) return { value: null, error: '负重不能超过 9999' };
+  return { value: Math.round(n * 100) / 100, error: null };
+}
+
 /** GET /api/dict?type=city  —— 下拉数据源（可按 keyword 过滤） */
 router.get('/', asyncHandler((req, res) => {
   const type = String(req.query.type || '');
@@ -25,13 +34,13 @@ router.get('/', asyncHandler((req, res) => {
   let rows;
   if (keyword) {
     rows = db.prepare(
-      `SELECT id, type, name, sort_order, status FROM dict_items
+      `SELECT id, type, name, burden, sort_order, status FROM dict_items
        WHERE type = ? ${onlyEnabled ? 'AND status = 1' : ''} AND name LIKE ?
        ORDER BY CASE WHEN name = ? THEN 0 WHEN name LIKE ? THEN 1 ELSE 2 END, sort_order, id LIMIT 50`
     ).all(type, `%${keyword}%`, keyword, `${keyword}%`);
   } else {
     rows = db.prepare(
-      `SELECT id, type, name, sort_order, status FROM dict_items
+      `SELECT id, type, name, burden, sort_order, status FROM dict_items
        WHERE type = ? ${onlyEnabled ? 'AND status = 1' : ''}
        ORDER BY sort_order, id`
     ).all(type);
@@ -42,7 +51,7 @@ router.get('/', asyncHandler((req, res) => {
 /** GET /api/dict/summary —— 管理弹窗使用（含价格引用计数） */
 router.get('/summary', asyncHandler((req, res) => {
   const list = (type) => db.prepare(
-    `SELECT d.id, d.type, d.name, d.sort_order, d.status,
+    `SELECT d.id, d.type, d.name, d.sort_order, d.status, d.burden,
             (SELECT COUNT(*) FROM prices p WHERE p.city_id = d.id) AS city_used,
             (SELECT COUNT(*) FROM prices p WHERE p.commodity_id = d.id) AS commodity_used
        FROM dict_items d WHERE d.type = ? ORDER BY d.sort_order, d.id`
@@ -53,16 +62,18 @@ router.get('/summary', asyncHandler((req, res) => {
   });
 }));
 
-/** POST /api/dict { type, name } —— 新增城池 / 商品（不可重复） */
+/** POST /api/dict { type, name, burden } —— 新增城池 / 商品（不可重复） */
 router.post('/', asyncHandler((req, res) => {
   const type = String(req.body.type || '');
   const name = cleanName(req.body.name);
+  const burden = parseBurden(req.body.burden);
   if (!VALID_TYPES.has(type)) return fail(res, 400, '字典类型必须为 city 或 commodity');
   if (isBlank(name)) return fail(res, 400, `请输入${TYPE_NAMES[type]}名称`);
   if (name.length > 20) return fail(res, 400, '名称不能超过 20 个字符');
+  if (burden.error) return fail(res, 400, burden.error);
 
   try {
-    const item = createDictItem(type, name);
+    const item = createDictItem(type, name, burden.value);
     return ok(res, item);
   } catch (err) {
     if (isUniqueConstraintError(err)) {
@@ -85,6 +96,11 @@ router.put('/:id', asyncHandler((req, res) => {
     if (isBlank(name)) return fail(res, 400, '名称不能为空');
     if (name.length > 20) return fail(res, 400, '名称不能超过 20 个字符');
     patches.push({ sql: 'name = ?', v: name });
+  }
+  if (req.body.burden !== undefined) {
+    const burden = parseBurden(req.body.burden);
+    if (burden.error) return fail(res, 400, burden.error);
+    patches.push({ sql: 'burden = ?', v: burden.value });
   }
   if (req.body.status !== undefined) {
     patches.push({ sql: 'status = ?', v: req.body.status ? 1 : 0 });

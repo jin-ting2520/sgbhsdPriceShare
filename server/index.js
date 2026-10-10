@@ -10,6 +10,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 
 /* ------------------------------ 静态资源 ------------------------------ */
@@ -38,9 +39,14 @@ app.use((err, req, res, next) => {
   res.status(status).json({ code: status, message: err.message || '服务器内部错误', data: null });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`SGBHSD 物价共享平台已启动: http://localhost:${PORT}`);
-});
+// 供测试复用（不自动监听）
+if (require.main === module) {
+  app.listen(PORT, HOST, () => {
+    console.log(`SGBHSD 物价共享平台已启动: http://localhost:${PORT}`);
+  });
+}
 
 process.on('SIGINT', () => process.exit(0));
 process.on('SIGTERM', () => process.exit(0));
+
+module.exports = app;
