@@ -110,7 +110,7 @@
         </div>
         <p style="margin:10px 0 0;font-size:12px;color:var(--ink-2);line-height:1.7">
           提示：城池 / 商品数据来自字典表，输入新名称后按 <b>Enter</b> 或点「保存」即可写入字典；
-          利润在「比价」中按「卖出城卖价 − 买入城买价」跨城计算，负重可在「字典」中维护。
+          利润在「比价」中按（卖出城卖价 − 买入城买价）÷ 负重跨城计算，负重可在「字典」中维护。
         </p>
       </el-form>
     </el-card>
@@ -274,7 +274,7 @@
         </div>
         <div class="help-item">
           <h4>负重与利润</h4>
-          <p>每个商品有负重（如谷物10、兵器52）；利润按跨城计算：「比价」中选卖出城后，利润 = 卖出城卖价 − 本城买价，自动推荐最优买卖路线。</p>
+          <p>每个商品有负重（如谷物10、兵器52）；利润按跨城计算：「比价」中选卖出城后，利润 =（卖出城卖价 − 买入城买价）÷ 负重，自动推荐最优买卖路线。</p>
         </div>
       </div>
     </el-card>
@@ -539,7 +539,7 @@
       <div class="confirm-summary" v-if="matrixBestRoute" style="margin-top:6px">
         推荐路线：从 <b class="ok">{{ matrixBestRoute.buyCity }}</b> 买入（买价 {{ matrixBestRoute.buyPrice }}）
         → 运到 <b class="ok">{{ matrixBestRoute.sellCity }}</b> 卖出（卖价 {{ matrixBestRoute.sellPrice }}），
-        差价 <b :class="profitClass(matrixBestRoute.profit)">{{ profitText(matrixBestRoute.profit) }}</b>
+        利润（÷负重） <b :class="profitClass(matrixBestRoute.profit)">{{ profitText(matrixBestRoute.profit) }}</b>
       </div>
       <div class="statusbar" style="margin:12px 0" v-if="matrixData.summary">
         <span>有价城池 <b>{{ matrixData.summary.pricedCount }}/{{ matrixData.summary.cityCount }}</b></span>

@@ -224,7 +224,7 @@ createApp({
 
     const clearRow = row => { row.buy = ''; row.sell = '' }
 
-    /* ---------- 跨城利润展示（比价弹窗：卖出城卖价 - 本城买价） ---------- */
+    /* ---------- 跨城利润展示（比价弹窗：（卖出城卖价 - 本城买价）/ 负重） ---------- */
     const profitText = v => (v == null ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(2))
     const profitClass = v => (v == null ? '' : v > 0 ? 'profit-pos' : v < 0 ? 'profit-neg' : '')
 
@@ -523,7 +523,7 @@ createApp({
       if (queried.value && trendCommodity.value) loadTrend()
     }
 
-    /* ---------- 跨城池比价（利润 = 卖出城卖价 - 本城买价） ---------- */
+    /* ---------- 跨城池比价（利润 =（卖出城卖价 - 本城买价）/ 负重） ---------- */
     const matrixVisible = ref(false)
     const matrixCommodity = ref('')
     const matrixLoading = ref(false)
@@ -558,12 +558,14 @@ createApp({
       return best
     })
 
-    /** 每行附加跨城利润 = 目标卖出城卖价 − 本城买价 */
+    /** 每行附加跨城利润 = （目标卖出城卖价 − 本城买价）/ 负重 */
     const matrixRows = computed(() => {
       const t = matrixSellTarget.value
+      const burden = matrixData.value.burden
+      const div = (burden != null && burden > 0) ? burden : null
       return (matrixData.value.items || []).map(i => ({
         ...i,
-        profit: (t && i.buy != null) ? Math.round((t.sell - i.buy) * 100) / 100 : null,
+        profit: (t && i.buy != null && div) ? Math.round((t.sell - i.buy) / div * 100) / 100 : null,
       }))
     })
 
@@ -572,11 +574,12 @@ createApp({
       let buyCity = null
       for (const i of matrixRows.value) if (i.buy != null && (buyCity == null || i.buy < buyCity.buy)) buyCity = i
       const sell = matrixSellTarget.value
-      if (!buyCity || !sell || buyCity.city === sell.city) return null
+      const burden = matrixData.value.burden
+      if (!buyCity || !sell || buyCity.city === sell.city || !(burden > 0)) return null
       return {
         buyCity: buyCity.city, buyPrice: buyCity.buy,
         sellCity: sell.city, sellPrice: sell.sell,
-        profit: Math.round((sell.sell - buyCity.buy) * 100) / 100,
+        profit: Math.round((sell.sell - buyCity.buy) / burden * 100) / 100,
       }
     })
 
