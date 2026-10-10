@@ -255,6 +255,41 @@ test('导入：粘贴多行数据并自动创建新商品（可带负重，记�
   assert.equal(query.json.data.items[0].operator, '导入员', '导入的价格也应记录操作人昵称');
 });
 
+test('导入：Excel 结构化 rows（合法行导入 + 非法行 400 不落库）', async () => {
+  const bad = await api('/api/prices/import', {
+    method: 'POST',
+    body: {
+      server: 'T1', city: '桂阳',
+      rows: [{ commodity: '谷物', buy: 'abc', sell: 1 }],
+    },
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.message, /买价/);
+
+  const okRes = await api('/api/prices/import', {
+    method: 'POST',
+    body: {
+      server: 'T1', city: '桂阳', operator: '表格导入',
+      rows: [
+        { commodity: '香料', buy: 7, sell: 11 },
+        { commodity: '谷物', buy: '', sell: 20 },
+        { commodity: '', buy: 1, sell: 2 },
+      ],
+      createCommodities: false,
+    },
+  });
+  assert.equal(okRes.status, 200);
+  // 香料已有价 → 更新；谷物在前序用例中被清空删除 → 重新创建
+  assert.equal(okRes.json.data.updated, 1);
+  assert.equal(okRes.json.data.created, 1);
+
+  const query = await api('/api/prices?server=T1&city=桂阳&commodity=谷物');
+  const gu = query.json.data.items[0];
+  assert.equal(gu.buy, null, '空买价应清空原买价');
+  assert.equal(gu.sell, 20);
+  assert.equal(gu.operator, '表格导入');
+});
+
 /* ------------------------------ 健康检查 ------------------------------ */
 
 test('健康检查可用', async () => {

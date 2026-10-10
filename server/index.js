@@ -20,6 +20,10 @@ app.use('/vendor/element-plus', (req, res, next) => {
   res.setHeader('Cache-Control', 'public, max-age=604800');
   next();
 }, express.static(nodePath.join(__dirname, '..', 'node_modules', 'element-plus', 'dist')));
+app.use('/vendor/xlsx', (req, res, next) => {
+  res.setHeader('Cache-Control', 'public, max-age=604800');
+  next();
+}, express.static(nodePath.join(__dirname, '..', 'node_modules', 'xlsx', 'dist')));
 app.use(express.static(nodePath.join(__dirname, '..', 'public')));
 app.use('/public', express.static(nodePath.join(__dirname, '..', 'public')));
 

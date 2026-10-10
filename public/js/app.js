@@ -585,23 +585,88 @@ createApp({
       }
     })
 
-    /* ---------- 批量导入 ---------- */
+    /* ---------- 批量导入（Excel） ---------- */
     const importVisible = ref(false)
-    const importText = ref('')
+    const importFileName = ref('')
+    const importPreview = ref([]) // [{ commodity, buy, sell, burden }]
     const importAutoCreate = ref(true)
     const importing = ref(false)
+    const importFileEl = ref(null)
 
     const openImport = () => {
       if (!form.server.trim() || !form.city) {
         ElMessage.warning('请先选择区服与城池，再执行批量导入')
         return
       }
-      importText.value = ''
+      clearImportFile()
       importVisible.value = true
     }
 
+    const clearImportFile = () => {
+      importFileName.value = ''
+      importPreview.value = []
+      if (importFileEl.value) importFileEl.value.value = ''
+    }
+
+    const downloadImportTemplate = () => {
+      const rows = [
+        ['商品', '买价', '卖价', '负重'],
+        ['毛皮', 10.5, 15, 18],
+        ['谷物', '', 12, 10],
+        ['兵器', 45, 60, ''],
+      ]
+      const ws = window.XLSX.utils.aoa_to_sheet(rows)
+      ws['!cols'] = [{ wch: 14 }, { wch: 10 }, { wch: 10 }, { wch: 10 }]
+      const wb = window.XLSX.utils.book_new()
+      window.XLSX.utils.book_append_sheet(wb, ws, '价格导入')
+      window.XLSX.writeFile(wb, '价格导入模板.xlsx')
+    }
+
+    const cellStr = v => {
+      if (v == null) return ''
+      return String(v).trim()
+    }
+
+    const onImportFile = async ev => {
+      const file = ev.target.files && ev.target.files[0]
+      if (!file) return
+      try {
+        const buf = await file.arrayBuffer()
+        const wb = window.XLSX.read(buf, { type: 'array' })
+        const sheet = wb.Sheets[wb.SheetNames[0]]
+        if (!sheet) throw new Error('Excel 中没有工作表')
+        const aoa = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
+        // 跳过表头：首行第一格含「商品」则视为表头
+        const start = (aoa.length && cellStr(aoa[0][0]).includes('商品')) ? 1 : 0
+        const preview = []
+        for (let i = start; i < aoa.length; i++) {
+          const r = aoa[i] || []
+          const commodity = cellStr(r[0])
+          if (!commodity) continue
+          const buy = r[1] == null || cellStr(r[1]) === '' ? null : Number(cellStr(r[1]).replace(/[^\d.-]/g, ''))
+          const sell = r[2] == null || cellStr(r[2]) === '' ? null : Number(cellStr(r[2]).replace(/[^\d.-]/g, ''))
+          const burdenRaw = r[3] == null ? '' : cellStr(r[3])
+          const burden = burdenRaw === '' ? null : Number(burdenRaw.replace(/[^\d.]/g, ''))
+          if (buy != null && !Number.isFinite(buy)) { ElMessage.warning(`第 ${i + 1} 行买价不是数字，已按空处理`); }
+          if (sell != null && !Number.isFinite(sell)) { ElMessage.warning(`第 ${i + 1} 行卖价不是数字，已按空处理`); }
+          preview.push({
+            commodity,
+            buy: buy != null && Number.isFinite(buy) && buy >= 0 ? buy : null,
+            sell: sell != null && Number.isFinite(sell) && sell >= 0 ? sell : null,
+            burden: burden != null && Number.isFinite(burden) && burden > 0 ? burden : null,
+          })
+        }
+        if (!preview.length) { ElMessage.warning('未解析到有效数据行，请确认模板格式'); clearImportFile(); return }
+        importFileName.value = file.name
+        importPreview.value = preview
+      } catch (e) {
+        ElMessage.error('Excel 解析失败：' + e.message)
+        clearImportFile()
+      }
+    }
+
     const submitImport = async () => {
-      if (!importText.value.trim()) { ElMessage.warning('请先粘贴要导入的数据'); return }
+      if (!importPreview.value.length) { ElMessage.warning('请先选择要导入的 Excel 文件'); return }
       importing.value = true
       try {
         const res = await api('/api/prices/import', {
@@ -610,7 +675,7 @@ createApp({
             server: form.server.trim(),
             city: form.city,
             operator: nickname.value,
-            text: importText.value,
+            rows: importPreview.value,
             createCommodities: importAutoCreate.value,
           },
         })
@@ -730,7 +795,8 @@ createApp({
       matrixVisible, matrixCommodity, matrixLoading, matrixData, openMatrix, loadMatrix,
       matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute,
       // 导入导出
-      importVisible, importText, importAutoCreate, importing, openImport, submitImport,
+      importVisible, importFileName, importPreview, importAutoCreate, importing,
+      importFileEl, openImport, clearImportFile, onImportFile, downloadImportTemplate, submitImport,
       exportCsv,
     }
   },

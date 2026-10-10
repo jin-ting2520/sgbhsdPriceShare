@@ -262,7 +262,7 @@
         </div>
         <div class="help-item">
           <h4>批量导入</h4>
-          <p>「导入」支持粘贴“商品 买价 卖价 负重”多行数据（制表符/逗号/空格分隔），未知商品可自动创建。</p>
+          <p>「导入」支持 Excel（.xlsx）：先「下载模板」，按「商品 | 买价 | 卖价 | 负重」填写后上传，预览确认再导入；未知商品可自动创建。</p>
         </div>
         <div class="help-item">
           <h4>日志 / 趋势 / 比价</h4>
@@ -580,17 +580,47 @@
   </el-dialog>
 
   <!-- ================= 批量导入弹窗 ================= -->
-  <el-dialog v-model="importVisible" title="批量导入价格" width="680px" :fullscreen="isMobile" top="8vh">
+  <el-dialog v-model="importVisible" title="Excel 批量导入价格" width="720px" :fullscreen="isMobile" top="6vh">
     <div class="confirm-summary">
-      粘贴多行数据到下方（每行：<b>商品 + 买价 + 卖价 + [负重]</b>，制表符 / 逗号 / 空格分隔），导入到
-      <b>{{ form.server || '未选择区服' }}</b> · <b>{{ form.city || '未选择城池' }}</b>。
+      导入到 <b>{{ form.server || '未选择区服' }}</b> · <b>{{ form.city || '未选择城池' }}</b>。
+      列顺序：<b>商品 | 买价 | 卖价 | 负重（可选）</b>；首行表头可有可无；买价/卖价可留空（留空且原价存在时清空该价）。
     </div>
-<el-input v-model="importText" type="textarea" :rows="7"
-      placeholder="每行：商品 买价 卖价 [负重]，如：毛皮 10.5 15 18（制表符 / 逗号 / 空格分隔）"></el-input>
+    <div style="display:flex;gap:10px;align-items:center;margin:12px 0;flex-wrap:wrap">
+      <el-button size="small" @click="downloadImportTemplate">
+        下载 Excel 模板
+      </el-button>
+      <input type="file" ref="importFileEl" accept=".xlsx,.xls" style="display:none" @change="onImportFile">
+      <el-button size="small" type="primary" plain @click="importFileEl && importFileEl.click()">
+        选择 Excel 文件
+      </el-button>
+      <span style="font-size:12.5px;color:var(--ink-2)">
+        {{ importFileName || '尚未选择文件' }}
+        <template v-if="importPreview.length">，共 {{ importPreview.length }} 行有效数据</template>
+      </span>
+      <el-button v-if="importFileName" size="small" text type="danger" @click="clearImportFile">清除</el-button>
+    </div>
+    <div v-if="importPreview.length" class="confirm-list" style="max-height:30vh;overflow:auto;border:1px solid var(--line);border-radius:8px">
+      <el-table :data="importPreview" size="small" max-height="30vh">
+        <el-table-column type="index" label="#" width="50" align="center"></el-table-column>
+        <el-table-column label="商品" prop="commodity" min-width="100"></el-table-column>
+        <el-table-column label="买价" width="90" align="right">
+          <template #default="s">{{ s.row.buy ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column label="卖价" width="90" align="right">
+          <template #default="s">{{ s.row.sell ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column label="负重" width="80" align="right">
+          <template #default="s">{{ s.row.burden ?? '-' }}</template>
+        </el-table-column>
+      </el-table>
+    </div>
+    <div v-else style="border:1px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--ink-2);font-size:13px;margin:10px 0">
+      请先下载模板并按格式填写，然后点击「选择 Excel 文件」上传
+    </div>
     <div style="display:flex;align-items:center;gap:16px;margin-top:10px">
-<el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品"></el-switch>
+      <el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品"></el-switch>
       <div style="flex:1"></div>
-      <el-button type="primary" :loading="importing" @click="submitImport">开始导入</el-button>
+      <el-button type="primary" :loading="importing" :disabled="!importPreview.length" @click="submitImport">开始导入</el-button>
     </div>
     <template #footer>
       <el-button @click="importVisible = false">关 闭</el-button>
@@ -600,6 +630,7 @@
   </template>
 </div>
 
+<script src="/vendor/xlsx/xlsx.full.min.js"></script>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>

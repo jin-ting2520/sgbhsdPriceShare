@@ -359,16 +359,17 @@ router.get('/export', asyncHandler((req, res) => {
   return res.send(csv);
 }));
 
-/** POST /api/prices/import —— 批量粘贴导入（商品\t买价\t卖价[负重]） */
+/** POST /api/prices/import —— 批量导入（rows 结构化数组，或 text 粘贴文本兼容旧客户端） */
 router.post('/import', asyncHandler((req, res) => {
   const server = cleanName(req.body.server, 50);
   const city = cleanName(req.body.city, 20);
   const createMissing = req.body.createCommodities !== false;
   const text = typeof req.body.text === 'string' ? req.body.text : '';
+  const rowsIn = Array.isArray(req.body.rows) ? req.body.rows : null;
 
   if (isBlank(server)) return fail(res, 400, '请先输入区服');
   if (isBlank(city)) return fail(res, 400, '请先选择城池');
-  if (text.trim() === '') return fail(res, 400, '请粘贴要导入的数据');
+  if (!rowsIn && text.trim() === '') return fail(res, 400, '请提供要导入的数据');
 
   const serverId = upsertServer(server);
   const cityId = findDictId('city', city);
@@ -377,27 +378,44 @@ router.post('/import', asyncHandler((req, res) => {
 
   const errors = [];
   const parsed = [];
-  text.split(/\r?\n/).forEach((line, idx) => {
-    const raw = line.trim();
-    if (!raw || raw.startsWith('#')) return;
-    // 兼容 制表符 / 逗号(中英文) / 分号 / 空格 分隔
-    const cols = raw.split(/[\t,，;；]|\s+/).map(s => s.trim()).filter(s => s !== '');
-    if (cols.length < 2) {
-      errors.push(`第 ${idx + 1} 行：「${raw}」格式应为 商品 + 买价 + 卖价`);
-      return;
-    }
-    const [commodity, buy, sell, burden] = [cleanName(cols[0], 20), cols[1], cols[2], cols[3]];
-    const pb = parsePrice(buy);
-    const ps = parsePrice(sell);
-    if (!pb.ok || !ps.ok) {
-      errors.push(`第 ${idx + 1} 行：「${commodity}」${!pb.ok ? '买价' : '卖价'}${(!pb.ok ? pb.error : ps.error).replace(/^价格/, '')}`);
-      return;
-    }
-    if (pb.value == null && ps.value == null) return;
-    parsed.push({ commodity, buy: pb.value, sell: ps.value, burden });
-  });
 
-  if (errors.length) return fail(res, 400, `导入失败：${errors.slice(0, 3).join('；')}${errors.length > 3 ? ' 等' : ''}`);
+  if (rowsIn) {
+    // Excel 解析后的结构化行：{ commodity, buy, sell, burden }
+    rowsIn.forEach((raw, idx) => {
+      const commodity = cleanName(raw && raw.commodity, 20);
+      if (isBlank(commodity)) return; // 空行/空商品名直接跳过
+      const pb = parsePrice(raw.buy);
+      const ps = parsePrice(raw.sell);
+      if (!pb.ok || !ps.ok) {
+        errors.push(`第 ${idx + 1} 行：「${commodity}」${!pb.ok ? '买价' : '卖价'}${(!pb.ok ? pb.error : ps.error).replace(/^价格/, '')}`);
+        return;
+      }
+      if (pb.value == null && ps.value == null) return;
+      parsed.push({ commodity, buy: pb.value, sell: ps.value, burden: raw.burden });
+    });
+  } else {
+    text.split(/\r?\n/).forEach((line, idx) => {
+      const raw = line.trim();
+      if (!raw || raw.startsWith('#')) return;
+      // 兼容 制表符 / 逗号(中英文) / 分号 / 空格 分隔
+      const cols = raw.split(/[\t,，;；]|\s+/).map(s => s.trim()).filter(s => s !== '');
+      if (cols.length < 2) {
+        errors.push(`第 ${idx + 1} 行：「${raw}」格式应为 商品 + 买价 + 卖价`);
+        return;
+      }
+      const [commodity, buy, sell, burden] = [cleanName(cols[0], 20), cols[1], cols[2], cols[3]];
+      const pb = parsePrice(buy);
+      const ps = parsePrice(sell);
+      if (!pb.ok || !ps.ok) {
+        errors.push(`第 ${idx + 1} 行：「${commodity}」${!pb.ok ? '买价' : '卖价'}${(!pb.ok ? pb.error : ps.error).replace(/^价格/, '')}`);
+        return;
+      }
+      if (pb.value == null && ps.value == null) return;
+      parsed.push({ commodity, buy: pb.value, sell: ps.value, burden });
+    });
+  }
+
+  if (errors.length) return fail(res, 400, `导入失败：${errors.slice(0, 3).join('；')}${errors.length > 3 ? ` 等（共 ${errors.length} 条错误）` : ''}`);
 
   const unknown = [...new Set(parsed.map(p => p.commodity))].filter(n => !findDictId('commodity', n));
   if (unknown.length && !createMissing) {
