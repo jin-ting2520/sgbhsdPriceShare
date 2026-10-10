@@ -174,8 +174,9 @@ createApp({
         const res = await api(`/api/prices?${q.toString()}`)
         rows.value = res.items.map(r => ({
           ...r,
-          buy: fmt(r.buy),
-          sell: fmt(r.sell),
+          // 输入框用空串表示无值；fmt 的 '-' 仅用于展示，不能写回可编辑字段
+          buy: r.buy == null ? '' : String(r.buy),
+          sell: r.sell == null ? '' : String(r.sell),
           _base: { buy: r.buy, sell: r.sell }, // 保存前的数据库原值，用于脏值比对
         }))
         queried.value = true
@@ -274,7 +275,8 @@ createApp({
     const confirmSave = async () => {
       saving.value = true
       try {
-        const items = changedRows.value.map(r => ({ commodity: r.commodity, buy: r.buy, sell: r.sell }))
+        const clean = v => (v == null || v === '' || v === '-' ? '' : v)
+        const items = changedRows.value.map(r => ({ commodity: r.commodity, buy: clean(r.buy), sell: clean(r.sell) }))
         const res = await api('/api/prices', {
           method: 'POST',
           body: { server: form.server.trim(), city: form.city, operator: nickname.value, items },
