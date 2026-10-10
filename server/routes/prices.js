@@ -3,7 +3,7 @@
 /** 价格：查询 / 保存 / 历史 / 趋势 / 比价 / 导出 / 导入 */
 
 const express = require('express');
-const { db, upsertServer, findServerId, findDictId, createDictItem, calcProfit } = require('../db');
+const { db, upsertServer, findServerId, findDictId, createDictItem } = require('../db');
 const {
   ok, fail, asyncHandler, cleanName, isBlank, parsePrice,
   isUniqueConstraintError,
@@ -66,7 +66,6 @@ router.get('/', asyncHandler((req, res) => {
       burden: c.burden,
       buy,
       sell,
-      profit: calcProfit(buy, sell, c.burden),
       updatedAt: p ? p.updatedAt : null,
       operator: p ? p.operator : null,
     };
@@ -283,8 +282,6 @@ router.get('/matrix', asyncHandler((req, res) => {
     city: r.city,
     buy: r.buy,
     sell: r.sell,
-    burden: commodityRow.burden,
-    profit: calcProfit(r.buy, r.sell, commodityRow.burden),
     updatedAt: r.updatedAt,
     operator: r.operator,
   }));
@@ -338,16 +335,15 @@ router.get('/export', asyncHandler((req, res) => {
       burden: c.burden,
       buy,
       sell,
-      profit: calcProfit(buy, sell, c.burden),
       updatedAt: hit ? hit.updatedAt : null,
       operator: hit ? hit.operator : null,
     };
   });
 
-  const lines = ['区服,城池,商品,负重,买价,卖价,利润,更新时间,更新人'];
+  const lines = ['区服,城池,商品,负重,买价,卖价,更新时间,更新人'];
   for (const r of full) {
     lines.push([
-      server, city, r.commodity, r.burden ?? '', r.buy ?? '', r.sell ?? '', r.profit ?? '',
+      server, city, r.commodity, r.burden ?? '', r.buy ?? '', r.sell ?? '',
       r.updatedAt ?? '', r.operator ?? '',
     ].map(csvCell).join(','));
   }

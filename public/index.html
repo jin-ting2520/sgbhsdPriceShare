@@ -110,7 +110,7 @@
         </div>
         <p style="margin:10px 0 0;font-size:12px;color:var(--ink-2);line-height:1.7">
           提示：城池 / 商品数据来自字典表，输入新名称后按 <b>Enter</b> 或点「保存」即可写入字典；
-          利润 =（卖价 - 买价）÷ 负重，负重可在「字典」中维护。
+          利润在「比价」中按「卖出城卖价 − 买入城买价」跨城计算，负重可在「字典」中维护。
         </p>
       </el-form>
     </el-card>
@@ -136,8 +136,7 @@
       <div class="statusbar" style="margin-bottom:12px">
         <span>商品 <b>{{ rows.length }}</b> 项</span>
         <span>已填写 <b class="ok">{{ stats.filled }}</b> 项</span>
-          <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
-          <span v-if="stats.badCount" class="danger">买价高于卖价 {{ stats.badCount }} 项，请检查</span>
+        <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
         <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
       </div>
 
@@ -158,7 +157,6 @@
                 <span class="burden-tag" v-if="scope.row.burden != null">负重{{ scope.row.burden }}</span>
                 <span v-if="isDirty(scope.row)" class="dirty-dot">*</span>
               </span>
-              <span class="spread-warn" v-if="spreadWarn(scope.row)" title="买价高于卖价，请确认是否录入有误">买≥卖</span>
             </div>
           </template>
         </el-table-column>
@@ -180,11 +178,6 @@
             @input="onPriceInput(scope.row, 'sell', $event)"
             @blur="onPriceBlur(scope.row, 'sell')"></el-input>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="利润" width="90" align="right">
-          <template #default="scope">
-            <span :class="profitClass(scope.row)">{{ profitText(scope.row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="更新时间" width="150" align="center">
@@ -214,7 +207,6 @@
               <span class="burden-tag" v-if="row.burden != null">负重{{ row.burden }}</span>
               <span v-if="isDirty(row)" class="dirty-dot">*</span>
             </span>
-            <span class="spread-warn" v-if="spreadWarn(row)" title="买价高于卖价">买≥卖</span>
             <span class="time" v-if="row.updatedAt && queried">{{ row.updatedAt.slice(5, 16) }}</span>
             <span class="time" v-else-if="!queried">-</span>
           </div>
@@ -235,7 +227,6 @@
             <div><div class="field-label">卖价</div><div style="padding:6px 2px;color:var(--ink-2)">-</div></div>
           </div>
           <div class="m-row__meta" v-if="queried">
-            <span>利润 <b :class="profitClass(row)">{{ profitText(row) }}</b></span>
             <span v-if="row.operator">更新人 {{ row.operator }}</span>
             <span v-else>未录入</span>
           </div>
@@ -255,8 +246,8 @@
         <li><b>选择区服</b>：输入纯数字区服编号（如 1344），支持历史联想。</li>
         <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称按 <b>Enter</b> 即可写入字典表。</li>
         <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；下拉项显示每个商品的负重。</li>
-        <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/利润/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>
-        <li><b>填写价格</b>：直接在买价/卖价输入框录入；利润（卖价-买价）÷负重自动计算；支持「同上一行」。</li>
+        <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>
+        <li><b>填写价格</b>：直接在买价/卖价输入框录入；支持「同上一行」。</li>
         <li><b>点击保存</b>：右上角「保存」→ 弹窗确认变更明细 → 确认后写入数据库，记录更新时间与更新人。</li>
         <li><b>字典管理</b>：「字典」可新增/改名/维护负重/启停/删除城池与商品；被价格引用的项不可删除。</li>
       </ol>
@@ -283,7 +274,7 @@
         </div>
         <div class="help-item">
           <h4>负重与利润</h4>
-          <p>每个商品有负重（如谷物10、兵器52），利润 =（卖价 - 买价）÷ 负重；负重可在字典中修改，导入时也可带负重。</p>
+          <p>每个商品有负重（如谷物10、兵器52）；利润按跨城计算：「比价」中选卖出城后，利润 = 卖出城卖价 − 本城买价，自动推荐最优买卖路线。</p>
         </div>
       </div>
     </el-card>
@@ -320,9 +311,6 @@
               {{ s.row._baseSell || '-' }} → {{ s.row.sell || '-' }}
             </span>
           </template>
-        </el-table-column>
-        <el-table-column label="利润" width="70" align="right">
-          <template #default="s">{{ profitText(s.row) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="70" align="center">
           <template #default="s">
@@ -534,6 +522,10 @@
         @change="loadMatrix">
 <el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name"></el-option>
       </el-select>
+      <el-select v-model="matrixSellCity" clearable placeholder="卖出城（默认最高卖价城）" style="width:230px">
+        <el-option label="自动（最高卖价城）" value=""></el-option>
+        <el-option v-for="it in matrixData.items" :key="it.city" :label="it.city" :value="it.city"></el-option>
+      </el-select>
       <el-button :loading="matrixLoading" @click="loadMatrix">刷新</el-button>
     </div>
 
@@ -541,17 +533,21 @@
     <template v-else>
       <div class="confirm-summary">
         {{ matrixData.server }} · <b>{{ matrixData.commodity }}</b>
-        <span v-if="matrixData.burden != null">（负重 {{ matrixData.burden }}，利润 =（卖价-买价）÷ 负重）</span>
+        <span v-if="matrixData.burden != null">（负重 {{ matrixData.burden }}）</span>
+        <span v-if="matrixSellTarget">，卖出城：<b>{{ matrixSellTarget.city }}</b>（卖价 {{ matrixSellTarget.sell }}）</span>
       </div>
-      <div class="statusbar" style="margin-bottom:12px" v-if="matrixData.summary">
+      <div class="confirm-summary" v-if="matrixBestRoute" style="margin-top:6px">
+        推荐路线：从 <b class="ok">{{ matrixBestRoute.buyCity }}</b> 买入（买价 {{ matrixBestRoute.buyPrice }}）
+        → 运到 <b class="ok">{{ matrixBestRoute.sellCity }}</b> 卖出（卖价 {{ matrixBestRoute.sellPrice }}），
+        差价 <b :class="profitClass(matrixBestRoute.profit)">{{ profitText(matrixBestRoute.profit) }}</b>
+      </div>
+      <div class="statusbar" style="margin:12px 0" v-if="matrixData.summary">
         <span>有价城池 <b>{{ matrixData.summary.pricedCount }}/{{ matrixData.summary.cityCount }}</b></span>
         <span>最低买价 <b class="ok">{{ matrixData.summary.minBuy ?? '-' }}</b></span>
         <span>最高卖价 <b class="ok">{{ matrixData.summary.maxSell ?? '-' }}</b></span>
-        <span v-if="matrixData.summary.bestBuyCity">最便宜买入：<b class="ok">{{ matrixData.summary.bestBuyCity }}</b></span>
-        <span v-if="matrixData.summary.bestSellCity">最高价卖出：<b class="ok">{{ matrixData.summary.bestSellCity }}</b></span>
         <span>买价差 <b>{{ matrixData.summary.buySpread ?? '-' }}</b></span>
       </div>
-      <el-table :data="matrixData.items" size="small" max-height="46vh" border stripe
+      <el-table :data="matrixRows" size="small" max-height="46vh" border stripe
         :default-sort="{ prop: 'buy', order: 'ascending' }">
 <el-table-column label="城池" prop="city" min-width="90" fixed></el-table-column>
         <el-table-column label="买价" prop="buy" width="90" align="right" sortable>
@@ -563,13 +559,16 @@
         </el-table-column>
         <el-table-column label="卖价" prop="sell" width="90" align="right" sortable>
           <template #default="s">
-            <b :class="s.row.sell != null && s.row.sell === matrixData.summary.maxSell ? 'best-cell' : ''">
+            <b :class="matrixSellTarget && s.row.city === matrixSellTarget.city && s.row.sell != null ? 'best-cell' : ''">
               {{ s.row.sell ?? '-' }}
             </b>
           </template>
         </el-table-column>
-        <el-table-column label="利润" width="80" align="right">
-          <template #default="s">{{ s.row.profit ?? '-' }}</template>
+        <el-table-column label="利润" prop="profit" width="110" align="right" sortable
+          :sort-method="(a, b) => (a.profit ?? Infinity) - (b.profit ?? Infinity)">
+          <template #default="s">
+            <b :class="profitClass(s.row.profit)">{{ profitText(s.row.profit) }}</b>
+          </template>
         </el-table-column>
 <el-table-column label="更新时间" prop="updatedAt" width="150" align="center"></el-table-column>
 <el-table-column label="更新人" prop="operator" width="90" align="center"></el-table-column>

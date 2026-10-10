@@ -83,14 +83,14 @@ test('查询：初始无数据显示全部商品且价格为空', async () => {
   assert.equal(first.burden, 10); // 谷物负重
 });
 
-test('保存：写入价格并带出负重/利润/更新时间/更新人（昵称）', async () => {
+test('保存：写入价格并带出负重/更新时间/更新人（昵称）', async () => {
   const save = await api('/api/prices', {
     method: 'POST',
     body: {
       server: 'T1', city: '桂阳', operator: '小关关',
       items: [
-        { commodity: '谷物', buy: 20, sell: 30 },  // 负重 10 → 利润 1
-        { commodity: '兵器', buy: 100, sell: 160 }, // 负重 52 → 利润 1.15
+        { commodity: '谷物', buy: 20, sell: 30 },
+        { commodity: '兵器', buy: 100, sell: 160 },
       ],
     },
   });
@@ -102,12 +102,9 @@ test('保存：写入价格并带出负重/利润/更新时间/更新人（昵�
   assert.equal(gu.buy, 20);
   assert.equal(gu.sell, 30);
   assert.equal(gu.burden, 10);
-  assert.equal(gu.profit, 1);
+  assert.equal(gu.profit, undefined, '同城视角不再返回利润字段');
   assert.ok(gu.updatedAt, '应有更新时间');
   assert.equal(gu.operator, '小关关', '更新人应为保存时提交的昵称');
-
-  const bingqi = query.json.data.items.find(i => i.commodity === '兵器');
-  assert.equal(bingqi.profit, Math.round(((160 - 100) / 52) * 100) / 100);
 });
 
 test('保存：覆盖更新并记录新的更新人昵称', async () => {
@@ -122,7 +119,8 @@ test('保存：覆盖更新并记录新的更新人昵称', async () => {
 
   const query = await api('/api/prices?server=T1&city=桂阳');
   const gu = query.json.data.items.find(i => i.commodity === '谷物');
-  assert.equal(gu.profit, Math.round(((31 - 25) / 10) * 100) / 100);
+  assert.equal(gu.buy, 25);
+  assert.equal(gu.sell, 31);
   assert.equal(gu.operator, '阿兵', '覆盖保存后更新人应随之更新');
 });
 
@@ -208,13 +206,13 @@ test('比价：跨城池价格矩阵含最低买入城', async () => {
 
 /* ------------------------------ 导入导出 ------------------------------ */
 
-test('导出：CSV 含负重/利润/更新时间/更新人表头与 BOM', async () => {
+test('导出：CSV 含负重/更新时间/更新人表头与 BOM', async () => {
   const res = await fetch(`${base}/api/prices/export?server=T1&city=桂阳`);
   const buf = Buffer.from(await res.arrayBuffer());
   assert.equal(buf[0], 0xef, 'CSV 应带 UTF-8 BOM');
   const text = buf.toString('utf8');
   const header = text.split('\r\n')[0].replace('\uFEFF', '');
-  assert.equal(header, '区服,城池,商品,负重,买价,卖价,利润,更新时间,更新人');
+  assert.equal(header, '区服,城池,商品,负重,买价,卖价,更新时间,更新人');
 });
 
 test('导入：粘贴多行数据并自动创建新商品（可带负重，记录操作人）', async () => {

@@ -32,15 +32,6 @@ const numOrNull = v => {
 
 const fmt = n => (n == null ? '-' : String(n))
 
-/** 单行利润 =（卖价 - 买价）/ 负重 */
-const calcRowProfit = row => {
-  const b = numOrNull(row.buy)
-  const s = numOrNull(row.sell)
-  const bd = numOrNull(row.burden)
-  if (b == null || s == null || bd == null || !(bd > 0)) return null
-  return Math.round(((s - b) / bd) * 100) / 100
-}
-
 /* ------------------------------ 应用 ------------------------------ */
 
 createApp({
@@ -233,17 +224,9 @@ createApp({
 
     const clearRow = row => { row.buy = ''; row.sell = '' }
 
-    /* ---------- 利润展示 ---------- */
-    const profitText = row => {
-      const p = calcRowProfit(row)
-      if (p == null) return '-'
-      return (p > 0 ? '+' : '') + p.toFixed(2)
-    }
-    const profitClass = row => {
-      const p = calcRowProfit(row)
-      if (p == null) return ''
-      return p > 0 ? 'profit-pos' : p < 0 ? 'profit-neg' : ''
-    }
+    /* ---------- 跨城利润展示（比价弹窗：卖出城卖价 - 本城买价） ---------- */
+    const profitText = v => (v == null ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(2))
+    const profitClass = v => (v == null ? '' : v > 0 ? 'profit-pos' : v < 0 ? 'profit-neg' : '')
 
     /* ---------- 脏值与统计 ---------- */
     const hasBaseValue = row => row._base && (row._base.buy != null || row._base.sell != null)
@@ -256,13 +239,6 @@ createApp({
     /** 表格行样式：有未保存修改时整行高亮 */
     const rowClass = row => (queried.value && isDirty(row.row) ? 'row-dirty' : '')
 
-    /** 买价 ≥ 卖价 的疑似录入错误提示 */
-    const spreadWarn = row => {
-      const b = numOrNull(row.buy)
-      const s = numOrNull(row.sell)
-      return b != null && s != null && b > s
-    }
-
     const changedRows = computed(() => rows.value
       .filter(r => queried.value && isDirty(r))
       .map(r => ({ ...r, _baseBuy: fmt(r._base && r._base.buy), _baseSell: fmt(r._base && r._base.sell) })))
@@ -271,14 +247,11 @@ createApp({
     const canSave = computed(() => queried.value && changedCount.value > 0)
 
     const stats = computed(() => {
-      let filled = 0, bad = 0
+      let filled = 0
       for (const r of rows.value) {
-        const b = numOrNull(r.buy)
-        const s = numOrNull(r.sell)
-        if (b != null || s != null) filled++
-        if (b != null && s != null && b > s) bad++
+        if (numOrNull(r.buy) != null || numOrNull(r.sell) != null) filled++
       }
-      return { filled, badCount: bad }
+      return { filled }
     })
 
     /* ---------- 保存 ---------- */
@@ -550,11 +523,12 @@ createApp({
       if (queried.value && trendCommodity.value) loadTrend()
     }
 
-    /* ---------- 跨城池比价 ---------- */
+    /* ---------- 跨城池比价（利润 = 卖出城卖价 - 本城买价） ---------- */
     const matrixVisible = ref(false)
     const matrixCommodity = ref('')
     const matrixLoading = ref(false)
     const matrixData = ref({ items: null, summary: null, commodity: '', burden: null, server: '' })
+    const matrixSellCity = ref('') // 空 = 自动取最高卖价城
 
     const loadMatrix = async () => {
       if (!matrixCommodity.value) { ElMessage.warning('请选择商品'); return }
@@ -562,6 +536,7 @@ createApp({
       try {
         const q = new URLSearchParams({ server: form.server.trim(), commodity: matrixCommodity.value })
         matrixData.value = await api(`/api/prices/matrix?${q.toString()}`)
+        matrixSellCity.value = ''
       } catch (e) { ElMessage.error(e.message) } finally { matrixLoading.value = false }
     }
 
@@ -570,6 +545,40 @@ createApp({
       if (!matrixCommodity.value) matrixCommodity.value = form.commodity || (commodities.value[0] && commodities.value[0].name) || ''
       if (matrixCommodity.value) loadMatrix()
     }
+
+    /** 目标卖出城：手动指定，或自动取卖价最高的城 */
+    const matrixSellTarget = computed(() => {
+      const items = matrixData.value.items || []
+      if (matrixSellCity.value) {
+        const it = items.find(i => i.city === matrixSellCity.value)
+        return it && it.sell != null ? it : null
+      }
+      let best = null
+      for (const i of items) if (i.sell != null && (best == null || i.sell > best.sell)) best = i
+      return best
+    })
+
+    /** 每行附加跨城利润 = 目标卖出城卖价 − 本城买价 */
+    const matrixRows = computed(() => {
+      const t = matrixSellTarget.value
+      return (matrixData.value.items || []).map(i => ({
+        ...i,
+        profit: (t && i.buy != null) ? Math.round((t.sell - i.buy) * 100) / 100 : null,
+      }))
+    })
+
+    /** 推荐路线：最便宜买入城 → 目标卖出城 */
+    const matrixBestRoute = computed(() => {
+      let buyCity = null
+      for (const i of matrixRows.value) if (i.buy != null && (buyCity == null || i.buy < buyCity.buy)) buyCity = i
+      const sell = matrixSellTarget.value
+      if (!buyCity || !sell || buyCity.city === sell.city) return null
+      return {
+        buyCity: buyCity.city, buyPrice: buyCity.buy,
+        sellCity: sell.city, sellPrice: sell.sell,
+        profit: Math.round((sell.sell - buyCity.buy) * 100) / 100,
+      }
+    })
 
     /* ---------- 批量导入 ---------- */
     const importVisible = ref(false)
@@ -701,7 +710,7 @@ createApp({
       searchServers, onQuery, onReset, doFetch,
       // 编辑
       onPriceInput, onPriceBlur, copyPrev, clearRow, isDirty, stats,
-      rowClass, spreadWarn, profitText, profitClass,
+      rowClass, profitText, profitClass,
       changedCount, changedRows, canSave,
       // 保存
       saveVisible, onSave, confirmSave, saving, rowOpType, rowOpText,
@@ -714,6 +723,7 @@ createApp({
       trendVisible, trendCommodity, trendDays, trendLoading, trendData, trendPoints,
       trendChart, openTrend, loadTrend,
       matrixVisible, matrixCommodity, matrixLoading, matrixData, openMatrix, loadMatrix,
+      matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute,
       // 导入导出
       importVisible, importText, importAutoCreate, importing, openImport, submitImport,
       exportCsv,

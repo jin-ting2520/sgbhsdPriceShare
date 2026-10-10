@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS dict_items (
   type       TEXT    NOT NULL CHECK (type IN ('city', 'commodity')),
   name       TEXT    NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
-  burden     REAL,                                    -- 负重（商品）：利润 = (卖价-买价)/负重
+  burden     REAL,                                    -- 负重（商品固有属性，跨城比价时参考）
   status     INTEGER NOT NULL DEFAULT 1,          -- 1 启用 / 0 停用
   created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
@@ -106,7 +106,7 @@ const CITY_LIST = [
   '广汉', '朐县', '西城', '房陵',
 ];
 
-/** 内置商品及负重（负重用于计算利润：卖价-买价 后按负重折算） */
+/** 内置商品及负重（负重为商品固有属性，比价时参考） */
 const COMMODITY_SEED = [
   { name: '谷物', burden: 10 }, { name: '黏土', burden: 15 }, { name: '葡萄', burden: 10 },
   { name: '铁矿石', burden: 34 }, { name: '铜矿石', burden: 35 }, { name: '硬木', burden: 15 },
@@ -118,13 +118,6 @@ const COMMODITY_SEED = [
   { name: '漆器', burden: 32 }, { name: '玉器', burden: 32 }, { name: '海南珍珠', burden: 12 },
   { name: '金银器', burden: 27 },
 ];
-
-/** 利润 =（卖价 - 买价）/ 负重 */
-function calcProfit(buy, sell, burden) {
-  if (buy == null || sell == null || burden == null || !(burden > 0)) return null;
-  const v = (sell - buy) / burden;
-  return Math.round(v * 100) / 100;
-}
 
 function seedIfEmpty() {
   const row = db.prepare('SELECT COUNT(*) AS n FROM dict_items').get();
@@ -225,7 +218,6 @@ module.exports = {
   findServerId,
   findDictId,
   createDictItem,
-  calcProfit,
   COMMODITY_LIST: COMMODITY_SEED.map(c => c.name),
   CITY_LIST,
 };

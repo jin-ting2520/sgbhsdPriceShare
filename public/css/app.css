@@ -67,9 +67,6 @@ body {
 /* 已修改行高亮 */
 tr.row-dirty > td { background: #fffaf3 !important; }
 
-/* 买价 ≥ 卖价 提示 */
-.spread-warn { color: var(--warn); font-size: 11px; margin-left: 6px; cursor: help; font-weight: 400; }
-
 /* ---------------- 统计条 ---------------- */
 .statusbar {
   display: flex; flex-wrap: wrap; gap: 8px 18px;
