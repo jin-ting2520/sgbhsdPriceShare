@@ -104,6 +104,22 @@ router.post('/', asyncHandler((req, res) => {
 
   const operator = operatorOf(req.body);
 
+  // 校验前置：任何 fail 都必须在事务外返回，避免泄漏未回滚事务导致后续保存报「cannot start a transaction within a transaction」
+  const ops = [];
+  for (const raw of items) {
+    const commodity = cleanName(raw && raw.commodity, 20);
+    if (isBlank(commodity)) continue;
+    const commodityId = findDictId('commodity', commodity);
+    if (!commodityId) continue;
+
+    const buy = parsePrice(raw && raw.buy);
+    const sell = parsePrice(raw && raw.sell);
+    if (!buy.ok) return fail(res, 400, `「${commodity}」买价：${buy.error}`);
+    if (!sell.ok) return fail(res, 400, `「${commodity}」卖价：${sell.error}`);
+
+    ops.push({ commodityId, buy: buy.value, sell: sell.value });
+  }
+
   const getExisting = db.prepare(
     'SELECT id, buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
   );
@@ -124,23 +140,12 @@ router.post('/', asyncHandler((req, res) => {
 
   const summary = { saved: 0, updated: 0, created: 0, cleared: 0 };
 
-  // node:sqlite 事务：失败整体回滚
   db.exec('BEGIN IMMEDIATE');
   try {
-    for (const raw of items) {
-      const commodity = cleanName(raw && raw.commodity, 20);
-      if (isBlank(commodity)) continue;
-      const commodityId = findDictId('commodity', commodity);
-      if (!commodityId) continue;
-
-      const buy = parsePrice(raw && raw.buy);
-      const sell = parsePrice(raw && raw.sell);
-      if (!buy.ok) return fail(res, 400, `「${commodity}」买价：${buy.error}`);
-      if (!sell.ok) return fail(res, 400, `「${commodity}」卖价：${sell.error}`);
-
+    for (const { commodityId, buy, sell } of ops) {
       const existing = getExisting.get(serverId, cityId, commodityId);
 
-      if (buy.value == null && sell.value == null) {
+      if (buy == null && sell == null) {
         if (existing) {
           remove.run(serverId, cityId, commodityId);
           if (existing.buy != null) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator);
@@ -150,15 +155,15 @@ router.post('/', asyncHandler((req, res) => {
         continue;
       }
 
-      upsert.run(serverId, cityId, commodityId, buy.value, sell.value, operator);
+      upsert.run(serverId, cityId, commodityId, buy, sell, operator);
       if (existing) {
         summary.updated += 1;
-        if (existing.buy !== buy.value) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, buy.value, operator);
-        if (existing.sell !== sell.value) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, sell.value, operator);
+        if (existing.buy !== buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator);
+        if (existing.sell !== sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator);
       } else {
         summary.created += 1;
-        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, buy.value, operator);
-        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, sell.value, operator);
+        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, buy, operator);
+        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, sell, operator);
       }
       summary.saved += 1;
     }

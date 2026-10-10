@@ -159,6 +159,24 @@ test('保存：未知商品返回 400', async () => {
   assert.equal(r.status, 400);
 });
 
+test('保存：非法价格 400 后事务不泄漏，后续保存仍成功', async () => {
+  const bad = await api('/api/prices', {
+    method: 'POST',
+    body: { server: 'T1', city: '桂阳', items: [{ commodity: '谷物', buy: 999999999999, sell: 1 }] },
+  });
+  assert.equal(bad.status, 400);
+
+  const good = await api('/api/prices', {
+    method: 'POST',
+    body: {
+      server: 'T1', city: '桂阳', operator: '阿兵',
+      items: [{ commodity: '谷物', buy: '', sell: '' }],
+    },
+  });
+  assert.equal(good.status, 200, '400 之后的保存不应报「cannot start a transaction within a transaction」');
+  assert.equal(good.json.data.cleared, 1, '买价卖价都为空应清空该行');
+});
+
 /* ------------------------------ 历史 / 趋势 / 比价 ------------------------------ */
 
 test('历史：记录变更前后值与操作人昵称', async () => {
