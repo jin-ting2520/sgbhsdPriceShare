@@ -61,15 +61,15 @@ docker compose up -d
 仓库配置好 GitHub Secrets（见下节）后，每次推送 `main`/`master` 或打 `v*` 标签都会自动构建并发布多架构镜像（amd64 / arm64）。
 
 ```bash
-docker pull jin-ting2520/sgbhsd-price-share:latest
+docker pull ywtm/sgbhsd-price-share:latest
 
 docker run -d \
   --name sgbhsd-price-share \
-  --restart unless-stopped \
+  --restart always \
   -p 3000:3000 \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/backup:/app/backup" \
-  jin-ting2520/sgbhsd-price-share:latest
+  ywtm/sgbhsd-price-share:latest
 ```
 
 ### 配置 GitHub Actions Secrets
