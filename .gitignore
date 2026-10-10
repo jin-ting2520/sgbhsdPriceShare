@@ -1,0 +1,19 @@
+# 依赖
+node_modules/
+
+# 数据与备份（容器内生成，勿提交）
+data/
+backup/
+*.db
+*.db-wal
+*.db-shm
+
+# 日志与系统文件
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#9e2b25">
+  <title>SGBHSD 物价共享平台</title>
+
+  <!-- Element Plus 样式（本地 node_modules，无外网依赖） -->
+  <link rel="stylesheet" href="/vendor/element-plus/index.css">
+  <link rel="stylesheet" href="/css/app.css">
+  <style>[v-cloak]{display:none}</style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "vue": "/vendor/vue/vue.esm-browser.prod.js",
+      "element-plus": "/vendor/element-plus/index.full.min.mjs",
+      "element-plus/locale/zh-cn": "/vendor/element-plus/locale/zh-cn.min.mjs"
+    }
+  }
+  </script>
+</head>
+
+<body>
+<div id="app" v-cloak>
+
+  <!-- ================= 顶栏 ================= -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">价</div>
+      <div>
+        <div class="title">SGBHSD 物价共享平台</div>
+        <div class="subtitle">城池 · 商品 买卖价格录入 / 查询 / 共享</div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="tools">
+      <el-button size="small" @click="openDict">字典</el-button>
+      <el-button size="small" @click="openHistory">日志</el-button>
+      <el-button size="small" @click="openImport">导入</el-button>
+      <el-button size="small" @click="exportCsv">导出</el-button>
+    </div>
+  </header>
+
+  <main class="container stack">
+
+    <!-- ================= 搜索区 ================= -->
+    <el-card class="search-card" shadow="never">
+      <el-form :model="form" label-position="top" @submit.prevent>
+        <el-row :gutter="14">
+          <el-col :xs="24" :sm="8">
+            <el-form-item>
+              <template #label><span class="req-star">区服</span>（必填）</template>
+              <el-autocomplete
+                v-model="form.server"
+                :fetch-suggestions="searchServers"
+                placeholder="请输入区服，如：S1 / 008服"
+                clearable
+                style="width:100%"
+                @keyup.enter="onQuery" />
+            </el-form-item>
+          </el-col>
+
+          <el-col :xs="24" :sm="8">
+            <el-form-item>
+              <template #label><span class="req-star">城池</span>（必选，可输入新名称后回车新增）</template>
+              <el-select
+                ref="citySelect"
+                v-model="form.city"
+                filterable
+                clearable
+                allow-create
+                default-first-option
+                placeholder="请选择城池"
+                style="width:100%"
+                @change="onDictChange('city', $event)">
+                <el-option v-for="c in cities" :key="c.id" :label="c.name" :value="c.name" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+
+          <el-col :xs="24" :sm="8">
+            <el-form-item>
+              <template #label>商品（可选，留空展示全部商品）</template>
+              <el-select
+                ref="commoditySelect"
+                v-model="form.commodity"
+                filterable
+                clearable
+                allow-create
+                default-first-option
+                placeholder="全部商品（可输入新名称后回车新增）"
+                style="width:100%"
+                @change="onDictChange('commodity', $event)">
+                <el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <div class="search-actions">
+          <el-button type="primary" :loading="loading" @click="onQuery">查 询</el-button>
+          <el-button @click="onReset">重 置</el-button>
+        </div>
+
+        <p style="margin:10px 0 0;font-size:12px;color:var(--ink-2);line-height:1.7">
+          提示：城池 / 商品数据来自字典表，可直接输入新名称并按 <b>Enter</b>，
+          或输入名称后直接点击「保存」即可加入字典；未提交到字典的名称无法保存价格。
+        </p>
+      </el-form>
+    </el-card>
+
+    <!-- ================= 价格表 ================= -->
+    <el-card shadow="never">
+      <template #header>
+        <div class="table-card__head">
+          <div class="scope" v-if="queried">
+            <span class="tag">{{ form.server }}</span>
+            <span class="tag">{{ form.city }}</span>
+            <span style="font-weight:600">价格表</span>
+          </div>
+          <div class="scope" v-else style="color:var(--ink-2)">价格表（选择区服与城池后可查询录入）</div>
+          <div class="spacer"></div>
+          <el-tooltip :disabled="changedCount > 0" content="暂无修改内容">
+            <el-button type="primary" :disabled="!canSave" @click="onSave">保 存</el-button>
+          </el-tooltip>
+        </div>
+      </template>
+
+      <!-- 统计条 -->
+      <div class="statusbar" style="margin-bottom:12px">
+        <span>商品 <b>{{ rows.length }}</b> 项</span>
+        <span>已填写 <b class="ok">{{ stats.filled }}</b> 项</span>
+        <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
+        <span>平均买价 <b>{{ stats.avgBuy }}</b></span>
+        <span>平均卖价 <b>{{ stats.avgSell }}</b></span>
+        <span>平均差价 <b>{{ stats.avgSpread }}</b></span>
+        <span v-if="stats.badCount" class="danger">买价高于卖价 {{ stats.badCount }} 项，请检查</span>
+        <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
+      </div>
+
+      <!-- 桌面端：表格 -->
+      <el-table class="desktop-table" :data="rows" size="default" border stripe style="width:100%"
+        :row-class-name="rowClass">
+        <el-table-column label="区服" width="110" align="center">
+          <template #default>{{ queried ? form.server : '-' }}</template>
+        </el-table-column>
+        <el-table-column label="城池" width="110" align="center">
+          <template #default>{{ queried ? form.city : '-' }}</template>
+        </el-table-column>
+        <el-table-column label="商品" min-width="170">
+          <template #default="scope">
+            <div class="commodity-cell">
+              <span class="name">{{ scope.row.commodity }}<span v-if="isDirty(scope.row)" class="dirty-dot">*</span></span>
+              <span class="time" v-if="scope.row.updatedAt">更新于 {{ scope.row.updatedAt }}</span>
+              <span class="spread-warn" v-if="spreadWarn(scope.row)" title="买价高于卖价，请确认是否录入有误">买≥卖</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="买价" width="150">
+          <template #default="scope">
+            <span v-if="!queried">-</span>
+            <div v-else class="price-input">
+              <el-input
+                v-model="scope.row.buy"
+                placeholder="-"
+                clearable
+                inputmode="decimal"
+                @input="onPriceInput(scope.row, 'buy', $event)"
+                @blur="onPriceBlur(scope.row, 'buy')" />
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="卖价" width="150">
+          <template #default="scope">
+            <span v-if="!queried">-</span>
+            <div v-else class="price-input">
+              <el-input
+                v-model="scope.row.sell"
+                placeholder="-"
+                clearable
+                inputmode="decimal"
+                @input="onPriceInput(scope.row, 'sell', $event)"
+                @blur="onPriceBlur(scope.row, 'sell')" />
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="快捷" width="86" align="center" v-if="queried">
+          <template #default="scope">
+            <el-button link type="primary" size="small" :disabled="scope.$index === 0" @click="copyPrev(scope.$index)">同上一行</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <!-- 手机端：卡片列表 -->
+      <div class="mobile-cards" v-if="isMobile">
+        <div class="m-row" v-for="(row, i) in rows" :key="row.commodityId" :class="{ dirty: isDirty(row) }">
+          <div class="m-row__head">
+            <span class="name">{{ row.commodity }}<span v-if="isDirty(row)" class="dirty-dot">*</span></span>
+            <span class="spread-warn" v-if="spreadWarn(row)" title="买价高于卖价，请确认是否录入有误">买≥卖</span>
+            <span class="time" v-if="row.updatedAt && queried">{{ row.updatedAt.slice(5, 16) }}</span>
+            <span class="time" v-else-if="!queried">-</span>
+          </div>
+          <div class="m-row__inputs" v-if="queried">
+            <div>
+              <div class="field-label">买价</div>
+              <el-input v-model="row.buy" placeholder="-" clearable inputmode="decimal"
+                @input="onPriceInput(row, 'buy', $event)" @blur="onPriceBlur(row, 'buy')" />
+            </div>
+            <div>
+              <div class="field-label">卖价</div>
+              <el-input v-model="row.sell" placeholder="-" clearable inputmode="decimal"
+                @input="onPriceInput(row, 'sell', $event)" @blur="onPriceBlur(row, 'sell')" />
+            </div>
+          </div>
+          <div class="m-row__inputs" v-else>
+            <div><div class="field-label">买价</div><div style="padding:6px 2px;color:var(--ink-2)">-</div></div>
+            <div><div class="field-label">卖价</div><div style="padding:6px 2px;color:var(--ink-2)">-</div></div>
+          </div>
+          <div class="m-row__ops" v-if="queried">
+            <button :disabled="i === 0" @click="copyPrev(i)">同上一行</button>
+            <button @click="clearRow(row)">清空本行</button>
+          </div>        </div>
+      </div>
+    </el-card>
+
+    <!-- ================= 操作说明 ================= -->
+    <el-card id="help-card" shadow="never">
+      <template #header><b style="font-size:14px">操作说明</b></template>
+      <ol class="help-steps">
+        <li><b>选择区服</b>：输入区服名称（如 S1、008服），支持从历史区服中快速选择。</li>
+        <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称后按 <b>Enter</b> 即可写入字典表。</li>
+        <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；输入新商品名称后按 <b>Enter</b> 即可写入字典表。</li>
+        <li><b>点击查询</b>：区服与城池将填充进列表，买价/卖价从数据库带出，查不到价格显示 “-”。</li>
+        <li><b>填写价格</b>：直接在买价/卖价输入框中录入数字，可用「同上一行」快速复制。</li>
+        <li><b>点击保存</b>：表格右上角「保存」按钮 → 弹窗确认变更明细 → 确认后写入数据库。</li>
+        <li><b>字典管理</b>：右上角「字典管理」可新增/重命名/停用/删除 城池、商品、区服（已被引用的项不可删除）。</li>
+      </ol>
+
+      <div class="help-grid">
+        <div class="help-item">
+          <h4>清空输入</h4>
+          <p>区服输入框、城池/商品下拉框均支持一键清空（右侧 × 按钮），清空后可重新选择。</p>
+        </div>
+        <div class="help-item">
+          <h4>快捷键</h4>
+          <p>Ctrl / Cmd + Enter 快速保存；Tab 在各输入框间顺序移动；Esc 关闭弹窗。</p>
+        </div>
+        <div class="help-item">
+          <h4>批量导入</h4>
+          <p>「批量导入」支持粘贴“商品 + 买价 + 卖价”多行数据（制表符/逗号/空格分隔），未知商品可自动创建。</p>
+        </div>
+        <div class="help-item">
+          <h4>更新日志</h4>
+          <p>「更新日志」记录每次买价/卖价的变更前后值与时间，便于回溯价格走势。</p>
+        </div>
+      </div>
+    </el-card>
+
+  </main>
+
+  <!-- 手机端底部保存条 -->
+  <div class="mobile-savebar" v-if="isMobile">
+    <span class="stat">已修改 <b>{{ changedCount }}</b> 项</span>
+    <el-button type="primary" :disabled="!canSave" @click="onSave">保存价格</el-button>
+  </div>
+
+  <!-- ================= 保存确认弹窗 ================= -->
+  <el-dialog v-model="saveVisible" title="确认更新价格" width="620px" :fullscreen="isMobile" top="8vh">
+    <div class="confirm-summary">
+      将保存 <b>{{ form.server }}</b> · <b>{{ form.city }}</b> 的 <b>{{ changedRows.length }}</b> 条价格：
+    </div>
+    <div class="confirm-list" v-if="changedRows.length">
+      <el-table :data="changedRows" size="small">
+        <el-table-column label="商品" prop="commodity" min-width="120" />
+        <el-table-column label="买价（原 → 新）" min-width="150">
+          <template #default="s">
+            <span :class="{ 'danger-tag': s.row.buy !== s.row._baseBuy }">
+              {{ s.row._baseBuy || '-' }} → {{ s.row.buy || '-' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="卖价（原 → 新）" min-width="150">
+          <template #default="s">
+            <span :class="{ 'danger-tag': s.row.sell !== s.row._baseSell }">
+              {{ s.row._baseSell || '-' }} → {{ s.row.sell || '-' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80" align="center">
+          <template #default="s">
+            <el-tag size="small" :type="rowOpType(s.row)" effect="plain">{{ rowOpText(s.row) }}</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+    <template #footer>
+      <el-button @click="saveVisible = false">取 消</el-button>
+      <el-button type="primary" :loading="saving" @click="confirmSave">确认保存</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- ================= 字典管理弹窗 ================= -->
+  <el-dialog v-model="dictVisible" title="字典管理" width="900px" :fullscreen="isMobile" top="6vh">
+    <el-tabs v-model="dictTab">
+      <!-- 城池 -->
+      <el-tab-pane :label="`城池（${dictData.city.length}）`" name="city">
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <el-input v-model="newCity" placeholder="输入新城池名称" maxlength="20" show-word-limit @keyup.enter="addDictItem('city')" />
+          <el-button type="primary" @click="addDictItem('city')">新增</el-button>
+        </div>
+        <el-table :data="dictData.city" size="small" max-height="46vh">
+          <el-table-column label="城池名称" min-width="150">
+            <template #default="s">
+              <el-input v-model="s.row._draft" size="small" @change="saveDictRename(s.row)" @blur="saveDictRename(s.row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="启用" width="70" align="center">
+            <template #default="s">
+              <el-switch v-model="s.row.status" :active-value="1" :inactive-value="0" @change="toggleDict(s.row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="价格引用" width="90" align="center">
+            <template #default="s">{{ s.row.city_used }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" align="center">
+            <template #default="s">
+              <el-button link size="small" @click="moveDict(s.row, 'city', -1)" :disabled="s.$index === 0">上移</el-button>
+              <el-button link size="small" @click="moveDict(s.row, 'city', 1)" :disabled="s.$index >= dictData.city.length - 1">下移</el-button>
+              <el-button link type="danger" size="small" @click="removeDictItem(s.row, 'city')">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 商品 -->
+      <el-tab-pane :label="`商品（${dictData.commodity.length}）`" name="commodity">
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <el-input v-model="newCommodity" placeholder="输入新商品名称" maxlength="20" show-word-limit @keyup.enter="addDictItem('commodity')" />
+          <el-button type="primary" @click="addDictItem('commodity')">新增</el-button>
+        </div>
+        <el-table :data="dictData.commodity" size="small" max-height="46vh">
+          <el-table-column label="商品名称" min-width="150">
+            <template #default="s">
+              <el-input v-model="s.row._draft" size="small" @change="saveDictRename(s.row)" @blur="saveDictRename(s.row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="启用" width="70" align="center">
+            <template #default="s">
+              <el-switch v-model="s.row.status" :active-value="1" :inactive-value="0" @change="toggleDict(s.row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="价格引用" width="90" align="center">
+            <template #default="s">{{ s.row.commodity_used }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" align="center">
+            <template #default="s">
+              <el-button link size="small" @click="moveDict(s.row, 'commodity', -1)" :disabled="s.$index === 0">上移</el-button>
+              <el-button link size="small" @click="moveDict(s.row, 'commodity', 1)" :disabled="s.$index >= dictData.commodity.length - 1">下移</el-button>
+              <el-button link type="danger" size="small" @click="removeDictItem(s.row, 'commodity')">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 区服 -->
+      <el-tab-pane :label="`区服（${serverList.length}）`" name="server">
+        <el-table :data="serverList" size="small" max-height="46vh">
+          <el-table-column label="区服名称" prop="name" min-width="120" />
+          <el-table-column label="价格条数" prop="priceCount" width="100" align="center" />
+          <el-table-column label="最近更新" prop="lastUsedAt" min-width="160" />
+          <el-table-column label="操作" width="100" align="center">
+            <template #default="s">
+              <el-button link type="danger" size="small" @click="removeServer(s.row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+    </el-tabs>
+    <template #footer>
+      <el-button @click="dictVisible = false">关 闭</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- ================= 更新日志弹窗 ================= -->
+  <el-dialog v-model="historyVisible" title="更新日志" width="760px" :fullscreen="isMobile" top="8vh">
+    <div class="confirm-summary" v-if="!queried">请先在上方选择区服与城池并查询，再查看该范围的价格变更日志。</div>
+    <template v-else>
+      <div class="confirm-summary">
+        当前范围：<b>{{ form.server }}</b> · <b>{{ form.city }}</b>（最近 {{ historyList.length }} 条）
+        <el-button link type="primary" size="small" @click="loadHistory">刷新</el-button>
+      </div>
+      <el-table :data="historyList" size="small" max-height="50vh">
+        <el-table-column label="时间" prop="createdAt" width="160" />
+        <el-table-column label="商品" prop="commodity" min-width="90" />
+        <el-table-column label="字段" width="90">
+          <template #default="s">{{ s.row.field === 'buy_price' ? '买价' : '卖价' }}</template>
+        </el-table-column>
+        <el-table-column label="原值" width="90">
+          <template #default="s">{{ s.row.oldValue ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column label="新值" width="90">
+          <template #default="s">
+            <b :class="s.row.newValue == null ? 'danger-tag' : ''">{{ s.row.newValue ?? '-' }}</b>
+          </template>
+        </el-table-column>
+      </el-table>
+    </template>
+    <template #footer>
+      <el-button @click="historyVisible = false">关 闭</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- ================= 批量导入弹窗 ================= -->
+  <el-dialog v-model="importVisible" title="批量导入价格" width="680px" :fullscreen="isMobile" top="8vh">
+    <div class="confirm-summary">
+      粘贴多行数据到下方（每行：<b>商品 + 买价 + 卖价</b>，支持制表符 / 逗号 / 空格分隔），导入到
+      <b>{{ form.server || '未选择区服' }}</b> · <b>{{ form.city || '未选择城池' }}</b>。
+    </div>
+    <el-input v-model="importText" type="textarea" :rows="10"
+      placeholder="示例：&#10;谷物	12.5	15&#10;黏土 5 6&#10;盐,3,4" />
+    <div style="display:flex;align-items:center;gap:16px;margin-top:10px">
+      <el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品" />
+      <div class="spacer" style="flex:1"></div>
+      <el-button type="primary" :loading="importing" @click="submitImport">开始导入</el-button>
+    </div>
+    <template #footer>
+      <el-button @click="importVisible = false">关 闭</el-button>
+    </template>
+  </el-dialog>
+
+</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

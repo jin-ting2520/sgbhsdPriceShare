@@ -1,0 +1,20 @@
+# SGBHSD 物价共享平台 —— Docker Compose 一键部署
+# 用法：docker compose up -d --build
+#       或直接执行 ./deploy.sh（Linux/macOS） / .\deploy.ps1（Windows）
+
+services:
+  app:
+    build: .
+    image: sgbhsd-price-share:latest
+    container_name: sgbhsd-price-share
+    restart: unless-stopped
+    # 宿主机端口可用 PORT 环境变量覆盖：PORT=8080 docker compose up -d
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # SQLite 数据库持久化（容器内 /app/data/price.db）
+      - ./data:/app/data
+      # 备份目录（部署脚本备份的数据库会落在这里）
+      - ./backup:/app/backup

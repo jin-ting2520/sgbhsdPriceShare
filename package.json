@@ -1,0 +1,20 @@
+{
+  "name": "sgbhsd-price-share",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SGBHSD 物价共享平台：城池/商品买卖价格录入、查询与共享 (Node.js + SQLite + Vue3 + Element Plus)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "db:vacuum": "node server/scripts/vacuum.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "element-plus": "^2.9.0",
+    "express": "^4.21.2",
+    "vue": "^3.5.13"
+  }
+}
