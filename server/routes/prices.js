@@ -203,7 +203,7 @@ router.get('/history', asyncHandler((req, res) => {
   return ok(res, { total: rows.length, items: rows });
 }));
 
-/** GET /api/prices/trend?server=&city=&commodity=&days= —— 价格趋势（按天取当日最后值） */
+/** GET /api/prices/trend?server=&city=&commodity=&days= —— 价格趋势（逐次变更时点 + 前向填充） */
 router.get('/trend', asyncHandler((req, res) => {
   const server = cleanName(req.query.server, 50);
   const city = cleanName(req.query.city, 20);
@@ -229,44 +229,50 @@ router.get('/trend', asyncHandler((req, res) => {
     ).all(serverId, cityId, commodityRow.id));
   }
 
-  // 近 N 天（按北京时间日期切，created_at 为北京时间字符串）
+  // 近 N 天（按北京时间日期切，created_at 为北京时间 'YYYY-MM-DD HH:MM:SS'）
   const cutoff = new Date(Date.now() + 8 * 3600000 - days * 86400000).toISOString().slice(0, 10);
   // cutoff 之前最后已知值，作为填充种子
   let seedBuy = null;
   let seedSell = null;
-  const byDate = new Map();
+  // 按完整时间点聚合（同秒内多次变更取最后一次），保留时内细节
+  const byTime = new Map();
   for (const r of rows) {
-    const d = String(r.createdAt).slice(0, 10);
+    const t = String(r.createdAt);
     const key = r.field === 'sell_price' ? 'sell' : 'buy';
-    if (d < cutoff) {
+    if (t.slice(0, 10) < cutoff) {
       if (r.value != null) { if (key === 'buy') seedBuy = r.value; else seedSell = r.value; }
       continue;
     }
-    if (!byDate.has(d)) byDate.set(d, {});
-    byDate.get(d)[key] = r.value;
+    if (!byTime.has(t)) byTime.set(t, {});
+    byTime.get(t)[key] = r.value;
   }
 
-  // 当前价格并入，保证图上始终包含最新买价/卖价
+  // 当前价格并入：同日则覆盖最后一点，否则追加新时间点，保证图上始终包含最新买价/卖价
   const current = (serverId && cityId)
     ? db.prepare('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?')
         .get(serverId, cityId, commodityRow.id)
     : null;
-  const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
   if (current && (current.buy != null || current.sell != null)) {
-    const day = byDate.has(today) ? byDate.get(today) : (byDate.set(today, {}), byDate.get(today));
-    if (current.buy != null) day.buy = current.buy;
-    if (current.sell != null) day.sell = current.sell;
+    const t = nowText();
+    const lastT = byTime.size ? [...byTime.keys()].pop() : null; // Map 保持插入序，最后键为最大时间
+    if (lastT && lastT.slice(0, 10) === t.slice(0, 10)) {
+      const slot = byTime.get(lastT);
+      if (current.buy != null) slot.buy = current.buy;
+      if (current.sell != null) slot.sell = current.sell;
+    } else {
+      byTime.set(t, { buy: current.buy, sell: current.sell });
+    }
   }
 
   // 前向填充：每个数据点都带上最近一次已知的买价与卖价，两条线连续不断裂
   let lastBuy = seedBuy;
   let lastSell = seedSell;
-  const points = [...byDate.entries()]
+  const points = [...byTime.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([date, v]) => {
+    .map(([t, v]) => {
       if (v.buy != null) lastBuy = v.buy;
       if (v.sell != null) lastSell = v.sell;
-      return { date, buy: lastBuy, sell: lastSell };
+      return { date: t, buy: lastBuy, sell: lastSell };
     });
 
   const buys = points.map(p => p.buy).filter(v => v != null);

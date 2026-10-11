@@ -135,7 +135,7 @@ sgbhsdPriceShare/
 | GET | `/api/prices?server&city&commodity?` | 查询价格（含负重、更新时间、更新人） |
 | POST | `/api/prices` `{server,city,items[],operator}` | 保存价格（事务 + 变更流水 + 记录更新人昵称） |
 | GET | `/api/prices/history?server&city` | 变更日志（含操作人） |
-| GET | `/api/prices/trend?server&city&commodity&days` | 价格趋势（按日聚合 buy/sell 点列） |
+| GET | `/api/prices/trend?server&city&commodity&days` | 价格趋势（逐次变更时点 buy/sell 点列，前向填充） |
 | GET | `/api/prices/matrix?server&commodity` | 跨城池比价（各城池价格 + 最低买入/最高卖出） |
 | GET | `/api/prices/export?server&city` | CSV 导出（UTF-8 BOM，Excel 兼容） |
 | POST | `/api/prices/import` | 批量导入（`rows` 结构化数组或 `text` 粘贴文本；自动创建新商品可选，支持负重列） |
@@ -164,7 +164,7 @@ sgbhsdPriceShare/
 
 1. **昵称即入**：输入三国冰河时代昵称即可进入，无需注册登录；昵称缓存本机（localStorage），保存价格自动以该昵称留痕，顶栏可随时切换昵称。
 2. **跨城比价利润**：利润 =（卖出城卖价 − 买入城买价）÷ 商品负重（真正的跑商语义，非同城差价）；「比价」弹窗可选卖出城（默认最高卖价城），自动推荐「最便宜买入城 → 最高卖出城」路线并按利润排序；商品字典支持负重维护（种子含 25 个商品及负重，含新增「毛皮」）。
-3. **价格趋势图**：基于 `price_history` 的 SVG 折线图（买价/卖价双线、7/14/30 天切换、悬停提示），零外部图表库依赖。
+3. **价格趋势图**：基于 `price_history` 的 SVG 折线图（买价/卖价双线、7/14/30 天切换、X 轴日期+时间、滚轮缩放/拖拽平移/重置、悬停提示），零外部图表库依赖。
 4. **跨城池比价**：同一商品在本区服各城池的买/卖价矩阵，自动标出最低买入城与最高卖出城。
 5. **响应式双布局**：PC 端表格、手机端卡片 + 底部吸底保存条，触屏目标区域 ≥ 44px。
 6. **脏值跟踪与局部保存**：只提交有改动的行，确认弹窗展示「原值 → 新值」并标注新增/修改/清空。
@@ -175,7 +175,7 @@ sgbhsdPriceShare/
 11. **安全与运维**：容器内非 root 运行、健康检查、数据卷持久化、无外网 CDN 依赖（内网可部署）。
 12. **PWA**：Service Worker 缓存 + manifest，可添加到手机桌面、弱网可用。
 13. **CI/CD**：GitHub Actions 跑测试；推送自动构建 amd64/arm64 镜像并发布 Docker Hub。
-14. **工程质量**：14 项后端接口测试（`npm test`）+ 17 步 Chrome CDP 端到端冒烟，覆盖昵称进入、查询、录价保存（更新人留痕）、趋势、比价、字典、日志、刷新免登等。
+14. **工程质量**：16 项后端接口测试（`npm test`）+ 20 步 Chrome CDP 端到端冒烟，覆盖昵称进入、查询、录价保存（更新人留痕）、趋势缩放、比价、Excel 导入、字典、日志、刷新免登等。
 
 **后续可扩展路线**
 

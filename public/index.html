@@ -477,13 +477,25 @@
         </span>
       </div>
 
-      <!-- SVG 折线图 -->
+      <!-- SVG 折线图（滚轮缩放 / 拖拽平移） -->
       <div class="chart-box" v-if="trendPoints.length">
-        <svg :viewBox="'0 0 ' + trendChart.W + ' ' + trendChart.H" class="trend-svg" preserveAspectRatio="none">
+        <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;flex-wrap:wrap">
+          <el-button size="small" @click="zoomTrend(0.6)">放大</el-button>
+          <el-button size="small" @click="zoomTrend(1.6)">缩小</el-button>
+          <el-button size="small" @click="resetTrendView" :disabled="!trendChart.zoomed">重置</el-button>
+          <span style="font-size:12px;color:var(--ink-2)">鼠标滚轮缩放 · 按住拖拽平移</span>
+        </div>
+        <svg :viewBox="'0 0 ' + trendChart.W + ' ' + trendChart.H" class="trend-svg"
+          :style="{ cursor: trendDragging ? 'grabbing' : 'grab' }"
+          @wheel.prevent="onTrendWheel"
+          @mousedown="onTrendMouseDown"
+          @mousemove="onTrendMouseMove"
+          @mouseup="onTrendMouseUp"
+          @mouseleave="onTrendMouseUp">
           <!-- 横向网格线 -->
-          <line v-for="g in trendChart.grid" :key="'g' + g.y" :x1="28" :x2="trendChart.W - 10"
+          <line v-for="g in trendChart.grid" :key="'g' + g.y" :x1="36" :x2="trendChart.W - 10"
             :y1="g.y" :y2="g.y" stroke="#e6e3dc" stroke-dasharray="4 4" />
-          <text v-for="g in trendChart.grid" :key="'gl' + g.y" :x="24" :y="g.y + 4"
+          <text v-for="g in trendChart.grid" :key="'gl' + g.y" :x="32" :y="g.y + 4"
             text-anchor="end" font-size="11" fill="#6b7280">{{ g.label }}</text>
           <!-- 买价线 -->
           <path v-if="trendChart.buyPath" :d="trendChart.buyPath" fill="none"
@@ -496,15 +508,15 @@
             fill="#2563eb"><title>{{ d.tip }}</title></circle>
           <circle v-for="(d, idx) in trendChart.sellDots" :key="'sd' + idx" :cx="d.x" :cy="d.y" r="3"
             fill="#ea580c"><title>{{ d.tip }}</title></circle>
-          <!-- X 轴标签 -->
-          <text v-for="l in trendChart.xLabels" :key="'x' + l.x" :x="l.x" :y="trendChart.H - 4"
+          <!-- X 轴标签（日期+时间） -->
+          <text v-for="l in trendChart.xLabels" :key="'x' + l.x + l.label" :x="l.x" :y="trendChart.H - 6"
             :text-anchor="l.anchor" font-size="11" fill="#6b7280">{{ l.label }}</text>
         </svg>
         <div class="chart-legend">
           <span class="legend-dot" style="background:#2563eb"></span>买价
           <span class="legend-dot" style="background:#ea580c"></span>卖价
           <span style="margin-left:12px;color:var(--ink-2);font-size:12px">
-            共 {{ trendPoints.length }} 个数据点，鼠标悬停查看明细
+            共 {{ trendPoints.length }} 个数据点，悬停查看明细
           </span>
         </div>
       </div>

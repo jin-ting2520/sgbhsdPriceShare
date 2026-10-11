@@ -435,23 +435,75 @@ createApp({
       if (queried.value) loadHistory()
     }
 
-    /* ---------- 价格趋势（SVG 折线图） ---------- */
+    /* ---------- 价格趋势（SVG 折线图，支持滚轮缩放/拖拽平移） ---------- */
     const trendVisible = ref(false)
     const trendCommodity = ref('')
     const trendDays = ref(30)
     const trendLoading = ref(false)
     const trendData = ref({ points: [], summary: {}, burden: null })
     const trendPoints = computed(() => trendData.value.points || [])
+    // 视窗窗口：可见区间 [i0, i1]（浮点索引）；null = 全量
+    const trendView = ref(null)
+    const trendDragging = ref(false)
+
+    const clampView = (i0, i1, n) => {
+      const span = Math.min(Math.max(i1 - i0, 0), Math.max(n - 1, 0))
+      let a = Math.min(Math.max(i0, 0), Math.max(n - 1 - span, 0))
+      return { i0: a, i1: a + span }
+    }
+
+    const resetTrendView = () => { trendView.value = null }
+
+    const zoomTrend = (factor, anchorFrac = 0.5) => {
+      const n = trendPoints.value.length
+      if (n < 2) return
+      const v = trendView.value || { i0: 0, i1: n - 1 }
+      const span = v.i1 - v.i0
+      const anchor = v.i0 + anchorFrac * span
+      const newSpan = Math.min(Math.max(span * factor, 0.04), Math.max(n - 1, 0.04))
+      const i0 = anchor - anchorFrac * newSpan
+      trendView.value = clampView(i0, i0 + newSpan, n)
+    }
+
+    const onTrendWheel = e => {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const frac = rect.width ? (e.clientX - rect.left) / rect.width : 0.5
+      zoomTrend(e.deltaY > 0 ? 1.25 : 0.8, Math.min(Math.max(frac, 0), 1))
+    }
+
+    let dragState = null
+    const onTrendMouseDown = e => {
+      const n = trendPoints.value.length
+      if (n < 2) return
+      dragState = {
+        x: e.clientX,
+        view: trendView.value ? { ...trendView.value } : { i0: 0, i1: n - 1 },
+      }
+      trendDragging.value = true
+    }
+    const onTrendMouseMove = e => {
+      if (!dragState) return
+      const svg = e.currentTarget
+      const rect = svg.getBoundingClientRect()
+      const n = trendPoints.value.length
+      const span = dragState.view.i1 - dragState.view.i0
+      const dFrac = rect.width ? (e.clientX - dragState.x) / rect.width : 0
+      trendView.value = clampView(dragState.view.i0 - dFrac * span, dragState.view.i1 - dFrac * span, n)
+    }
+    const onTrendMouseUp = () => { dragState = null; trendDragging.value = false }
 
     const trendChart = computed(() => {
-      const W = 640, H = 240, PL = 40, PR = 12, PT = 14, PB = 28
+      const W = 640, H = 260, PL = 44, PR = 14, PT = 14, PB = 30
       const pts = trendPoints.value
-      const empty = { W, H, grid: [], buyPath: '', sellPath: '', buyDots: [], sellDots: [], xLabels: [] }
+      const empty = { W, H, grid: [], buyPath: '', sellPath: '', buyDots: [], sellDots: [], xLabels: [], zoomed: false }
       if (!pts.length) return empty
+      const n = pts.length
+      const v = trendView.value && n > 1 ? clampView(trendView.value.i0, trendView.value.i1, n) : { i0: 0, i1: n - 1 }
+
+      // Y 轴始终覆盖全部数据（两条线任何缩放级别都可见）
       const vals = []
       pts.forEach(p => { if (p.buy != null) vals.push(p.buy); if (p.sell != null) vals.push(p.sell) })
       if (!vals.length) return empty
-
       let min = Math.min(...vals)
       let max = Math.max(...vals)
       if (min === max) { min -= 1; max += 1 }
@@ -459,41 +511,54 @@ createApp({
       min -= pad
       max += pad
 
-      const x = i => pts.length === 1
-        ? PL + (W - PL - PR) / 2
-        : PL + (i / (pts.length - 1)) * (W - PL - PR)
-      const y = v => PT + (1 - (v - min) / (max - min)) * (H - PT - PB)
+      const span = Math.max(v.i1 - v.i0, 1e-9)
+      const x = i => PL + ((i - v.i0) / span) * (W - PL - PR)
+      const y = val => PT + (1 - (val - min) / (max - min)) * (H - PT - PB)
 
+      // 路径：取可见区间±1 个点，边缘线段完整
+      const from = Math.max(Math.floor(v.i0) - 1, 0)
+      const to = Math.min(Math.ceil(v.i1) + 1, n - 1)
       const buildPath = key => {
         let d = ''
         let pen = false
-        pts.forEach((p, i) => {
-          if (p[key] == null) { pen = false; return }
+        for (let i = from; i <= to; i++) {
+          const p = pts[i]
+          if (p[key] == null) { pen = false; continue }
           d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[key]).toFixed(1)} `
           pen = true
-        })
+        }
         return d.trim()
       }
-      const dots = key => pts
-        .map((p, i) => (p[key] == null ? null : {
-          x: +x(i).toFixed(1),
-          y: +y(p[key]).toFixed(1),
-          tip: `${p.date} ${key === 'buy' ? '买价' : '卖价'} ${p[key]}`,
-        }))
-        .filter(Boolean)
+      const dots = key => {
+        const out = []
+        for (let i = Math.ceil(v.i0); i <= Math.floor(v.i1) && i < n; i++) {
+          const p = pts[i]
+          if (p[key] == null) continue
+          out.push({
+            x: +x(i).toFixed(1),
+            y: +y(p[key]).toFixed(1),
+            tip: `${p.date} ${key === 'buy' ? '买价' : '卖价'} ${p[key]}`,
+          })
+        }
+        return out
+      }
 
-      const grid = [0, 0.5, 1].map(t => {
-        const v = min + t * (max - min)
-        return { y: +y(v).toFixed(1), label: v.toFixed(1) }
+      const grid = [0, 0.25, 0.5, 0.75, 1].map(t => {
+        const val = min + t * (max - min)
+        return { y: +y(val).toFixed(1), label: val.toFixed(1) }
       })
 
-      const xLabels = [{ x: x(0), label: pts[0].date.slice(5), anchor: 'start' }]
-      if (pts.length >= 3) {
-        const mi = Math.floor((pts.length - 1) / 2)
-        xLabels.push({ x: x(mi), label: pts[mi].date.slice(5), anchor: 'middle' })
+      // X 轴：日期+时间（数据点为时间粒度）
+      const fmtT = t => String(t).slice(5, 16) // MM-DD HH:mm
+      const i0r = Math.round(v.i0)
+      const i1r = Math.min(Math.round(v.i1), n - 1)
+      const im = Math.round((v.i0 + v.i1) / 2)
+      const xLabels = [{ x: x(i0r), label: fmtT(pts[i0r].date), anchor: 'start' }]
+      if (im > i0r + 1 && im < i1r - 1) {
+        xLabels.push({ x: x(im), label: fmtT(pts[im].date), anchor: 'middle' })
       }
-      if (pts.length >= 2) {
-        xLabels.push({ x: x(pts.length - 1), label: pts[pts.length - 1].date.slice(5), anchor: 'end' })
+      if (i1r > i0r) {
+        xLabels.push({ x: x(i1r), label: fmtT(pts[i1r].date), anchor: 'end' })
       }
 
       return {
@@ -503,6 +568,7 @@ createApp({
         buyDots: dots('buy'),
         sellDots: dots('sell'),
         xLabels,
+        zoomed: v.i0 > 0.001 || v.i1 < n - 1.001,
       }
     })
 
@@ -516,6 +582,7 @@ createApp({
           commodity: trendCommodity.value, days: String(trendDays.value),
         })
         trendData.value = await api(`/api/prices/trend?${q.toString()}`)
+        trendView.value = null
       } catch (e) { ElMessage.error(e.message) } finally { trendLoading.value = false }
     }
 
@@ -792,6 +859,8 @@ createApp({
       historyVisible, historyList, openHistory, loadHistory,
       trendVisible, trendCommodity, trendDays, trendLoading, trendData, trendPoints,
       trendChart, openTrend, loadTrend,
+      trendView, trendDragging, zoomTrend, resetTrendView, onTrendWheel,
+      onTrendMouseDown, onTrendMouseMove, onTrendMouseUp,
       matrixVisible, matrixCommodity, matrixLoading, matrixData, openMatrix, loadMatrix,
       matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute,
       // 导入导出
