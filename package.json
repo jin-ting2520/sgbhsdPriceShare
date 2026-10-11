@@ -16,7 +16,12 @@
   "dependencies": {
     "element-plus": "^2.9.0",
     "express": "^4.21.2",
+    "tesseract.js": "^6.0.1",
     "vue": "^3.5.13",
     "xlsx": "^0.18.5"
+  },
+  "optionalDependencies": {
+    "@tesseract.js-data/chi_sim": "^1.0.0",
+    "@tesseract.js-data/eng": "^1.0.0"
   }
 }

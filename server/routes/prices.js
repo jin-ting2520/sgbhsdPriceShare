@@ -392,11 +392,13 @@ router.get('/export', asyncHandler((req, res) => {
   return res.send(csv);
 }));
 
-/** POST /api/prices/import —— 批量导入（rows 结构化数组，或 text 粘贴文本兼容旧客户端） */
+/** POST /api/prices/import —— 批量导入（rows 结构化数组，或 text 粘贴文本兼容旧客户端）
+ *  merge: true 时只覆盖非空字段（OCR 单侧识别用：null 价保留原值） */
 router.post('/import', asyncHandler((req, res) => {
   const server = cleanName(req.body.server, 50);
   const city = cleanName(req.body.city, 20);
   const createMissing = req.body.createCommodities !== false;
+  const merge = req.body.merge === true;
   const text = typeof req.body.text === 'string' ? req.body.text : '';
   const rowsIn = Array.isArray(req.body.rows) ? req.body.rows : null;
 
@@ -466,13 +468,22 @@ router.post('/import', asyncHandler((req, res) => {
     }
   }
 
-  const upsert = db.prepare(
-    `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(server_id, city_id, commodity_id)
-     DO UPDATE SET buy_price = excluded.buy_price, sell_price = excluded.sell_price,
-                   operator = excluded.operator, updated_at = excluded.updated_at`
-  );
+  const upsert = merge
+    ? db.prepare(
+      `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(server_id, city_id, commodity_id)
+       DO UPDATE SET buy_price = COALESCE(excluded.buy_price, prices.buy_price),
+                     sell_price = COALESCE(excluded.sell_price, prices.sell_price),
+                     operator = excluded.operator, updated_at = excluded.updated_at`
+    )
+    : db.prepare(
+      `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(server_id, city_id, commodity_id)
+       DO UPDATE SET buy_price = excluded.buy_price, sell_price = excluded.sell_price,
+                     operator = excluded.operator, updated_at = excluded.updated_at`
+    );
   const getExisting = db.prepare(
     'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
   );
@@ -490,15 +501,18 @@ router.post('/import', asyncHandler((req, res) => {
     for (const p of parsed) {
       const commodityId = findDictId('commodity', p.commodity);
       const existing = getExisting.get(serverId, cityId, commodityId);
+      // merge 时 null 价不清空，history 用合并后实际值
+      const newBuy = merge && p.buy == null ? (existing ? existing.buy : null) : p.buy;
+      const newSell = merge && p.sell == null ? (existing ? existing.sell : null) : p.sell;
       upsert.run(serverId, cityId, commodityId, p.buy, p.sell, operator, t);
       if (existing) {
         updated += 1;
-        if (existing.buy !== p.buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, p.buy, operator, t);
-        if (existing.sell !== p.sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, p.sell, operator, t);
+        if (existing.buy !== newBuy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, newBuy, operator, t);
+        if (existing.sell !== newSell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, newSell, operator, t);
       } else {
         created += 1;
-        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, p.buy, operator, t);
-        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, p.sell, operator, t);
+        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, newBuy, operator, t);
+        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, newSell, operator, t);
       }
     }
     db.exec('COMMIT');

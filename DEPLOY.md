@@ -131,5 +131,5 @@ docker compose up -d --build    # 重建并滚动重启，数据不受影响
 ```bash
 npm ci
 npm run dev        # 开发模式（node --watch，默认 3000 端口）
-npm test           # 运行全部测试（14 项）
+npm test           # 运行全部测试（25 项）
 ```

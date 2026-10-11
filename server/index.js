@@ -24,6 +24,25 @@ app.use('/vendor/xlsx', (req, res, next) => {
   res.setHeader('Cache-Control', 'public, max-age=604800');
   next();
 }, express.static(nodePath.join(__dirname, '..', 'node_modules', 'xlsx', 'dist')));
+// OCR：Tesseract.js 浏览器端识别（引擎/核心/语言模型全部本地托管，无外网 CDN）
+app.use('/vendor/tesseract', (req, res, next) => {
+  res.setHeader('Cache-Control', 'public, max-age=604800');
+  next();
+}, express.static(nodePath.join(__dirname, '..', 'node_modules', 'tesseract.js', 'dist')));
+app.use('/vendor/tesseract-core', (req, res, next) => {
+  res.setHeader('Cache-Control', 'public, max-age=604800');
+  next();
+}, express.static(nodePath.join(__dirname, '..', 'node_modules', 'tesseract.js-core')));
+// 语言模型（chi_sim / eng 的 int8 量化版，体积小适合浏览器）
+const TESSDATA_ROOT = nodePath.join(__dirname, '..', 'node_modules', '@tesseract.js-data');
+app.get('/vendor/tessdata/:lang.traineddata.gz', (req, res, next) => {
+  const lang = req.params.lang;
+  if (!/^[a-z_]+$/.test(lang)) return next();
+  const file = nodePath.join(TESSDATA_ROOT, lang, '4.0.0_best_int', `${lang}.traineddata.gz`);
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Cache-Control', 'public, max-age=604800');
+  res.sendFile(file, err => { if (err) next(); });
+});
 app.use(express.static(nodePath.join(__dirname, '..', 'public')));
 app.use('/public', express.static(nodePath.join(__dirname, '..', 'public')));
 

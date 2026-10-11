@@ -41,6 +41,13 @@ self.addEventListener('fetch', event => {
   // API 与带鉴权的请求永远走网络
   if (url.pathname.startsWith('/api/')) return
 
+  // OCR 大文件（wasm / 语言包 / worker）不进 SW 缓存，避免缓存污染与反复重下
+  if (url.pathname.startsWith('/vendor/tesseract')
+    || url.pathname.startsWith('/vendor/tessdata')
+    || url.pathname.startsWith('/vendor/tesseract-core')) {
+    return
+  }
+
   // 导航请求：缓存优先，后台刷新（保证离线可用 + 上线即更新）
   if (req.mode === 'navigate') {
     event.respondWith(

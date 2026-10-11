@@ -295,6 +295,36 @@ test('导入：Excel 结构化 rows（合法行导入 + 非法行 400 不落库�
   assert.equal(gu.operator, '表格导入');
 });
 
+test('导入：merge 模式单侧识别不清空另一侧价格（OCR 场景）', async () => {
+  // 先造完整双侧价
+  const save = await api('/api/prices', {
+    method: 'POST',
+    body: {
+      server: 'T1', city: '零陵', operator: '甲',
+      items: [{ commodity: '毛皮', buy: 10.5, sell: 15 }],
+    },
+  });
+  assert.equal(save.status, 200);
+
+  // OCR 只识别卖出价 → merge 应保留买价
+  const r = await api('/api/prices/import', {
+    method: 'POST',
+    body: {
+      server: 'T1', city: '零陵', operator: 'OCR',
+      rows: [{ commodity: '毛皮', buy: null, sell: 19.7, burden: 18 }],
+      merge: true,
+      createCommodities: false,
+    },
+  });
+  assert.equal(r.status, 200);
+
+  const query = await api('/api/prices?server=T1&city=零陵&commodity=毛皮');
+  const item = query.json.data.items[0];
+  assert.equal(item.buy, 10.5, 'merge 模式 null 买价不应清空原买价');
+  assert.equal(item.sell, 19.7, 'merge 模式非空卖价应更新');
+  assert.equal(item.operator, 'OCR');
+});
+
 /* ------------------------------ 健康检查 ------------------------------ */
 
 test('健康检查可用', async () => {

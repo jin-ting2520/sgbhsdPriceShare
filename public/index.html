@@ -262,7 +262,7 @@
         </div>
         <div class="help-item">
           <h4>批量导入</h4>
-          <p>「导入」支持 Excel（.xlsx）：先「下载模板」，按「商品 | 买价 | 卖价 | 负重」填写后上传，预览确认再导入；未知商品可自动创建。</p>
+          <p>「导入」支持两种方式：<b>Excel</b>（.xlsx，先「下载模板」按「商品 | 买价 | 卖价 | 负重」填写后上传）与 <b>游戏市场截图 OCR</b>（上传买入坊市/卖出坊市截图，本机离线识别，截图不上传服务器）。识别/解析结果可在预览中直接修改后导入；未知商品可自动创建；OCR 单侧识别采用 merge 模式，不清空另一侧已有价格。</p>
         </div>
         <div class="help-item">
           <h4>日志 / 趋势 / 比价</h4>
@@ -592,42 +592,83 @@
   </el-dialog>
 
   <!-- ================= 批量导入弹窗 ================= -->
-  <el-dialog v-model="importVisible" title="Excel 批量导入价格" width="720px" :fullscreen="isMobile" top="6vh">
+  <el-dialog v-model="importVisible" title="批量导入价格" width="760px" :fullscreen="isMobile" top="6vh">
     <div class="confirm-summary">
       导入到 <b>{{ form.server || '未选择区服' }}</b> · <b>{{ form.city || '未选择城池' }}</b>。
-      列顺序：<b>商品 | 买价 | 卖价 | 负重（可选）</b>；首行表头可有可无；买价/卖价可留空（留空且原价存在时清空该价）。
+      支持 <b>Excel 文件</b> 或 <b>游戏市场截图 OCR 识别</b>；识别/解析结果可在预览中直接修改后导入。
     </div>
-    <div style="display:flex;gap:10px;align-items:center;margin:12px 0;flex-wrap:wrap">
-      <el-button size="small" @click="downloadImportTemplate">
-        下载 Excel 模板
-      </el-button>
-      <input type="file" ref="importFileEl" accept=".xlsx,.xls" style="display:none" @change="onImportFile">
-      <el-button size="small" type="primary" plain @click="importFileEl && importFileEl.click()">
-        选择 Excel 文件
-      </el-button>
-      <span style="font-size:12.5px;color:var(--ink-2)">
-        {{ importFileName || '尚未选择文件' }}
-        <template v-if="importPreview.length">，共 {{ importPreview.length }} 行有效数据</template>
-      </span>
-      <el-button v-if="importFileName" size="small" text type="danger" @click="clearImportFile">清除</el-button>
-    </div>
-    <div v-if="importPreview.length" class="confirm-list" style="max-height:30vh;overflow:auto;border:1px solid var(--line);border-radius:8px">
+    <el-tabs v-model="importTab" style="margin-top:6px">
+      <el-tab-pane label="Excel 导入" name="excel">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <el-button size="small" @click="downloadImportTemplate">下载 Excel 模板</el-button>
+          <input type="file" ref="importFileEl" accept=".xlsx,.xls" style="display:none" @change="onImportFile">
+          <el-button size="small" type="primary" plain @click="importFileEl && importFileEl.click()">选择 Excel 文件</el-button>
+          <span style="font-size:12.5px;color:var(--ink-2)">{{ importFileName || '尚未选择文件' }}</span>
+          <el-button v-if="importFileName" size="small" text type="danger" @click="clearImportFile">清除</el-button>
+        </div>
+        <div style="font-size:12px;color:var(--ink-2);margin-top:8px">
+          列顺序：<b>商品 | 买价 | 卖价 | 负重（可选）</b>；首行表头可有可无；买价/卖价可留空（留空且原价存在时清空该价）。
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="截图识别" name="ocr">
+        <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:8px">
+          上传游戏内<b>买入坊市</b>/<b>卖出坊市</b>截图（可多张），自动识别商品价格与负重。识别在本机浏览器完成，截图不会上传服务器。
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <input type="file" ref="ocrFileEl" accept="image/*" multiple style="display:none" @change="onOcrFiles">
+          <el-button size="small" type="primary" plain :disabled="ocrRunning" @click="ocrFileEl && ocrFileEl.click()">选择截图</el-button>
+          <el-button size="small" type="primary" :loading="ocrRunning" :disabled="!ocrImages.length" @click="runOcr">开始识别</el-button>
+          <el-button v-if="ocrImages.length && !ocrRunning" size="small" text type="danger" @click="clearOcr">清空</el-button>
+        </div>
+        <div v-if="ocrImages.length" style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+          <div v-for="img in ocrImages" :key="img.id" class="ocr-item">
+            <img :src="img.url" class="ocr-thumb" alt="">
+            <div class="ocr-meta">
+              <div style="font-size:12.5px;word-break:break-all">{{ img.name }}</div>
+              <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+                <el-select v-model="img.mode" size="small" style="width:110px" :disabled="ocrRunning || img.status !== 'done'" @change="rebuildOcrPreview">
+                  <el-option label="卖出坊市" value="sell"></el-option>
+                  <el-option label="买入坊市" value="buy"></el-option>
+                </el-select>
+                <span v-if="img.status==='pending'" class="ocr-status">待识别</span>
+                <span v-else-if="img.status==='running'" class="ocr-status">识别中 {{ Math.round(img.progress * 100) }}%</span>
+                <span v-else-if="img.status==='done'" class="ocr-status ok">识别到 {{ img.rows.length }} 项</span>
+                <span v-else class="ocr-status danger">{{ img.error || '失败' }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-else style="border:1px dashed var(--line);border-radius:8px;padding:18px;text-align:center;color:var(--ink-2);font-size:13px;margin-top:8px">
+          点击「选择截图」上传游戏市场界面截图（支持一次选多张）
+        </div>
+      </el-tab-pane>
+    </el-tabs>
+
+    <div v-if="importPreview.length" class="confirm-list" style="max-height:30vh;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:8px">
       <el-table :data="importPreview" size="small" max-height="30vh">
         <el-table-column type="index" label="#" width="50" align="center"></el-table-column>
-        <el-table-column label="商品" prop="commodity" min-width="100"></el-table-column>
-        <el-table-column label="买价" width="90" align="right">
-          <template #default="s">{{ s.row.buy ?? '-' }}</template>
+        <el-table-column label="商品" min-width="100">
+          <template #default="s"><el-input v-model="s.row.commodity" size="small"></el-input></template>
         </el-table-column>
-        <el-table-column label="卖价" width="90" align="right">
-          <template #default="s">{{ s.row.sell ?? '-' }}</template>
+        <el-table-column label="买价" width="100" align="right">
+          <template #default="s"><el-input v-model="s.row.buy" size="small" style="width:76px" placeholder="留空"></el-input></template>
         </el-table-column>
-        <el-table-column label="负重" width="80" align="right">
-          <template #default="s">{{ s.row.burden ?? '-' }}</template>
+        <el-table-column label="卖价" width="100" align="right">
+          <template #default="s"><el-input v-model="s.row.sell" size="small" style="width:76px" placeholder="留空"></el-input></template>
+        </el-table-column>
+        <el-table-column label="负重" width="90" align="right">
+          <template #default="s"><el-input v-model="s.row.burden" size="small" style="width:60px" placeholder="-"></el-input></template>
+        </el-table-column>
+        <el-table-column label="" width="56" align="center">
+          <template #default="s">
+            <el-button link type="danger" size="small" @click="importPreview.splice(s.$index, 1)">删</el-button>
+          </template>
         </el-table-column>
       </el-table>
     </div>
     <div v-else style="border:1px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--ink-2);font-size:13px;margin:10px 0">
-      请先下载模板并按格式填写，然后点击「选择 Excel 文件」上传
+      先上传 Excel 或游戏截图进行识别，结果将显示在此处供确认修改
     </div>
     <div style="display:flex;align-items:center;gap:16px;margin-top:10px">
       <el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品"></el-switch>
@@ -643,6 +684,7 @@
 </div>
 
 <script src="/vendor/xlsx/xlsx.full.min.js"></script>
+<script src="/js/ocr-parse.js"></script>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>

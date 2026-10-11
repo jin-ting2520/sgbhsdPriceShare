@@ -652,13 +652,20 @@ createApp({
       }
     })
 
-    /* ---------- 批量导入（Excel） ---------- */
+    /* ---------- 批量导入（Excel / 截图 OCR） ---------- */
     const importVisible = ref(false)
+    const importTab = ref('excel')
     const importFileName = ref('')
     const importPreview = ref([]) // [{ commodity, buy, sell, burden }]
     const importAutoCreate = ref(true)
     const importing = ref(false)
     const importFileEl = ref(null)
+    const ocrFileEl = ref(null)
+    const ocrImages = ref([]) // [{ id, name, url, file, mode, status, progress, rows, error }]
+    const ocrRunning = ref(false)
+    let ocrWorker = null
+    let ocrSeq = 0
+    let ocrProgressCb = null
 
     const openImport = () => {
       if (!form.server.trim() || !form.city) {
@@ -666,12 +673,14 @@ createApp({
         return
       }
       clearImportFile()
+      clearOcr()
+      importTab.value = 'excel'
       importVisible.value = true
     }
 
     const clearImportFile = () => {
       importFileName.value = ''
-      importPreview.value = []
+      if (importTab.value === 'excel') importPreview.value = []
       if (importFileEl.value) importFileEl.value.value = ''
     }
 
@@ -732,8 +741,170 @@ createApp({
       }
     }
 
+    /* ----- 截图 OCR（Tesseract.js 本机识别） ----- */
+    const loadTesseractScript = () => new Promise((resolve, reject) => {
+      if (window.Tesseract) return resolve()
+      const s = document.createElement('script')
+      s.src = '/vendor/tesseract/tesseract.min.js'
+      s.onload = () => resolve()
+      s.onerror = () => reject(new Error('OCR 引擎脚本加载失败'))
+      document.head.appendChild(s)
+    })
+
+    const getOcrWorker = async () => {
+      if (ocrWorker) return ocrWorker
+      await loadTesseractScript()
+      // workerBlobURL:false —— worker 挂在页面同源下，IndexedDB 才能缓存语言包（Blob 不透明源写不了缓存，会反复下载）
+      ocrWorker = await window.Tesseract.createWorker(['chi_sim', 'eng'], 1, {
+        workerPath: '/vendor/tesseract/worker.min.js',
+        corePath: '/vendor/tesseract-core',
+        langPath: '/vendor/tessdata',
+        gzip: true,
+        workerBlobURL: false,
+        cacheMethod: 'write',
+        logger: m => {
+          if (!ocrProgressCb) return
+          if (m.status === 'recognizing text') ocrProgressCb(m.progress)
+          // 引擎/语言包加载也给出可见进度，避免 UI 一直 0%
+          else if (m.status === 'loading tesseract core' || m.status === 'loading language traineddata') {
+            ocrProgressCb(0.05)
+          }
+        },
+      })
+      return ocrWorker
+    }
+
+    /** 预处理：缩放至宽 ≤1600、灰度化、对比度拉伸（利于金色数字在棕底上的识别） */
+    const preprocessImage = async file => {
+      const bitmap = await createImageBitmap(file)
+      const scale = Math.min(1, 1600 / bitmap.width)
+      const w = Math.round(bitmap.width * scale)
+      const h = Math.round(bitmap.height * scale)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      ctx.drawImage(bitmap, 0, 0, w, h)
+      bitmap.close && bitmap.close()
+      const img = ctx.getImageData(0, 0, w, h)
+      const d = img.data
+      // 灰度 + 线性对比度拉伸（2%~98% 分位）
+      const gray = new Uint8Array(w * h)
+      for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
+        gray[p] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
+      }
+      const hist = new Uint32Array(256)
+      for (let p = 0; p < gray.length; p++) hist[gray[p]]++
+      const cut = gray.length * 0.02
+      let lo = 0, hi = 255, acc = 0
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= cut) { lo = v; break } }
+      acc = 0
+      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= cut) { hi = v; break } }
+      const span = Math.max(hi - lo, 1)
+      for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
+        const v = Math.max(0, Math.min(255, Math.round((gray[p] - lo) * 255 / span)))
+        d[i] = d[i + 1] = d[i + 2] = v
+      }
+      ctx.putImageData(img, 0, 0)
+      return canvas
+    }
+
+    const onOcrFiles = ev => {
+      const files = [...(ev.target.files || [])]
+      if (!files.length) return
+      for (const file of files) {
+        if (!file.type.startsWith('image/')) { ElMessage.warning(`「${file.name}」不是图片，已跳过`); continue }
+        ocrImages.value.push({
+          id: ++ocrSeq,
+          name: file.name,
+          url: URL.createObjectURL(file),
+          file,
+          mode: 'sell', // 默认卖出坊市，识别后按文字自动纠正，可手动改
+          status: 'pending',
+          progress: 0,
+          rows: [],
+          error: '',
+        })
+      }
+      if (ev.target) ev.target.value = ''
+    }
+
+    const clearOcr = () => {
+      for (const img of ocrImages.value) URL.revokeObjectURL(img.url)
+      ocrImages.value = []
+      if (ocrFileEl.value) ocrFileEl.value.value = ''
+      importPreview.value = []
+    }
+
+    const rebuildOcrPreview = () => {
+      const all = window.OcrParse.mergeRows(ocrImages.value.filter(i => i.status === 'done').map(i => i.rows))
+      importPreview.value = all.map(r => ({ ...r }))
+    }
+
+    const runOcr = async () => {
+      const pending = ocrImages.value.filter(i => i.status === 'pending' || i.status === 'error')
+      if (!pending.length) return
+      ocrRunning.value = true
+      // 引擎加载也计入运行中，避免 UI 卡在「待识别」
+      for (const img of pending) {
+        img.status = 'running'
+        img.progress = 0
+        img.error = ''
+      }
+      try {
+        const worker = await getOcrWorker()
+        const names = commodities.value.map(c => c.name)
+        for (const img of pending) {
+          ocrProgressCb = p => { img.progress = p }
+          try {
+            const canvas = await preprocessImage(img.file)
+            const result = await worker.recognize(canvas, {}, { text: true })
+            const parsed = window.OcrParse.parse(result.data.text || '', {
+              commodityNames: names,
+              mode: 'auto',
+            })
+            img.mode = parsed.mode
+            img.rows = parsed.rows
+            img.status = 'done'
+            if (!parsed.rows.length) img.error = '未识别到已知商品，可尝试更清晰的截图'
+          } catch (e) {
+            img.status = 'error'
+            img.error = e.message || '识别失败'
+          }
+        }
+        ocrProgressCb = null
+        rebuildOcrPreview()
+        const okCount = ocrImages.value.filter(i => i.status === 'done' && i.rows.length).length
+        const total = ocrImages.value.reduce((s, i) => s + i.rows.length, 0)
+        if (okCount) ElMessage.success(`识别完成：${okCount} 张图共 ${total} 项，请核对预览后导入`)
+        else ElMessage.warning('未能从截图中识别到商品价格，请确认截图清晰完整')
+      } catch (e) {
+        for (const img of pending) {
+          if (img.status === 'running') {
+            img.status = 'error'
+            img.error = e.message || 'OCR 初始化失败'
+          }
+        }
+        ElMessage.error('OCR 初始化失败：' + e.message)
+      } finally {
+        ocrProgressCb = null
+        ocrRunning.value = false
+      }
+    }
+
+    /** 预览可编辑（input 值为字符串），提交前统一转数值 */
+    const sanitizePreviewRows = () => importPreview.value.map(r => {
+      const num = v => {
+        if (v === '' || v == null) return null
+        const n = Number(String(v).replace(/[^\d.-]/g, ''))
+        return Number.isFinite(n) && n >= 0 ? n : null
+      }
+      return { commodity: String(r.commodity || '').trim(), buy: num(r.buy), sell: num(r.sell), burden: num(r.burden) }
+    }).filter(r => r.commodity)
+
     const submitImport = async () => {
-      if (!importPreview.value.length) { ElMessage.warning('请先选择要导入的 Excel 文件'); return }
+      const rows = sanitizePreviewRows()
+      if (!rows.length) { ElMessage.warning('请先上传 Excel 或游戏截图进行识别'); return }
       importing.value = true
       try {
         const res = await api('/api/prices/import', {
@@ -742,8 +913,10 @@ createApp({
             server: form.server.trim(),
             city: form.city,
             operator: nickname.value,
-            rows: importPreview.value,
+            rows,
             createCommodities: importAutoCreate.value,
+            // OCR 只识别单侧价格（买/卖），merge 避免 null 清掉另一侧已有价格
+            merge: importTab.value === 'ocr',
           },
         })
         ElMessage.success(`导入完成：新增 ${res.created} 条，更新 ${res.updated} 条${res.newDictCount ? `，创建商品 ${res.newDictCount} 个` : ''}`)
@@ -864,8 +1037,9 @@ createApp({
       matrixVisible, matrixCommodity, matrixLoading, matrixData, openMatrix, loadMatrix,
       matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute,
       // 导入导出
-      importVisible, importFileName, importPreview, importAutoCreate, importing,
+      importVisible, importTab, importFileName, importPreview, importAutoCreate, importing,
       importFileEl, openImport, clearImportFile, onImportFile, downloadImportTemplate, submitImport,
+      ocrFileEl, ocrImages, ocrRunning, onOcrFiles, clearOcr, runOcr, rebuildOcrPreview,
       exportCsv,
     }
   },

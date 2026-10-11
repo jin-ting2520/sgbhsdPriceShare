@@ -34,7 +34,7 @@
 | 买价/卖价为输入框；右上角保存；弹窗确认 | 每行两个输入框；卡片头「保存」按钮 → 明细确认弹窗（原值→新值、负重、新增/修改/清空标记）→ 写入数据库 |
 | 字典表存储城池/商品，不可重复；下拉可输入并保存新增 | `dict_items` 表 + 唯一索引；下拉 `filterable + allow-create`，回车或点保存即入字典；「字典管理」弹窗支持增删改、启停、排序、**商品负重维护** |
 | 操作说明区域 | 页面底部「操作说明」卡片：7 步流程 + 4 个技巧卡片 |
-| 附加 | **昵称即入**（输入三国冰河时代昵称进入，本机缓存免重复输入，自动作为更新人）、**跨城比价利润**（（卖出城卖价−买入城买价）÷负重，自动推荐最优买卖路线）、更新时间/更新人列、价格趋势图、变更日志记录操作人、响应式（PC 表格/手机卡片+底部保存条）、CSV 导出、Excel 批量导入（模板下载）、快捷键、PWA |
+| 附加 | **昵称即入**（输入三国冰河时代昵称进入，本机缓存免重复输入，自动作为更新人）、**跨城比价利润**（（卖出城卖价−买入城买价）÷负重，自动推荐最优买卖路线）、更新时间/更新人列、价格趋势图、变更日志记录操作人、响应式（PC 表格/手机卡片+底部保存条）、CSV 导出、Excel 批量导入（模板下载）、**游戏截图 OCR 识别导入**（Tesseract.js 本机离线识别，无需上传图片）、快捷键、PWA |
 
 ## 三、快速开始
 
@@ -44,7 +44,7 @@
 npm install
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启（--watch）
-npm test           # 运行测试（node --test，14 项）
+npm test           # 运行测试（node --test，25 项）
 npm run db:vacuum  # 数据库维护（压缩 + 统计）
 ```
 
@@ -102,12 +102,14 @@ sgbhsdPriceShare/
 │   └── scripts/vacuum.js
 ├── public/
 │   ├── index.html          # 页面骨架（昵称入口 + Vue 模板 + importmap）
-│   ├── js/app.js           # Vue 应用逻辑（昵称/查询/趋势/比价）
+│   ├── js/app.js           # Vue 应用逻辑（昵称/查询/趋势/比价/OCR 导入）
+│   ├── js/ocr-parse.js     # OCR 截图文本解析器（UMD，浏览器与 Node 测试共用）
 │   ├── css/app.css         # 样式 + 响应式
-│   ├── sw.js               # Service Worker（PWA 离线缓存）
+│   ├── sw.js               # Service Worker（PWA 离线缓存，OCR 大文件不缓存）
 │   ├── manifest.webmanifest# PWA 清单
 │   └── icons/icon.svg      # 应用图标
-├── test/api.test.js        # 后端接口测试（14 项，node:test）
+├── test/api.test.js        # 后端接口测试（17 项，node:test）
+├── test/ocr-parse.test.js  # OCR 解析器单测（8 项，node:test）
 ├── data/                   # SQLite 数据（自动生成，勿提交）
 ├── backup/                 # 部署脚本备份目录
 ├── .github/workflows/      # CI 测试 + Docker 镜像发布
@@ -138,7 +140,7 @@ sgbhsdPriceShare/
 | GET | `/api/prices/trend?server&city&commodity&days` | 价格趋势（逐次变更时点 buy/sell 点列，前向填充） |
 | GET | `/api/prices/matrix?server&commodity` | 跨城池比价（各城池价格 + 最低买入/最高卖出） |
 | GET | `/api/prices/export?server&city` | CSV 导出（UTF-8 BOM，Excel 兼容） |
-| POST | `/api/prices/import` | 批量导入（`rows` 结构化数组或 `text` 粘贴文本；自动创建新商品可选，支持负重列） |
+| POST | `/api/prices/import` | 批量导入（`rows` 结构化数组或 `text` 粘贴文本；`merge:true` 时 null 价不清空原值，OCR 单侧识别用；自动创建新商品可选，支持负重列） |
 
 错误码：`0` 成功；`40901` 重复；`40902` 被引用不可删除。
 
@@ -169,19 +171,19 @@ sgbhsdPriceShare/
 5. **响应式双布局**：PC 端表格、手机端卡片 + 底部吸底保存条，触屏目标区域 ≥ 44px。
 6. **脏值跟踪与局部保存**：只提交有改动的行，确认弹窗展示「原值 → 新值」并标注新增/修改/清空。
 7. **变更审计**：`price_history` 记录每次改价前后值与操作人，页面「日志」可查。
-8. **批量能力**：CSV 导出（含负重/更新时间/更新人，Excel 兼容）+ Excel 导入（.xlsx，提供模板下载、上传预览、自动创建新商品、支持负重列）。
+8. **批量能力**：CSV 导出（含负重/更新时间/更新人，Excel 兼容）+ Excel 导入（.xlsx，提供模板下载、上传预览、自动创建新商品、支持负重列）+ **游戏截图 OCR 识别导入**（Tesseract.js 本机离线识别，截图不上传服务器；自动判买/卖坊市，多图合并，merge 模式不清空另一侧已有价格，预览可手工修正）。
 9. **防错设计**：数字白名单过滤、唯一约束 409 友好提示、被引用的字典项禁止删除、删除需二次确认。
 10. **体验细节**：历史区服联想、最近一次选择记忆（localStorage）、Ctrl+Enter 快捷保存、同上一行复制。
 11. **安全与运维**：容器内非 root 运行、健康检查、数据卷持久化、无外网 CDN 依赖（内网可部署）。
 12. **PWA**：Service Worker 缓存 + manifest，可添加到手机桌面、弱网可用。
 13. **CI/CD**：GitHub Actions 跑测试；推送自动构建 amd64/arm64 镜像并发布 Docker Hub。
-14. **工程质量**：16 项后端接口测试（`npm test`）+ 20 步 Chrome CDP 端到端冒烟，覆盖昵称进入、查询、录价保存（更新人留痕）、趋势缩放、比价、Excel 导入、字典、日志、刷新免登等。
+14. **工程质量**：25 项后端/解析器测试（`npm test`）+ 21 步 Chrome CDP 端到端冒烟，覆盖昵称进入、查询、录价保存（更新人留痕）、趋势缩放、比价、Excel 导入、**截图 OCR 识别导入**、字典、日志、刷新免登等。
 
 **后续可扩展路线**
 
 1. **协作实时化**：WebSocket 推送他人改价，避免并发覆盖（当前为最后写入优先 + 流水可查）。
 2. **按区服分配权限**：当前角色为全局，可扩展到「某区服仅某小组可编辑」。
 3. **数据规模升级**：迁移 MySQL/PostgreSQL（改造点仅在 `server/db.js` 与少量 SQL）；引入 Redis 缓存字典。
-4. **自动化**：游戏内物价截图 OCR / 页面抓取自动入库；定时任务汇总日报推送到群机器人。
+4. **自动化**：已支持游戏内物价截图 OCR 识别入库（Tesseract.js 本机离线）；后续可扩展页面抓取自动入库、定时任务汇总日报推送到群机器人。
 5. **更丰富的报表**：涨跌幅榜、城池间套利建议、按时间段的成交热度。
 6. **工程质量**：补充前端 Vitest 单测与 Playwright E2E；Helm Chart 上 K8s。
