@@ -23,5 +23,11 @@
   "optionalDependencies": {
     "@tesseract.js-data/chi_sim": "^1.0.0",
     "@tesseract.js-data/eng": "^1.0.0"
+  },
+  "devDependencies": {
+    "canvas": "^3.2.3"
+  },
+  "allowScripts": {
+    "canvas@3.2.3": true
   }
 }

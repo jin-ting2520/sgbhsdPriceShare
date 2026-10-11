@@ -43,6 +43,7 @@ app.get('/vendor/tessdata/:lang.traineddata.gz', (req, res, next) => {
   res.setHeader('Cache-Control', 'public, max-age=604800');
   res.sendFile(file, err => { if (err) next(); });
 });
+
 app.use(express.static(nodePath.join(__dirname, '..', 'public')));
 app.use('/public', express.static(nodePath.join(__dirname, '..', 'public')));
 
