@@ -229,26 +229,52 @@ router.get('/trend', asyncHandler((req, res) => {
     ).all(serverId, cityId, commodityRow.id));
   }
 
-  // 近 N 天
-  const cutoff = new Date(Date.now() - days * 86400000);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  // 近 N 天（按北京时间日期切，created_at 为北京时间字符串）
+  const cutoff = new Date(Date.now() + 8 * 3600000 - days * 86400000).toISOString().slice(0, 10);
+  // cutoff 之前最后已知值，作为填充种子
+  let seedBuy = null;
+  let seedSell = null;
   const byDate = new Map();
   for (const r of rows) {
     const d = String(r.createdAt).slice(0, 10);
-    if (d < cutoffStr) continue;
+    const key = r.field === 'sell_price' ? 'sell' : 'buy';
+    if (d < cutoff) {
+      if (r.value != null) { if (key === 'buy') seedBuy = r.value; else seedSell = r.value; }
+      continue;
+    }
     if (!byDate.has(d)) byDate.set(d, {});
-    byDate.get(d)[r.field === 'sell_price' ? 'sell' : 'buy'] = r.value;
+    byDate.get(d)[key] = r.value;
   }
+
+  // 当前价格并入，保证图上始终包含最新买价/卖价
+  const current = (serverId && cityId)
+    ? db.prepare('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?')
+        .get(serverId, cityId, commodityRow.id)
+    : null;
+  const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+  if (current && (current.buy != null || current.sell != null)) {
+    const day = byDate.has(today) ? byDate.get(today) : (byDate.set(today, {}), byDate.get(today));
+    if (current.buy != null) day.buy = current.buy;
+    if (current.sell != null) day.sell = current.sell;
+  }
+
+  // 前向填充：每个数据点都带上最近一次已知的买价与卖价，两条线连续不断裂
+  let lastBuy = seedBuy;
+  let lastSell = seedSell;
   const points = [...byDate.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([date, v]) => ({ date, buy: v.buy ?? null, sell: v.sell ?? null }));
+    .map(([date, v]) => {
+      if (v.buy != null) lastBuy = v.buy;
+      if (v.sell != null) lastSell = v.sell;
+      return { date, buy: lastBuy, sell: lastSell };
+    });
 
   const buys = points.map(p => p.buy).filter(v => v != null);
   const sells = points.map(p => p.sell).filter(v => v != null);
   const summary = {
     count: points.length,
-    lastBuy: points.length ? points[points.length - 1].buy : null,
-    lastSell: points.length ? points[points.length - 1].sell : null,
+    lastBuy: buys.length ? buys[buys.length - 1] : null,
+    lastSell: sells.length ? sells[sells.length - 1] : null,
     minBuy: buys.length ? Math.min(...buys) : null,
     maxBuy: buys.length ? Math.max(...buys) : null,
     minSell: sells.length ? Math.min(...sells) : null,

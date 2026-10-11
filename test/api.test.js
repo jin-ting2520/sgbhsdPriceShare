@@ -205,6 +205,11 @@ test('趋势：返回按天的价格点', async () => {
   const last = r.json.data.points[r.json.data.points.length - 1];
   assert.equal(last.buy, 25);
   assert.equal(last.sell, 31);
+  // 前向填充：每个数据点买价卖价都应有值，保证图上两条线连续完整
+  for (const p of r.json.data.points) {
+    assert.notEqual(p.buy, null, `${p.date} 缺买价`);
+    assert.notEqual(p.sell, null, `${p.date} 缺卖价`);
+  }
 });
 
 test('比价：跨城池价格矩阵含最低买入城', async () => {
