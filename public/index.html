@@ -626,7 +626,7 @@
             <img :src="img.url" class="ocr-thumb" alt="">
             <div class="ocr-meta">
               <div style="font-size:12.5px;word-break:break-all">{{ img.name }}</div>
-              <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+              <div style="display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap">
                 <el-select v-model="img.mode" size="small" style="width:110px" :disabled="ocrRunning || img.status !== 'done'" @change="rebuildOcrPreview">
                   <el-option label="卖出坊市" value="sell"></el-option>
                   <el-option label="买入坊市" value="buy"></el-option>
@@ -635,7 +635,12 @@
                 <span v-else-if="img.status==='running'" class="ocr-status">识别中 {{ Math.round(img.progress * 100) }}%</span>
                 <span v-else-if="img.status==='done'" class="ocr-status ok">识别到 {{ img.rows.length }} 项</span>
                 <span v-else class="ocr-status danger">{{ img.error || '失败' }}</span>
+                <el-button v-if="img.rawText" link type="primary" size="small" @click="img.showText = !img.showText">
+                  {{ img.showText ? '收起原文' : '识别原文' }}
+                </el-button>
               </div>
+              <div v-if="img.error && img.status==='done'" class="ocr-status danger" style="margin-top:2px">{{ img.error }}</div>
+              <pre v-if="img.showText && img.rawText" class="ocr-raw">{{ img.rawText }}</pre>
             </div>
           </div>
         </div>

@@ -774,39 +774,271 @@ createApp({
       return ocrWorker
     }
 
-    /** 预处理：缩放至宽 ≤1600、灰度化、对比度拉伸（利于金色数字在棕底上的识别） */
-    const preprocessImage = async file => {
+    /** 检测卡片横向色带：卡底浅棕、卡缝深棕；必须有明显分隔缝才算多卡（避免纯色底误切） */
+    const detectCardBands = (data, w, h) => {
+      const rows = new Uint8Array(h)
+      const x0 = Math.floor(w * 0.16)
+      const x1 = Math.floor(w * 0.88)
+      for (let y = 0; y < h; y++) {
+        let card = 0, total = 0
+        for (let x = x0; x < x1; x += 3) {
+          const i = (y * w + x) * 4
+          const r = data[i], g = data[i + 1], b = data[i + 2]
+          total++
+          // 浅棕卡底：偏亮、R>G>B
+          if (r > 155 && g > 130 && b > 100 && r > b + 18 && r < 250) card++
+        }
+        rows[y] = (card / total) > 0.55 ? 1 : 0
+      }
+      // 先找连续卡带，再要求相邻带之间有足够「非卡」分隔缝（真实 UI 卡缝约 8~20px 深棕）
+      const raw = []
+      let start = -1
+      const minH = Math.max(50, Math.floor(h * 0.06))
+      for (let y = 0; y < h; y++) {
+        if (rows[y] && start < 0) start = y
+        else if (!rows[y] && start >= 0) {
+          if (y - start >= minH) raw.push({ top: start, bottom: y })
+          start = -1
+        }
+      }
+      if (start >= 0 && h - start >= minH) raw.push({ top: start, bottom: h })
+      if (raw.length < 2) return []
+      const minGap = Math.max(4, Math.floor(h * 0.008))
+      const bands = [raw[0]]
+      for (let i = 1; i < raw.length; i++) {
+        const gap = raw[i].top - bands[bands.length - 1].bottom
+        if (gap >= minGap) bands.push(raw[i])
+        else {
+          // 缝太窄 → 合并为同一带（可能是卡内文字行造成的断裂）
+          bands[bands.length - 1].bottom = raw[i].bottom
+        }
+      }
+      return bands.length >= 2 ? bands : []
+    }
+
+    const cropCanvas = (src, x, y, cw, ch) => {
+      const out = document.createElement('canvas')
+      out.width = cw
+      out.height = ch
+      out.getContext('2d').drawImage(src, x, y, cw, ch, 0, 0, cw, ch)
+      return out
+    }
+
+    /** 小图裁剪强预处理：灰度 + Otsu 二值（花式金字→实心黑字，最利于 Tesseract） */
+    const prepCrop = src => {
+      const w = src.width, h = src.height
+      const ctx = src.getContext('2d', { willReadFrequently: true })
+      const img = ctx.getImageData(0, 0, w, h)
+      const d = img.data
+      const n = w * h
+      const gray = new Uint8Array(n)
+      for (let i = 0, p = 0; p < n; i += 4, p++) {
+        gray[p] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
+      }
+      const hist = new Uint32Array(256)
+      for (let p = 0; p < n; p++) hist[gray[p]]++
+      let sum = 0
+      for (let v = 0; v < 256; v++) sum += v * hist[v]
+      let sumB = 0, wB = 0, maxVar = 0, otsu = 128
+      for (let v = 0; v < 256; v++) {
+        wB += hist[v]
+        if (!wB) continue
+        const wF = n - wB
+        if (!wF) break
+        sumB += v * hist[v]
+        const mB = sumB / wB, mF = (sum - sumB) / wF
+        const between = wB * wF * (mB - mF) * (mB - mF)
+        if (between > maxVar) { maxVar = between; otsu = v }
+      }
+      // 统计明暗占比，保证「深字浅底」
+      let dark = 0
+      for (let p = 0; p < n; p++) if (gray[p] < otsu) dark++
+      const invert = dark > n * 0.55
+      for (let i = 0, p = 0; p < n; i += 4, p++) {
+        const isDark = invert ? gray[p] >= otsu : gray[p] < otsu
+        const v = isDark ? 0 : 255
+        d[i] = d[i + 1] = d[i + 2] = v
+      }
+      ctx.putImageData(img, 0, 0)
+      return src
+    }
+
+    /** 分区识别：先切卡片带，商品名/标签/价格分条 OCR（价格走 eng 纯数字，远稳于整图中文） */
+    const recognizeByCards = async (worker, file, names, onProgress) => {
       const bitmap = await createImageBitmap(file)
-      const scale = Math.min(1, 1600 / bitmap.width)
+      const scale = bitmap.width < 1200 ? 2 : (bitmap.width < 1800 ? 1.4 : 1)
       const w = Math.round(bitmap.width * scale)
       const h = Math.round(bitmap.height * scale)
       const canvas = document.createElement('canvas')
       canvas.width = w
       canvas.height = h
       const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(bitmap, 0, 0, w, h)
       bitmap.close && bitmap.close()
-      const img = ctx.getImageData(0, 0, w, h)
-      const d = img.data
-      // 灰度 + 线性对比度拉伸（2%~98% 分位）
-      const gray = new Uint8Array(w * h)
-      for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
-        gray[p] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
+
+      const bands = detectCardBands(ctx.getImageData(0, 0, w, h).data, w, h)
+      if (bands.length < 2) return null // 切不出卡片，交给整图兜底
+
+      const mode = 'sell' // 先默认，下面用首卡标签条纠正
+      let resolvedMode = null
+      const rows = []
+      const debug = []
+
+      for (let ci = 0; ci < bands.length; ci++) {
+        onProgress && onProgress((ci + 0.5) / bands.length)
+        const { top, bottom } = bands[ci]
+        const cardH = bottom - top
+        // 比例来自该游戏实测截图：图标≈左 16%，名称/标签/价格在 18%~78%，按钮在右
+        const nameC = cropCanvas(canvas, Math.round(w * 0.17), top, Math.round(w * 0.42), Math.round(cardH * 0.36))
+        const labelC = cropCanvas(canvas, Math.round(w * 0.17), top + Math.round(cardH * 0.30), Math.round(w * 0.55), Math.round(cardH * 0.28))
+        const priceC = cropCanvas(canvas, Math.round(w * 0.17), top + Math.round(cardH * 0.52), Math.round(w * 0.60), Math.round(cardH * 0.38))
+
+        // 标签条：判定买/卖（只在首卡做一次）
+        if (resolvedMode == null) {
+          try {
+            await worker.setParameters({ tessedit_pageseg_mode: '7' })
+            const lr = await worker.recognize(prepCrop(labelC), {}, { text: true })
+            const lt = (lr.data && lr.data.text) || ''
+            debug.push('label0=' + lt.replace(/\s+/g, ' '))
+            if (/买入/.test(lt) && !/卖出/.test(lt)) resolvedMode = 'buy'
+            else resolvedMode = 'sell'
+          } catch (e) { resolvedMode = 'sell' }
+        }
+
+        // 商品名：chi_sim + 单行 PSM
+        let nameText = ''
+        try {
+          await worker.setParameters({ tessedit_pageseg_mode: '7' })
+          const nr = await worker.recognize(prepCrop(nameC), {}, { text: true })
+          nameText = ((nr.data && nr.data.text) || '').replace(/\s+/g, '')
+        } catch (e) { /* skip */ }
+
+        // 价格行：eng + 块 PSM，只认数字
+        let priceText = ''
+        try {
+          await worker.setParameters({ tessedit_pageseg_mode: '6' })
+          const pr = await worker.recognize(prepCrop(priceC), {}, { text: true })
+          priceText = (pr.data && pr.data.text) || ''
+        } catch (e) { /* skip */ }
+
+        debug.push(`c${ci} name=[${nameText}] price=[${priceText.replace(/\s+/g, ' ')}]`)
+
+        const commodity = window.OcrParse.matchCommodity(nameText, names)
+        if (!commodity) continue
+        const nums = (priceText.match(/\d+(?:\.\d+)?/g) || []).map(Number).filter(v => Number.isFinite(v) && v >= 0)
+        if (!nums.length) continue
+        const price = nums[0]
+        let burden = null
+        for (let k = 1; k < nums.length; k++) {
+          if (Number.isInteger(nums[k]) && nums[k] >= 1 && nums[k] <= 999) { burden = nums[k]; break }
+        }
+        rows.push({
+          commodity,
+          buy: resolvedMode === 'buy' ? price : null,
+          sell: resolvedMode === 'sell' ? price : null,
+          burden,
+        })
       }
-      const hist = new Uint32Array(256)
-      for (let p = 0; p < gray.length; p++) hist[gray[p]]++
-      const cut = gray.length * 0.02
-      let lo = 0, hi = 255, acc = 0
-      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= cut) { lo = v; break } }
-      acc = 0
-      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= cut) { hi = v; break } }
-      const span = Math.max(hi - lo, 1)
-      for (let i = 0, p = 0; p < gray.length; i += 4, p++) {
-        const v = Math.max(0, Math.min(255, Math.round((gray[p] - lo) * 255 / span)))
-        d[i] = d[i + 1] = d[i + 2] = v
+
+      onProgress && onProgress(1)
+      if (!rows.length) return null
+      return { rows, mode: resolvedMode || mode, text: debug.join('\n'), score: rows.length, variant: 'cards', psm: 0 }
+    }
+
+    /** 整图多路兜底：变体 × PSM，按命中商品数择优（不放大，避免把清晰小图糊掉） */
+    const recognizeWholeImage = async (worker, file, names, onProgress) => {
+      const bitmap = await createImageBitmap(file)
+      // 只缩小不放大：放大+平滑会把锐利测试图/矢量字糊掉，反而更难识别
+      const scale = Math.min(1, 1600 / bitmap.width)
+      const w = Math.round(bitmap.width * scale)
+      const h = Math.round(bitmap.height * scale)
+      const src = document.createElement('canvas')
+      src.width = w
+      src.height = h
+      const sctx = src.getContext('2d', { willReadFrequently: true })
+      if (scale < 1) {
+        sctx.imageSmoothingEnabled = true
+        sctx.imageSmoothingQuality = 'high'
       }
-      ctx.putImageData(img, 0, 0)
-      return canvas
+      sctx.drawImage(bitmap, 0, 0, w, h)
+      bitmap.close && bitmap.close()
+
+      const srcData = sctx.getImageData(0, 0, w, h)
+      const sd = srcData.data
+      const n = w * h
+      const stretchChannel = getV => {
+        const buf = new Uint8Array(n)
+        for (let i = 0, p = 0; p < n; i += 4, p++) buf[p] = getV(sd, i)
+        const hist = new Uint32Array(256)
+        for (let p = 0; p < n; p++) hist[buf[p]]++
+        const cut = n * 0.02
+        let lo = 0, hi = 255, acc = 0
+        for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= cut) { lo = v; break } }
+        acc = 0
+        for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= cut) { hi = v; break } }
+        const span = Math.max(hi - lo, 1)
+        const out = document.createElement('canvas')
+        out.width = w
+        out.height = h
+        const octx = out.getContext('2d', { willReadFrequently: true })
+        const oimg = octx.createImageData(w, h)
+        const od = oimg.data
+        for (let p = 0, i = 0; p < n; p++, i += 4) {
+          const v = Math.max(0, Math.min(255, Math.round((buf[p] - lo) * 255 / span)))
+          od[i] = od[i + 1] = od[i + 2] = v
+          od[i + 3] = 255
+        }
+        octx.putImageData(oimg, 0, 0)
+        return out
+      }
+      const gray = (d, i) => (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
+      const variants = [
+        { label: 'red', canvas: stretchChannel((d, i) => d[i]) },
+        { label: 'gray', canvas: stretchChannel(gray) },
+        { label: 'maxRG', canvas: stretchChannel((d, i) => Math.max(d[i], d[i + 1])) },
+      ]
+      const psms = [3, 6]
+      let best = { rows: [], mode: 'sell', text: '', score: -1, variant: '', psm: 0 }
+      const need = Math.max(2, Math.min(4, Math.ceil(names.length * 0.2)))
+      const totalSteps = variants.length * psms.length
+      let step = 0
+      outer:
+      for (const { label, canvas } of variants) {
+        for (const psm of psms) {
+          onProgress && onProgress(step / totalSteps)
+          step++
+          try {
+            await worker.setParameters({ tessedit_pageseg_mode: String(psm) })
+            const result = await worker.recognize(canvas, {}, { text: true })
+            const text = (result.data && result.data.text) || ''
+            const parsed = window.OcrParse.parse(text, { commodityNames: names, mode: 'auto' })
+            if (parsed.rows.length > best.score) {
+              best = { rows: parsed.rows, mode: parsed.mode, text, score: parsed.rows.length, variant: label, psm }
+            }
+            if (best.score >= need) break outer
+          } catch (e) { /* continue */ }
+        }
+      }
+      onProgress && onProgress(1)
+      return best
+    }
+
+    const recognizeImageBest = async (worker, file, names, onProgress) => {
+      let best = null
+      try {
+        best = await recognizeByCards(worker, file, names, p => onProgress && onProgress(p * 0.85))
+      } catch (e) { best = null }
+      if (best && best.score >= 2) {
+        onProgress && onProgress(1)
+        return best
+      }
+      // 整图兜底
+      const whole = await recognizeWholeImage(worker, file, names, p => onProgress && onProgress(0.85 + p * 0.15))
+      if (!best || whole.score > best.score) return whole
+      onProgress && onProgress(1)
+      return best
     }
 
     const onOcrFiles = ev => {
@@ -824,6 +1056,9 @@ createApp({
           progress: 0,
           rows: [],
           error: '',
+          rawText: '',
+          variant: '',
+          showText: false,
         })
       }
       if (ev.target) ev.target.value = ''
@@ -857,16 +1092,15 @@ createApp({
         for (const img of pending) {
           ocrProgressCb = p => { img.progress = p }
           try {
-            const canvas = await preprocessImage(img.file)
-            const result = await worker.recognize(canvas, {}, { text: true })
-            const parsed = window.OcrParse.parse(result.data.text || '', {
-              commodityNames: names,
-              mode: 'auto',
-            })
-            img.mode = parsed.mode
-            img.rows = parsed.rows
+            const best = await recognizeImageBest(worker, img.file, names)
+            img.mode = best.mode
+            img.rows = best.rows
+            img.rawText = best.text || ''
+            img.variant = best.variant || ''
             img.status = 'done'
-            if (!parsed.rows.length) img.error = '未识别到已知商品，可尝试更清晰的截图'
+            if (!best.rows.length) {
+              img.error = '未识别到已知商品，可展开「识别原文」查看 OCR 输出，或换更清晰截图'
+            }
           } catch (e) {
             img.status = 'error'
             img.error = e.message || '识别失败'
