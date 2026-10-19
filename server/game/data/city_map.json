@@ -1,0 +1,338 @@
+[
+  {
+    "name": "桂阳",
+    "cfgName": "桂阳",
+    "metaId": 1100017,
+    "nodeNo": 17,
+    "gridX": 34,
+    "gridY": 47
+  },
+  {
+    "name": "浈阳",
+    "cfgName": "浈阳",
+    "metaId": 1100050,
+    "nodeNo": 50,
+    "gridX": 138,
+    "gridY": 33
+  },
+  {
+    "name": "曲江",
+    "cfgName": "曲江",
+    "metaId": 1100016,
+    "nodeNo": 16,
+    "gridX": 254,
+    "gridY": 34
+  },
+  {
+    "name": "赣县",
+    "cfgName": "赣县",
+    "metaId": 1100076,
+    "nodeNo": 76,
+    "gridX": 349,
+    "gridY": 39
+  },
+  {
+    "name": "柴桑",
+    "cfgName": "柴桑",
+    "metaId": 1100114,
+    "nodeNo": 114,
+    "gridX": 439,
+    "gridY": 61
+  },
+  {
+    "name": "谢沐",
+    "cfgName": "谢沐",
+    "metaId": 1100149,
+    "nodeNo": 149,
+    "gridX": 24,
+    "gridY": 150
+  },
+  {
+    "name": "营浦",
+    "cfgName": "营浦",
+    "metaId": 1100160,
+    "nodeNo": 160,
+    "gridX": 87,
+    "gridY": 101
+  },
+  {
+    "name": "梆县",
+    "cfgName": "郴县",
+    "metaId": 1100116,
+    "nodeNo": 116,
+    "gridX": 190,
+    "gridY": 85
+  },
+  {
+    "name": "茶陵",
+    "cfgName": "茶陵",
+    "metaId": 1100054,
+    "nodeNo": 54,
+    "gridX": 271,
+    "gridY": 121
+  },
+  {
+    "name": "庐陵",
+    "cfgName": "庐陵",
+    "metaId": 1100115,
+    "nodeNo": 115,
+    "gridX": 338,
+    "gridY": 124
+  },
+  {
+    "name": "宜春",
+    "cfgName": "宜春",
+    "metaId": 1100077,
+    "nodeNo": 77,
+    "gridX": 402,
+    "gridY": 151
+  },
+  {
+    "name": "蕲春",
+    "cfgName": "蕲春",
+    "metaId": 1100078,
+    "nodeNo": 78,
+    "gridX": 462,
+    "gridY": 161
+  },
+  {
+    "name": "宛陵",
+    "cfgName": "宛陵",
+    "metaId": 1100140,
+    "nodeNo": 140,
+    "gridX": 536,
+    "gridY": 121
+  },
+  {
+    "name": "谭成",
+    "cfgName": "镡成",
+    "metaId": 1100019,
+    "nodeNo": 19,
+    "gridX": 31,
+    "gridY": 281
+  },
+  {
+    "name": "零陵",
+    "cfgName": "零陵",
+    "metaId": 1100051,
+    "nodeNo": 51,
+    "gridX": 88,
+    "gridY": 215
+  },
+  {
+    "name": "泉陵",
+    "cfgName": "泉陵",
+    "metaId": 1100018,
+    "nodeNo": 18,
+    "gridX": 143,
+    "gridY": 153
+  },
+  {
+    "name": "酃县",
+    "cfgName": "酃县",
+    "metaId": 1100053,
+    "nodeNo": 53,
+    "gridX": 213,
+    "gridY": 187
+  },
+  {
+    "name": "江陵",
+    "cfgName": "江陵",
+    "metaId": 1100021,
+    "nodeNo": 21,
+    "gridX": 276,
+    "gridY": 228
+  },
+  {
+    "name": "临湘",
+    "cfgName": "临湘",
+    "metaId": 1100079,
+    "nodeNo": 79,
+    "gridX": 358,
+    "gridY": 216
+  },
+  {
+    "name": "西陵",
+    "cfgName": "西陵",
+    "metaId": 1100132,
+    "nodeNo": 132,
+    "gridX": 438,
+    "gridY": 237
+  },
+  {
+    "name": "戈阳",
+    "cfgName": "戈阳",
+    "metaId": 1100103,
+    "nodeNo": 103,
+    "gridX": 518,
+    "gridY": 246
+  },
+  {
+    "name": "安丰",
+    "cfgName": "安丰",
+    "metaId": 1100104,
+    "nodeNo": 104,
+    "gridX": 595,
+    "gridY": 171
+  },
+  {
+    "name": "鄱阳",
+    "cfgName": "鄱阳",
+    "metaId": 1100075,
+    "nodeNo": 75,
+    "gridX": 518,
+    "gridY": 38
+  },
+  {
+    "name": "钱塘",
+    "cfgName": "钱塘",
+    "metaId": 1100015,
+    "nodeNo": 15,
+    "gridX": 610,
+    "gridY": 31
+  },
+  {
+    "name": "芜湖",
+    "cfgName": "芜湖",
+    "metaId": 1100049,
+    "nodeNo": 49,
+    "gridX": 664,
+    "gridY": 87
+  },
+  {
+    "name": "西阳",
+    "cfgName": "西阳",
+    "metaId": 1100141,
+    "nodeNo": 141,
+    "gridX": 475,
+    "gridY": 331
+  },
+  {
+    "name": "章陵",
+    "cfgName": "章陵",
+    "metaId": 1100024,
+    "nodeNo": 24,
+    "gridX": 406,
+    "gridY": 361
+  },
+  {
+    "name": "襄阳",
+    "cfgName": "襄阳",
+    "metaId": 1100133,
+    "nodeNo": 133,
+    "gridX": 331,
+    "gridY": 376
+  },
+  {
+    "name": "夷陵",
+    "cfgName": "夷陵",
+    "metaId": 1100093,
+    "nodeNo": 93,
+    "gridX": 219,
+    "gridY": 336
+  },
+  {
+    "name": "巫县",
+    "cfgName": "巫县",
+    "metaId": 1100022,
+    "nodeNo": 22,
+    "gridX": 210,
+    "gridY": 418
+  },
+  {
+    "name": "白帝城",
+    "cfgName": "白帝城",
+    "metaId": 1100084,
+    "nodeNo": 84,
+    "gridX": 192,
+    "gridY": 503
+  },
+  {
+    "name": "涪陵",
+    "cfgName": "涪陵",
+    "metaId": 1100118,
+    "nodeNo": 118,
+    "gridX": 119,
+    "gridY": 456
+  },
+  {
+    "name": "江州",
+    "cfgName": "江州",
+    "metaId": 1100080,
+    "nodeNo": 80,
+    "gridX": 29,
+    "gridY": 480
+  },
+  {
+    "name": "辰阳",
+    "cfgName": "辰阳",
+    "metaId": 1100055,
+    "nodeNo": 55,
+    "gridX": 36,
+    "gridY": 391
+  },
+  {
+    "name": "昭陵",
+    "cfgName": "昭陵",
+    "metaId": 1100117,
+    "nodeNo": 117,
+    "gridX": 89,
+    "gridY": 329
+  },
+  {
+    "name": "酉阳",
+    "cfgName": "酉阳",
+    "metaId": 1100020,
+    "nodeNo": 20,
+    "gridX": 141,
+    "gridY": 374
+  },
+  {
+    "name": "广汉",
+    "cfgName": "广汉",
+    "metaId": 1100119,
+    "nodeNo": 119,
+    "gridX": 58,
+    "gridY": 552
+  },
+  {
+    "name": "朐县",
+    "cfgName": "朐县",
+    "metaId": 1100120,
+    "nodeNo": 120,
+    "gridX": 139,
+    "gridY": 566
+  },
+  {
+    "name": "西城",
+    "cfgName": "西城",
+    "metaId": 1100143,
+    "nodeNo": 143,
+    "gridX": 219,
+    "gridY": 589
+  },
+  {
+    "name": "房陵",
+    "cfgName": "房龄",
+    "metaId": 1100023,
+    "nodeNo": 23,
+    "gridX": 280,
+    "gridY": 467
+  },
+  {
+    "name": "洛阳",
+    "cfgName": "洛阳",
+    "metaId": 1100175,
+    "nodeNo": 175,
+    "gridX": 657,
+    "gridY": 512
+  },
+  {
+    "name": "上庸",
+    "cfgName": "上庸",
+    "metaId": 1100142,
+    "nodeNo": 142,
+    "gridX": 354,
+    "gridY": 473
+  }
+]

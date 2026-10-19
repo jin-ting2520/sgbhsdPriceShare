@@ -15,7 +15,12 @@ const { login } = require('./login');
 const { GameClient } = require('./client');
 const { isUniqueConstraintError } = require('../util');
 
-const CITY_MAP = JSON.parse(fs.readFileSync(nodePath.join(__dirname, 'data', 'city_map.json'), 'utf8'));
+let CITY_MAP;
+try {
+  CITY_MAP = JSON.parse(fs.readFileSync(nodePath.join(__dirname, 'data', 'city_map.json'), 'utf8'));
+} catch (err) {
+  throw new Error(`缺少 server/game/data/city_map.json（需随仓库提交，Docker 构建依赖它）: ${err.message}`);
+}
 
 const CITY_QUERY_TIMEOUT_MS = 8000;
 const CITIES_PER_SYNC_LIMIT = 100;
