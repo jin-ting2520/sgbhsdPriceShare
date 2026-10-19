@@ -2,13 +2,16 @@
   "name": "sgbhsd-price-share",
   "version": "1.0.0",
   "private": true,
-  "description": "三国冰河时代富甲天下跑商价格分享：城池/商品买卖价格录入、查询与共享 (Node.js + SQLite + Vue3 + Element Plus)",
+  "description": "三国冰河时代富甲天下跑商价格分享：游戏直连同步、实时协作、MySQL/Redis 与报表 (Node.js + Vue3 + Element Plus)",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test \"test/*.test.js\"",
-    "db:vacuum": "node server/scripts/vacuum.js"
+    "test:smoke": "node server/scripts/smoke.js",
+    "db:vacuum": "node server/scripts/vacuum.js",
+    "db:migrate": "node server/scripts/migrate-to-mysql.js",
+    "game:sync": "node server/scripts/game-sync.js"
   },
   "engines": {
     "node": ">=22.5.0"
@@ -16,18 +19,11 @@
   "dependencies": {
     "element-plus": "^2.9.0",
     "express": "^4.21.2",
-    "tesseract.js": "^6.0.1",
+    "mysql2": "^3.24.6",
+    "node-cron": "^4.6.0",
+    "redis": "^6.3.0",
     "vue": "^3.5.13",
+    "ws": "^8.22.0",
     "xlsx": "^0.18.5"
-  },
-  "optionalDependencies": {
-    "@tesseract.js-data/chi_sim": "^1.0.0",
-    "@tesseract.js-data/eng": "^1.0.0"
-  },
-  "devDependencies": {
-    "canvas": "^3.2.3"
-  },
-  "allowScripts": {
-    "canvas@3.2.3": true
   }
 }

@@ -6,6 +6,16 @@ const MOBILE_MEDIA = '(max-width: 768px)'
 const STORAGE_KEY = 'sgbhsd.priceShare.form.v1'
 const NICK_KEY = 'sgbhsd.nickname.v1'
 
+const CRON_PRESETS = [
+  { label: '每 1 小时', value: '0 * * * *' },
+  { label: '每 2 小时', value: '0 */2 * * *' },
+  { label: '每 6 小时', value: '0 */6 * * *' },
+  { label: '每 12 小时', value: '0 */12 * * *' },
+  { label: '每天 08:00', value: '0 8 * * *' },
+  { label: '每天 20:00', value: '0 20 * * *' },
+  { label: '自定义 cron', value: 'custom' },
+]
+
 /* ------------------------------ 请求封装 ------------------------------ */
 
 async function api(path, options = {}) {
@@ -20,7 +30,12 @@ async function api(path, options = {}) {
   let json = null
   try { json = await res.json() } catch (e) { json = null }
   if (!json) throw new Error(`服务异常（HTTP ${res.status}）`)
-  if (json.code !== 0) throw new Error(json.message || '请求失败')
+  if (json.code !== 0) {
+    const err = new Error(json.message || '请求失败')
+    err.code = json.code
+    err.data = json.data
+    throw err
+  }
   return json.data
 }
 
@@ -65,6 +80,7 @@ createApp({
       ])
       cities.value = cityRes.items
       commodities.value = commodityRes.items
+      if (!queried.value) buildRowsFromDict()
     }
 
     const loadServers = async () => {
@@ -75,7 +91,7 @@ createApp({
     /* 未查询时也用全部商品铺满列表（其他列显示 -） */
     const buildRowsFromDict = () => rows.value = commodities.value.map(c => ({
       commodityId: c.id, commodity: c.name, burden: c.burden,
-      buy: '', sell: '', updatedAt: null, operator: null,
+      buy: '', sell: '', updatedAt: null, operator: null, _base: { buy: null, sell: null }, _baseUpdatedAt: null,
     }))
 
     /** 点击「进入」：校验昵称 → 缓存 → 加载数据 */
@@ -127,7 +143,6 @@ createApp({
     const isKnown = (type, name) =>
       (type === 'city' ? cities.value : commodities.value).some(i => i.name === name)
 
-    /** 将输入框中的新名称写入字典表，返回是否新增 */
     const ensureDictItem = async (type, name) => {
       if (!name || isKnown(type, name)) return false
       try {
@@ -140,7 +155,6 @@ createApp({
       }
     }
 
-    /* 选择 / 回车提交新城池、新商品时立即入字典 */
     const onDictChange = async (type, val) => {
       if (!val) return
       const created = await ensureDictItem(type, val)
@@ -148,7 +162,6 @@ createApp({
       if (queried.value) await doFetch(false)
     }
 
-    /* 查询 / 保存前，把下拉框里未回车提交的新名称也写入字典 */
     const commitPendingDict = async (mode = 'query') => {
       let changed = false
       const pendingCity = getPendingInput(citySelect.value)
@@ -174,10 +187,10 @@ createApp({
         const res = await api(`/api/prices?${q.toString()}`)
         rows.value = res.items.map(r => ({
           ...r,
-          // 输入框用空串表示无值；fmt 的 '-' 仅用于展示，不能写回可编辑字段
           buy: r.buy == null ? '' : String(r.buy),
           sell: r.sell == null ? '' : String(r.sell),
-          _base: { buy: r.buy, sell: r.sell }, // 保存前的数据库原值，用于脏值比对
+          _base: { buy: r.buy, sell: r.sell },
+          _baseUpdatedAt: r.updatedAt,
         }))
         queried.value = true
       } catch (e) {
@@ -225,7 +238,7 @@ createApp({
 
     const clearRow = row => { row.buy = ''; row.sell = '' }
 
-    /* ---------- 跨城利润展示（比价弹窗：（卖出城卖价 - 本城买价）/ 负重） ---------- */
+    /* ---------- 跨城利润展示 ---------- */
     const profitText = v => (v == null ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(2))
     const profitClass = v => (v == null ? '' : v > 0 ? 'profit-pos' : v < 0 ? 'profit-neg' : '')
 
@@ -237,15 +250,20 @@ createApp({
       return numOrNull(row.buy) !== b.buy || numOrNull(row.sell) !== b.sell
     }
 
-    /** 表格行样式：有未保存修改时整行高亮 */
-    const rowClass = row => (queried.value && isDirty(row.row) ? 'row-dirty' : '')
+    const rowClass = row => (queried.value && (isDirty(row.row) || row.row._remoteConflict) ? 'row-dirty' : '')
 
     const changedRows = computed(() => rows.value
       .filter(r => queried.value && isDirty(r))
-      .map(r => ({ ...r, _baseBuy: fmt(r._base && r._base.buy), _baseSell: fmt(r._base && r._base.sell) })))
+      .map(r => ({
+        ...r,
+        baseUpdatedAt: r._baseUpdatedAt,
+        _baseBuy: fmt(r._base && r._base.buy),
+        _baseSell: fmt(r._base && r._base.sell),
+      })))
 
     const changedCount = computed(() => changedRows.value.length)
     const canSave = computed(() => queried.value && changedCount.value > 0)
+    const conflictCount = computed(() => rows.value.filter(r => r._remoteConflict).length)
 
     const stats = computed(() => {
       let filled = 0
@@ -255,7 +273,125 @@ createApp({
       return { filled }
     })
 
-    /* ---------- 保存 ---------- */
+    /* ---------- 实时协作 WebSocket ---------- */
+    const wsConnected = ref(false)
+    const wsClients = ref(0)
+    let ws = null
+    let wsRetry = null
+    let wsPing = null
+
+    const connectWs = () => {
+      if (ws || !entered.value) return
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+      try {
+        ws = new WebSocket(`${proto}//${location.host}/ws`)
+      } catch (e) { return }
+      ws.onopen = () => {
+        wsConnected.value = true
+        clearInterval(wsPing)
+        wsPing = setInterval(() => {
+          if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }))
+        }, 25000)
+      }
+      ws.onmessage = ev => {
+        let msg = null
+        try { msg = JSON.parse(ev.data) } catch { return }
+        handleWsMessage(msg)
+      }
+      ws.onclose = () => {
+        wsConnected.value = false
+        ws = null
+        clearInterval(wsPing)
+        clearTimeout(wsRetry)
+        if (entered.value) wsRetry = setTimeout(connectWs, 3000)
+      }
+      ws.onerror = () => { try { ws.close() } catch { /* ignore */ } }
+    }
+
+    const disconnectWs = () => {
+      clearTimeout(wsRetry)
+      clearInterval(wsPing)
+      if (ws) { try { ws.close() } catch { /* ignore */ } }
+      ws = null
+      wsConnected.value = false
+    }
+
+    const applyRemoteItems = payload => {
+      if (!queried.value) return
+      if (payload.server !== form.server.trim() || payload.city !== form.city) return
+      if (!payload.items || !payload.items.length) {
+        if (rows.value.some(isDirty)) {
+          ElMessage.warning('他人批量更新了价格，你本地有未保存修改；保存时会提示冲突')
+          return
+        }
+        doFetch(false)
+        return
+      }
+      for (const item of payload.items) {
+        const row = rows.value.find(r => Number(r.commodityId) === Number(item.commodityId))
+        if (!row) continue
+        if (isDirty(row)) {
+          row._remoteConflict = {
+            buy: item.buy, sell: item.sell, operator: item.operator, updatedAt: item.updatedAt,
+          }
+          continue
+        }
+        row.buy = item.buy == null ? '' : String(item.buy)
+        row.sell = item.sell == null ? '' : String(item.sell)
+        row.updatedAt = item.updatedAt
+        row.operator = item.operator
+        row._base = { buy: item.buy, sell: item.sell }
+        row._baseUpdatedAt = item.updatedAt
+        delete row._remoteConflict
+      }
+    }
+
+    const handleWsMessage = msg => {
+      if (msg.type === 'hello' || msg.type === 'pong') {
+        if (msg.type === 'hello') { wsConnected.value = true; wsClients.value = msg.clients || 1 }
+        return
+      }
+      if (msg.type === 'price.updated') {
+        applyRemoteItems(msg)
+        if (msg.operator && msg.operator !== nickname.value) {
+          const name = msg.items && msg.items.length
+            ? msg.items.map(i => i.commodity).slice(0, 3).join('、') + (msg.items.length > 3 ? ' 等' : '')
+            : '价格'
+          ElMessage.info(`${msg.operator} 更新了 ${msg.server} · ${msg.city} 的${name}`)
+        }
+        return
+      }
+      if (msg.type === 'dict.changed') {
+        loadDict().catch(() => {})
+        loadServers().catch(() => {})
+        return
+      }
+      if (msg.type === 'sync.finished' && msg.result) {
+        const r = msg.result
+        ElMessage.success(`游戏同步完成：${r.queried}/${r.cities} 城，写入 ${r.saved} 条${r.failed && r.failed.length ? `，失败 ${r.failed.length} 城` : ''}`)
+        loadServers().catch(() => {})
+        if (queried.value && msg.result.server === form.server.trim()) {
+          if (rows.value.some(isDirty)) ElMessage.warning('同步已更新当前城池，你本地有未保存修改；保存时会提示冲突')
+          else doFetch(false)
+        }
+        if (reportVisible.value) loadReport()
+        return
+      }
+      if (msg.type === 'sync.failed') {
+        if (msg.trigger !== 'manual' || !syncing.value) ElMessage.error(`游戏同步失败：${msg.message}`)
+        return
+      }
+      if (msg.type === 'settings.updated') {
+        if (settingsVisible.value) applySettings(msg.settings)
+        return
+      }
+      if (msg.type === 'server.deleted') {
+        if (form.server === msg.name) onReset()
+        loadServers().catch(() => {})
+      }
+    }
+
+    /* ---------- 保存（含乐观并发冲突处理） ---------- */
     const saveVisible = ref(false)
 
     const rowOpType = r => {
@@ -272,24 +408,59 @@ createApp({
       saveVisible.value = true
     }
 
-    const confirmSave = async () => {
+    const submitSave = async force => {
       saving.value = true
       try {
         const clean = v => (v == null || v === '' || v === '-' ? '' : v)
-        const items = changedRows.value.map(r => ({ commodity: r.commodity, buy: clean(r.buy), sell: clean(r.sell) }))
+        const items = changedRows.value.map(r => ({
+          commodity: r.commodity,
+          buy: clean(r.buy),
+          sell: clean(r.sell),
+          baseUpdatedAt: r.baseUpdatedAt || null,
+        }))
         const res = await api('/api/prices', {
           method: 'POST',
-          body: { server: form.server.trim(), city: form.city, operator: nickname.value, items },
+          body: { server: form.server.trim(), city: form.city, operator: nickname.value, items, force: force === true },
         })
         ElMessage.success(`保存成功：新增 ${res.created} 条，更新 ${res.updated} 条${res.cleared ? `，清空 ${res.cleared} 条` : ''}`)
         saveVisible.value = false
         await doFetch(false)
+        return true
       } catch (e) {
+        if (e.code === 40903 && !force) {
+          const conflicts = (e.data && e.data.conflicts) || []
+          const detail = conflicts.map(c =>
+            `${c.commodity}：数据库最新 买 ${fmt(c.buy)} / 卖 ${fmt(c.sell)}（${c.operator || '匿名'} ${c.updatedAt}）`
+          ).join('\n')
+          try {
+            await ElMessageBox.confirm(
+              `${detail}\n\n你正在修改的数据已被他人更新。覆盖保存将丢弃对方的最新值，建议先使用最新数据。`,
+              '价格已被他人更新',
+              {
+                type: 'warning',
+                confirmButtonText: '覆盖保存',
+                cancelButtonText: '使用最新数据',
+                customClass: 'pre-wrap-confirm',
+              }
+            )
+            saving.value = false
+            await submitSave(true)
+            return false
+          } catch (err) {
+            saveVisible.value = false
+            await doFetch(false)
+            ElMessage.info('已载入最新数据，请确认后再保存')
+            return false
+          }
+        }
         ElMessage.error(e.message)
+        return false
       } finally {
         saving.value = false
       }
     }
+
+    const confirmSave = () => submitSave(false)
 
     /* ---------- 字典管理 ---------- */
     const dictVisible = ref(false)
@@ -345,7 +516,6 @@ createApp({
       } catch (e) { ElMessage.error(e.message); row._draft = row.name }
     }
 
-    /* 负重维护 */
     const saveDictBurden = async row => {
       const raw = String(row._burdenDraft == null ? '' : row._burdenDraft).trim()
       const original = row.burden != null ? String(row.burden) : ''
@@ -435,20 +605,19 @@ createApp({
       if (queried.value) loadHistory()
     }
 
-    /* ---------- 价格趋势（SVG 折线图，支持滚轮缩放/拖拽平移） ---------- */
+    /* ---------- 价格趋势（SVG 折线图） ---------- */
     const trendVisible = ref(false)
     const trendCommodity = ref('')
     const trendDays = ref(30)
     const trendLoading = ref(false)
     const trendData = ref({ points: [], summary: {}, burden: null })
     const trendPoints = computed(() => trendData.value.points || [])
-    // 视窗窗口：可见区间 [i0, i1]（浮点索引）；null = 全量
     const trendView = ref(null)
     const trendDragging = ref(false)
 
     const clampView = (i0, i1, n) => {
       const span = Math.min(Math.max(i1 - i0, 0), Math.max(n - 1, 0))
-      let a = Math.min(Math.max(i0, 0), Math.max(n - 1 - span, 0))
+      const a = Math.min(Math.max(i0, 0), Math.max(n - 1 - span, 0))
       return { i0: a, i1: a + span }
     }
 
@@ -500,7 +669,6 @@ createApp({
       const n = pts.length
       const v = trendView.value && n > 1 ? clampView(trendView.value.i0, trendView.value.i1, n) : { i0: 0, i1: n - 1 }
 
-      // Y 轴始终覆盖全部数据（两条线任何缩放级别都可见）
       const vals = []
       pts.forEach(p => { if (p.buy != null) vals.push(p.buy); if (p.sell != null) vals.push(p.sell) })
       if (!vals.length) return empty
@@ -515,7 +683,6 @@ createApp({
       const x = i => PL + ((i - v.i0) / span) * (W - PL - PR)
       const y = val => PT + (1 - (val - min) / (max - min)) * (H - PT - PB)
 
-      // 路径：取可见区间±1 个点，边缘线段完整
       const from = Math.max(Math.floor(v.i0) - 1, 0)
       const to = Math.min(Math.ceil(v.i1) + 1, n - 1)
       const buildPath = key => {
@@ -548,8 +715,7 @@ createApp({
         return { y: +y(val).toFixed(1), label: val.toFixed(1) }
       })
 
-      // X 轴：日期+时间（数据点为时间粒度）
-      const fmtT = t => String(t).slice(5, 16) // MM-DD HH:mm
+      const fmtT = t => String(t).slice(5, 16)
       const i0r = Math.round(v.i0)
       const i1r = Math.min(Math.round(v.i1), n - 1)
       const im = Math.round((v.i0 + v.i1) / 2)
@@ -592,12 +758,12 @@ createApp({
       if (queried.value && trendCommodity.value) loadTrend()
     }
 
-    /* ---------- 跨城池比价（利润 =（卖出城卖价 - 本城买价）/ 负重） ---------- */
+    /* ---------- 跨城池比价 ---------- */
     const matrixVisible = ref(false)
     const matrixCommodity = ref('')
     const matrixLoading = ref(false)
     const matrixData = ref({ items: null, summary: null, commodity: '', burden: null, server: '' })
-    const matrixSellCity = ref('') // 空 = 自动取最高卖价城
+    const matrixSellCity = ref('')
 
     const loadMatrix = async () => {
       if (!matrixCommodity.value) { ElMessage.warning('请选择商品'); return }
@@ -615,7 +781,6 @@ createApp({
       if (matrixCommodity.value) loadMatrix()
     }
 
-    /** 目标卖出城：手动指定，或自动取卖价最高的城 */
     const matrixSellTarget = computed(() => {
       const items = matrixData.value.items || []
       if (matrixSellCity.value) {
@@ -627,7 +792,6 @@ createApp({
       return best
     })
 
-    /** 每行附加跨城利润 = （目标卖出城卖价 − 本城买价）/ 负重 */
     const matrixRows = computed(() => {
       const t = matrixSellTarget.value
       const burden = matrixData.value.burden
@@ -638,7 +802,6 @@ createApp({
       }))
     })
 
-    /** 推荐路线：最便宜买入城 → 目标卖出城 */
     const matrixBestRoute = computed(() => {
       let buyCity = null
       for (const i of matrixRows.value) if (i.buy != null && (buyCity == null || i.buy < buyCity.buy)) buyCity = i
@@ -652,20 +815,14 @@ createApp({
       }
     })
 
-    /* ---------- 批量导入（Excel / 截图 OCR） ---------- */
+    /* ---------- 批量导入（Excel / 文本） ---------- */
     const importVisible = ref(false)
-    const importTab = ref('excel')
     const importFileName = ref('')
-    const importPreview = ref([]) // [{ commodity, buy, sell, burden }]
+    const importPreview = ref([])
     const importAutoCreate = ref(true)
+    const importMerge = ref(false)
     const importing = ref(false)
     const importFileEl = ref(null)
-    const ocrFileEl = ref(null)
-    const ocrImages = ref([]) // [{ id, name, url, file, mode, status, progress, rows, error }]
-    const ocrRunning = ref(false)
-    let ocrWorker = null
-    let ocrSeq = 0
-    let ocrProgressCb = null
 
     const openImport = () => {
       if (!form.server.trim() || !form.city) {
@@ -673,14 +830,12 @@ createApp({
         return
       }
       clearImportFile()
-      clearOcr()
-      importTab.value = 'excel'
       importVisible.value = true
     }
 
     const clearImportFile = () => {
       importFileName.value = ''
-      if (importTab.value === 'excel') importPreview.value = []
+      importPreview.value = []
       if (importFileEl.value) importFileEl.value.value = ''
     }
 
@@ -698,10 +853,7 @@ createApp({
       window.XLSX.writeFile(wb, '价格导入模板.xlsx')
     }
 
-    const cellStr = v => {
-      if (v == null) return ''
-      return String(v).trim()
-    }
+    const cellStr = v => (v == null ? '' : String(v).trim())
 
     const onImportFile = async ev => {
       const file = ev.target.files && ev.target.files[0]
@@ -712,7 +864,6 @@ createApp({
         const sheet = wb.Sheets[wb.SheetNames[0]]
         if (!sheet) throw new Error('Excel 中没有工作表')
         const aoa = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null })
-        // 跳过表头：首行第一格含「商品」则视为表头
         const start = (aoa.length && cellStr(aoa[0][0]).includes('商品')) ? 1 : 0
         const preview = []
         for (let i = start; i < aoa.length; i++) {
@@ -723,8 +874,6 @@ createApp({
           const sell = r[2] == null || cellStr(r[2]) === '' ? null : Number(cellStr(r[2]).replace(/[^\d.-]/g, ''))
           const burdenRaw = r[3] == null ? '' : cellStr(r[3])
           const burden = burdenRaw === '' ? null : Number(burdenRaw.replace(/[^\d.]/g, ''))
-          if (buy != null && !Number.isFinite(buy)) { ElMessage.warning(`第 ${i + 1} 行买价不是数字，已按空处理`); }
-          if (sell != null && !Number.isFinite(sell)) { ElMessage.warning(`第 ${i + 1} 行卖价不是数字，已按空处理`); }
           preview.push({
             commodity,
             buy: buy != null && Number.isFinite(buy) && buy >= 0 ? buy : null,
@@ -741,392 +890,6 @@ createApp({
       }
     }
 
-    /* ----- 截图 OCR（Tesseract.js 本机识别） ----- */
-    const loadTesseractScript = () => new Promise((resolve, reject) => {
-      if (window.Tesseract) return resolve()
-      const s = document.createElement('script')
-      s.src = '/vendor/tesseract/tesseract.min.js'
-      s.onload = () => resolve()
-      s.onerror = () => reject(new Error('OCR 引擎脚本加载失败'))
-      document.head.appendChild(s)
-    })
-
-    const getOcrWorker = async () => {
-      if (ocrWorker) return ocrWorker
-      await loadTesseractScript()
-      // workerBlobURL:false —— worker 挂在页面同源下，IndexedDB 才能缓存语言包（Blob 不透明源写不了缓存，会反复下载）
-      ocrWorker = await window.Tesseract.createWorker(['chi_sim', 'eng'], 1, {
-        workerPath: '/vendor/tesseract/worker.min.js',
-        corePath: '/vendor/tesseract-core',
-        langPath: '/vendor/tessdata',
-        gzip: true,
-        workerBlobURL: false,
-        cacheMethod: 'write',
-        logger: m => {
-          if (!ocrProgressCb) return
-          if (m.status === 'recognizing text') ocrProgressCb(m.progress)
-          // 引擎/语言包加载也给出可见进度，避免 UI 一直 0%
-          else if (m.status === 'loading tesseract core' || m.status === 'loading language traineddata') {
-            ocrProgressCb(0.05)
-          }
-        },
-      })
-      return ocrWorker
-    }
-
-    /** 检测卡片横向色带：卡底浅棕、卡缝深棕；必须有明显分隔缝才算多卡（避免纯色底误切） */
-    const detectCardBands = (data, w, h) => {
-      const rows = new Uint8Array(h)
-      const x0 = Math.floor(w * 0.16)
-      const x1 = Math.floor(w * 0.88)
-      for (let y = 0; y < h; y++) {
-        let card = 0, total = 0
-        for (let x = x0; x < x1; x += 3) {
-          const i = (y * w + x) * 4
-          const r = data[i], g = data[i + 1], b = data[i + 2]
-          total++
-          // 浅棕卡底：偏亮、R>G>B
-          if (r > 155 && g > 130 && b > 100 && r > b + 18 && r < 250) card++
-        }
-        rows[y] = (card / total) > 0.55 ? 1 : 0
-      }
-      // 先找连续卡带，再要求相邻带之间有足够「非卡」分隔缝（真实 UI 卡缝约 8~20px 深棕）
-      const raw = []
-      let start = -1
-      const minH = Math.max(50, Math.floor(h * 0.06))
-      for (let y = 0; y < h; y++) {
-        if (rows[y] && start < 0) start = y
-        else if (!rows[y] && start >= 0) {
-          if (y - start >= minH) raw.push({ top: start, bottom: y })
-          start = -1
-        }
-      }
-      if (start >= 0 && h - start >= minH) raw.push({ top: start, bottom: h })
-      if (raw.length < 2) return []
-      const minGap = Math.max(4, Math.floor(h * 0.008))
-      const bands = [raw[0]]
-      for (let i = 1; i < raw.length; i++) {
-        const gap = raw[i].top - bands[bands.length - 1].bottom
-        if (gap >= minGap) bands.push(raw[i])
-        else {
-          // 缝太窄 → 合并为同一带（可能是卡内文字行造成的断裂）
-          bands[bands.length - 1].bottom = raw[i].bottom
-        }
-      }
-      return bands.length >= 2 ? bands : []
-    }
-
-    const cropCanvas = (src, x, y, cw, ch) => {
-      const out = document.createElement('canvas')
-      out.width = cw
-      out.height = ch
-      out.getContext('2d').drawImage(src, x, y, cw, ch, 0, 0, cw, ch)
-      return out
-    }
-
-    /** 小图裁剪强预处理：灰度 + Otsu 二值（花式金字→实心黑字，最利于 Tesseract） */
-    const prepCrop = src => {
-      const w = src.width, h = src.height
-      const ctx = src.getContext('2d', { willReadFrequently: true })
-      const img = ctx.getImageData(0, 0, w, h)
-      const d = img.data
-      const n = w * h
-      const gray = new Uint8Array(n)
-      for (let i = 0, p = 0; p < n; i += 4, p++) {
-        gray[p] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
-      }
-      const hist = new Uint32Array(256)
-      for (let p = 0; p < n; p++) hist[gray[p]]++
-      let sum = 0
-      for (let v = 0; v < 256; v++) sum += v * hist[v]
-      let sumB = 0, wB = 0, maxVar = 0, otsu = 128
-      for (let v = 0; v < 256; v++) {
-        wB += hist[v]
-        if (!wB) continue
-        const wF = n - wB
-        if (!wF) break
-        sumB += v * hist[v]
-        const mB = sumB / wB, mF = (sum - sumB) / wF
-        const between = wB * wF * (mB - mF) * (mB - mF)
-        if (between > maxVar) { maxVar = between; otsu = v }
-      }
-      // 统计明暗占比，保证「深字浅底」
-      let dark = 0
-      for (let p = 0; p < n; p++) if (gray[p] < otsu) dark++
-      const invert = dark > n * 0.55
-      for (let i = 0, p = 0; p < n; i += 4, p++) {
-        const isDark = invert ? gray[p] >= otsu : gray[p] < otsu
-        const v = isDark ? 0 : 255
-        d[i] = d[i + 1] = d[i + 2] = v
-      }
-      ctx.putImageData(img, 0, 0)
-      return src
-    }
-
-    /** 分区识别：先切卡片带，商品名/标签/价格分条 OCR（价格走 eng 纯数字，远稳于整图中文） */
-    const recognizeByCards = async (worker, file, names, onProgress) => {
-      const bitmap = await createImageBitmap(file)
-      const scale = bitmap.width < 1200 ? 2 : (bitmap.width < 1800 ? 1.4 : 1)
-      const w = Math.round(bitmap.width * scale)
-      const h = Math.round(bitmap.height * scale)
-      const canvas = document.createElement('canvas')
-      canvas.width = w
-      canvas.height = h
-      const ctx = canvas.getContext('2d', { willReadFrequently: true })
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
-      ctx.drawImage(bitmap, 0, 0, w, h)
-      bitmap.close && bitmap.close()
-
-      const bands = detectCardBands(ctx.getImageData(0, 0, w, h).data, w, h)
-      if (bands.length < 2) return null // 切不出卡片，交给整图兜底
-
-      const mode = 'sell' // 先默认，下面用首卡标签条纠正
-      let resolvedMode = null
-      const rows = []
-      const debug = []
-
-      for (let ci = 0; ci < bands.length; ci++) {
-        onProgress && onProgress((ci + 0.5) / bands.length)
-        const { top, bottom } = bands[ci]
-        const cardH = bottom - top
-        // 比例来自该游戏实测截图：图标≈左 16%，名称/标签/价格在 18%~78%，按钮在右
-        const nameC = cropCanvas(canvas, Math.round(w * 0.17), top, Math.round(w * 0.42), Math.round(cardH * 0.36))
-        const labelC = cropCanvas(canvas, Math.round(w * 0.17), top + Math.round(cardH * 0.30), Math.round(w * 0.55), Math.round(cardH * 0.28))
-        const priceC = cropCanvas(canvas, Math.round(w * 0.17), top + Math.round(cardH * 0.52), Math.round(w * 0.60), Math.round(cardH * 0.38))
-
-        // 标签条：判定买/卖（只在首卡做一次）
-        if (resolvedMode == null) {
-          try {
-            await worker.setParameters({ tessedit_pageseg_mode: '7' })
-            const lr = await worker.recognize(prepCrop(labelC), {}, { text: true })
-            const lt = (lr.data && lr.data.text) || ''
-            debug.push('label0=' + lt.replace(/\s+/g, ' '))
-            if (/买入/.test(lt) && !/卖出/.test(lt)) resolvedMode = 'buy'
-            else resolvedMode = 'sell'
-          } catch (e) { resolvedMode = 'sell' }
-        }
-
-        // 商品名：chi_sim + 单行 PSM
-        let nameText = ''
-        try {
-          await worker.setParameters({ tessedit_pageseg_mode: '7' })
-          const nr = await worker.recognize(prepCrop(nameC), {}, { text: true })
-          nameText = ((nr.data && nr.data.text) || '').replace(/\s+/g, '')
-        } catch (e) { /* skip */ }
-
-        // 价格行：eng + 块 PSM，只认数字
-        let priceText = ''
-        try {
-          await worker.setParameters({ tessedit_pageseg_mode: '6' })
-          const pr = await worker.recognize(prepCrop(priceC), {}, { text: true })
-          priceText = (pr.data && pr.data.text) || ''
-        } catch (e) { /* skip */ }
-
-        debug.push(`c${ci} name=[${nameText}] price=[${priceText.replace(/\s+/g, ' ')}]`)
-
-        const commodity = window.OcrParse.matchCommodity(nameText, names)
-        if (!commodity) continue
-        const nums = (priceText.match(/\d+(?:\.\d+)?/g) || []).map(Number).filter(v => Number.isFinite(v) && v >= 0)
-        if (!nums.length) continue
-        const price = nums[0]
-        let burden = null
-        for (let k = 1; k < nums.length; k++) {
-          if (Number.isInteger(nums[k]) && nums[k] >= 1 && nums[k] <= 999) { burden = nums[k]; break }
-        }
-        rows.push({
-          commodity,
-          buy: resolvedMode === 'buy' ? price : null,
-          sell: resolvedMode === 'sell' ? price : null,
-          burden,
-        })
-      }
-
-      onProgress && onProgress(1)
-      if (!rows.length) return null
-      return { rows, mode: resolvedMode || mode, text: debug.join('\n'), score: rows.length, variant: 'cards', psm: 0 }
-    }
-
-    /** 整图多路兜底：变体 × PSM，按命中商品数择优（不放大，避免把清晰小图糊掉） */
-    const recognizeWholeImage = async (worker, file, names, onProgress) => {
-      const bitmap = await createImageBitmap(file)
-      // 只缩小不放大：放大+平滑会把锐利测试图/矢量字糊掉，反而更难识别
-      const scale = Math.min(1, 1600 / bitmap.width)
-      const w = Math.round(bitmap.width * scale)
-      const h = Math.round(bitmap.height * scale)
-      const src = document.createElement('canvas')
-      src.width = w
-      src.height = h
-      const sctx = src.getContext('2d', { willReadFrequently: true })
-      if (scale < 1) {
-        sctx.imageSmoothingEnabled = true
-        sctx.imageSmoothingQuality = 'high'
-      }
-      sctx.drawImage(bitmap, 0, 0, w, h)
-      bitmap.close && bitmap.close()
-
-      const srcData = sctx.getImageData(0, 0, w, h)
-      const sd = srcData.data
-      const n = w * h
-      const stretchChannel = getV => {
-        const buf = new Uint8Array(n)
-        for (let i = 0, p = 0; p < n; i += 4, p++) buf[p] = getV(sd, i)
-        const hist = new Uint32Array(256)
-        for (let p = 0; p < n; p++) hist[buf[p]]++
-        const cut = n * 0.02
-        let lo = 0, hi = 255, acc = 0
-        for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= cut) { lo = v; break } }
-        acc = 0
-        for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= cut) { hi = v; break } }
-        const span = Math.max(hi - lo, 1)
-        const out = document.createElement('canvas')
-        out.width = w
-        out.height = h
-        const octx = out.getContext('2d', { willReadFrequently: true })
-        const oimg = octx.createImageData(w, h)
-        const od = oimg.data
-        for (let p = 0, i = 0; p < n; p++, i += 4) {
-          const v = Math.max(0, Math.min(255, Math.round((buf[p] - lo) * 255 / span)))
-          od[i] = od[i + 1] = od[i + 2] = v
-          od[i + 3] = 255
-        }
-        octx.putImageData(oimg, 0, 0)
-        return out
-      }
-      const gray = (d, i) => (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000
-      const variants = [
-        { label: 'red', canvas: stretchChannel((d, i) => d[i]) },
-        { label: 'gray', canvas: stretchChannel(gray) },
-        { label: 'maxRG', canvas: stretchChannel((d, i) => Math.max(d[i], d[i + 1])) },
-      ]
-      const psms = [3, 6]
-      let best = { rows: [], mode: 'sell', text: '', score: -1, variant: '', psm: 0 }
-      const need = Math.max(2, Math.min(4, Math.ceil(names.length * 0.2)))
-      const totalSteps = variants.length * psms.length
-      let step = 0
-      outer:
-      for (const { label, canvas } of variants) {
-        for (const psm of psms) {
-          onProgress && onProgress(step / totalSteps)
-          step++
-          try {
-            await worker.setParameters({ tessedit_pageseg_mode: String(psm) })
-            const result = await worker.recognize(canvas, {}, { text: true })
-            const text = (result.data && result.data.text) || ''
-            const parsed = window.OcrParse.parse(text, { commodityNames: names, mode: 'auto' })
-            if (parsed.rows.length > best.score) {
-              best = { rows: parsed.rows, mode: parsed.mode, text, score: parsed.rows.length, variant: label, psm }
-            }
-            if (best.score >= need) break outer
-          } catch (e) { /* continue */ }
-        }
-      }
-      onProgress && onProgress(1)
-      return best
-    }
-
-    const recognizeImageBest = async (worker, file, names, onProgress) => {
-      let best = null
-      try {
-        best = await recognizeByCards(worker, file, names, p => onProgress && onProgress(p * 0.85))
-      } catch (e) { best = null }
-      if (best && best.score >= 2) {
-        onProgress && onProgress(1)
-        return best
-      }
-      // 整图兜底
-      const whole = await recognizeWholeImage(worker, file, names, p => onProgress && onProgress(0.85 + p * 0.15))
-      if (!best || whole.score > best.score) return whole
-      onProgress && onProgress(1)
-      return best
-    }
-
-    const onOcrFiles = ev => {
-      const files = [...(ev.target.files || [])]
-      if (!files.length) return
-      for (const file of files) {
-        if (!file.type.startsWith('image/')) { ElMessage.warning(`「${file.name}」不是图片，已跳过`); continue }
-        ocrImages.value.push({
-          id: ++ocrSeq,
-          name: file.name,
-          url: URL.createObjectURL(file),
-          file,
-          mode: 'sell', // 默认卖出坊市，识别后按文字自动纠正，可手动改
-          status: 'pending',
-          progress: 0,
-          rows: [],
-          error: '',
-          rawText: '',
-          variant: '',
-          showText: false,
-        })
-      }
-      if (ev.target) ev.target.value = ''
-    }
-
-    const clearOcr = () => {
-      for (const img of ocrImages.value) URL.revokeObjectURL(img.url)
-      ocrImages.value = []
-      if (ocrFileEl.value) ocrFileEl.value.value = ''
-      importPreview.value = []
-    }
-
-    const rebuildOcrPreview = () => {
-      const all = window.OcrParse.mergeRows(ocrImages.value.filter(i => i.status === 'done').map(i => i.rows))
-      importPreview.value = all.map(r => ({ ...r }))
-    }
-
-    const runOcr = async () => {
-      const pending = ocrImages.value.filter(i => i.status === 'pending' || i.status === 'error')
-      if (!pending.length) return
-      ocrRunning.value = true
-      // 引擎加载也计入运行中，避免 UI 卡在「待识别」
-      for (const img of pending) {
-        img.status = 'running'
-        img.progress = 0
-        img.error = ''
-      }
-      try {
-        const worker = await getOcrWorker()
-        const names = commodities.value.map(c => c.name)
-        for (const img of pending) {
-          ocrProgressCb = p => { img.progress = p }
-          try {
-            const best = await recognizeImageBest(worker, img.file, names)
-            img.mode = best.mode
-            img.rows = best.rows
-            img.rawText = best.text || ''
-            img.variant = best.variant || ''
-            img.status = 'done'
-            if (!best.rows.length) {
-              img.error = '未识别到已知商品，可展开「识别原文」查看 OCR 输出，或换更清晰截图'
-            }
-          } catch (e) {
-            img.status = 'error'
-            img.error = e.message || '识别失败'
-          }
-        }
-        ocrProgressCb = null
-        rebuildOcrPreview()
-        const okCount = ocrImages.value.filter(i => i.status === 'done' && i.rows.length).length
-        const total = ocrImages.value.reduce((s, i) => s + i.rows.length, 0)
-        if (okCount) ElMessage.success(`识别完成：${okCount} 张图共 ${total} 项，请核对预览后导入`)
-        else ElMessage.warning('未能从截图中识别到商品价格，请确认截图清晰完整')
-      } catch (e) {
-        for (const img of pending) {
-          if (img.status === 'running') {
-            img.status = 'error'
-            img.error = e.message || 'OCR 初始化失败'
-          }
-        }
-        ElMessage.error('OCR 初始化失败：' + e.message)
-      } finally {
-        ocrProgressCb = null
-        ocrRunning.value = false
-      }
-    }
-
-    /** 预览可编辑（input 值为字符串），提交前统一转数值 */
     const sanitizePreviewRows = () => importPreview.value.map(r => {
       const num = v => {
         if (v === '' || v == null) return null
@@ -1137,8 +900,8 @@ createApp({
     }).filter(r => r.commodity)
 
     const submitImport = async () => {
-      const rows = sanitizePreviewRows()
-      if (!rows.length) { ElMessage.warning('请先上传 Excel 或游戏截图进行识别'); return }
+      const rowsIn = sanitizePreviewRows()
+      if (!rowsIn.length) { ElMessage.warning('请先上传 Excel 文件'); return }
       importing.value = true
       try {
         const res = await api('/api/prices/import', {
@@ -1147,10 +910,9 @@ createApp({
             server: form.server.trim(),
             city: form.city,
             operator: nickname.value,
-            rows,
+            rows: rowsIn,
             createCommodities: importAutoCreate.value,
-            // OCR 只识别单侧价格（买/卖），merge 避免 null 清掉另一侧已有价格
-            merge: importTab.value === 'ocr',
+            merge: importMerge.value,
           },
         })
         ElMessage.success(`导入完成：新增 ${res.created} 条，更新 ${res.updated} 条${res.newDictCount ? `，创建商品 ${res.newDictCount} 个` : ''}`)
@@ -1191,6 +953,237 @@ createApp({
       }
     }
 
+    /* ---------- 游戏同步（手动） ---------- */
+    const syncVisible = ref(false)
+    const syncing = ref(false)
+    const syncToken = ref('')
+    const syncServer = ref('')
+    const syncOperator = ref('')
+    const syncResult = ref(null)
+    const syncHasSavedToken = ref(false)
+
+    const openSync = async () => {
+      syncVisible.value = true
+      syncResult.value = null
+      syncServer.value = form.server.trim()
+      syncOperator.value = nickname.value
+      if (!syncToken.value) syncToken.value = ''
+      try {
+        const s = await api('/api/sync-settings')
+        syncHasSavedToken.value = !!s.hasToken
+      } catch (e) { /* ignore */ }
+    }
+
+    const doSync = async () => {
+      const server = String(syncServer.value || '').replace(/\D/g, '')
+      syncServer.value = server
+      if (!server) { ElMessage.warning('请输入纯数字区服，如 1344'); return }
+      if (!syncToken.value.trim() && !syncHasSavedToken.value) {
+        ElMessage.warning('请粘贴游戏登录 token（或先在「定时」中保存）')
+        return
+      }
+      syncing.value = true
+      syncResult.value = null
+      try {
+        const result = await api('/api/game/sync', {
+          method: 'POST',
+          body: {
+            token: syncToken.value.trim() || undefined,
+            server,
+            operator: syncOperator.value || nickname.value,
+          },
+        })
+        syncResult.value = result
+        if (result.saved > 0) ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
+        else ElMessage.warning(`同步完成，但没有写入价格（${result.queried}/${result.cities} 城）`)
+        await loadServers()
+        if (form.server.trim() === result.server && queried.value) await doFetch(false)
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        syncing.value = false
+      }
+    }
+
+    /* ---------- 定时同步设置 ---------- */
+    const settingsVisible = ref(false)
+    const settingsLoading = ref(false)
+    const settingsSaving = ref(false)
+    const settingsRunning = ref(false)
+    const cronPreset = ref('0 */2 * * *')
+    const cronCustom = ref('0 */2 * * *')
+    const syncLogs = ref([])
+    const settings = reactive({
+      enabled: false, cron: '0 */2 * * *', token: '', server: '', operator: '自动同步',
+      hasToken: false, tokenHint: '', lastRunAt: null, lastStatus: null, lastMessage: null,
+      energy: { energyCost: 1, energyLimit: 10, energyCDHours: 4 },
+    })
+
+    const applySettings = data => {
+      if (!data) return
+      settings.enabled = !!data.enabled
+      settings.cron = data.cron || '0 */2 * * *'
+      settings.server = String(data.server || '').replace(/\D/g, '')
+      settings.operator = data.operator || '自动同步'
+      settings.hasToken = !!data.hasToken
+      settings.tokenHint = data.tokenHint || ''
+      settings.lastRunAt = data.lastRunAt
+      settings.lastStatus = data.lastStatus
+      settings.lastMessage = data.lastMessage
+      if (data.energy) settings.energy = data.energy
+      settings.token = ''
+      if (CRON_PRESETS.some(p => p.value === settings.cron)) {
+        cronPreset.value = settings.cron
+      } else {
+        cronPreset.value = 'custom'
+        cronCustom.value = settings.cron
+      }
+    }
+
+    const openSettings = async () => {
+      settingsVisible.value = true
+      settingsLoading.value = true
+      try {
+        const [data, logs] = await Promise.all([
+          api('/api/sync-settings'),
+          api('/api/sync-settings/logs?limit=10'),
+        ])
+        applySettings(data)
+        syncLogs.value = logs.items
+        if (!settings.server) settings.server = form.server.trim()
+        if (!settings.operator) settings.operator = nickname.value
+      } catch (e) { ElMessage.error(e.message) } finally { settingsLoading.value = false }
+    }
+
+    const saveSettings = async () => {
+      const cron = cronPreset.value === 'custom' ? cronCustom.value.trim() : cronPreset.value
+      const server = String(settings.server || '').replace(/\D/g, '')
+      settings.server = server
+      if (!cron) { ElMessage.warning('请填写 cron 表达式'); return }
+      if (settings.enabled && !server) { ElMessage.warning('启用自动同步需要填写纯数字区服，如 1344'); return }
+      if (settings.enabled && !settings.hasToken && !settings.token.trim()) {
+        ElMessage.warning('启用自动同步需要填写登录 token')
+        return
+      }
+      settingsSaving.value = true
+      try {
+        const body = {
+          enabled: settings.enabled,
+          cron,
+          server,
+          operator: settings.operator,
+        }
+        if (settings.token.trim()) body.token = settings.token.trim()
+        const data = await api('/api/sync-settings', { method: 'PUT', body })
+        applySettings(data)
+        ElMessage.success(settings.enabled ? '自动同步已启用' : '同步设置已保存')
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        settingsSaving.value = false
+      }
+    }
+
+    const runSettingsSync = async () => {
+      settingsRunning.value = true
+      try {
+        const result = await api('/api/sync-settings/run', { method: 'POST' })
+        ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
+        const [data, logs] = await Promise.all([
+          api('/api/sync-settings'),
+          api('/api/sync-settings/logs?limit=10'),
+        ])
+        applySettings(data)
+        syncLogs.value = logs.items
+        await loadServers()
+        if (queried.value && result.server === form.server.trim()) await doFetch(false)
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        settingsRunning.value = false
+      }
+    }
+
+    /* ---------- 报表 ---------- */
+    const reportVisible = ref(false)
+    const reportTab = ref('movers')
+    const reportServer = ref('')
+    const reportLoading = ref(false)
+    const reportDays = ref(7)
+    const moversData = ref({ items: [] })
+    const arbData = ref({ items: [], params: {}, energyInfo: {} })
+    const arbParams = reactive({ load: 200, energyPrice: 0, energyPerTrip: 1, returnTrip: true, all: false })
+    const heatData = ref({ buckets: [], totalChanges: 0, totalSyncs: 0 })
+    const heatBucket = ref('day')
+    const heatDays = ref(30)
+
+    const openReports = () => {
+      reportVisible.value = true
+      if (!reportServer.value) reportServer.value = form.server.trim() || (serverList.value[0] && serverList.value[0].name) || ''
+      loadReport()
+    }
+
+    const loadReport = async () => {
+      if (!reportServer.value.trim()) {
+        ElMessage.warning('请先输入区服')
+        return
+      }
+      reportLoading.value = true
+      try {
+        if (reportTab.value === 'movers') {
+          const q = new URLSearchParams({ server: reportServer.value.trim(), days: String(reportDays.value), limit: '30' })
+          moversData.value = await api(`/api/reports/movers?${q.toString()}`)
+        } else if (reportTab.value === 'arbitrage') {
+          const q = new URLSearchParams({
+            server: reportServer.value.trim(),
+            load: String(arbParams.load),
+            energyPrice: String(arbParams.energyPrice),
+            energyPerTrip: String(arbParams.energyPerTrip),
+            returnTrip: arbParams.returnTrip ? '1' : '0',
+            all: arbParams.all ? '1' : '0',
+          })
+          arbData.value = await api(`/api/reports/arbitrage?${q.toString()}`)
+        } else {
+          const q = new URLSearchParams({
+            server: reportServer.value.trim(),
+            days: String(heatDays.value),
+            bucket: heatBucket.value,
+          })
+          heatData.value = await api(`/api/reports/heat?${q.toString()}`)
+        }
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        reportLoading.value = false
+      }
+    }
+
+    const onReportTabChange = () => loadReport()
+
+    const heatMax = computed(() => {
+      const list = heatData.value.buckets || []
+      return Math.max(1, ...list.map(b => b.changes + b.syncs))
+    })
+
+    const heatBars = computed(() => (heatData.value.buckets || []).map((b, i) => {
+      const total = b.changes + b.syncs
+      return {
+        ...b,
+        height: total ? Math.max(4, Math.round((total / heatMax.value) * 100)) : 2,
+        showLabel: i === 0 || i === heatData.value.buckets.length - 1 || i % Math.ceil(heatData.value.buckets.length / 8) === 0,
+      }
+    }))
+
+    const changeClass = v => (v == null ? '' : v > 0 ? 'profit-pos' : v < 0 ? 'profit-neg' : '')
+
+    const openArbitrageFromMatrix = () => {
+      matrixVisible.value = false
+      reportTab.value = 'arbitrage'
+      reportVisible.value = true
+      if (!reportServer.value) reportServer.value = form.server.trim()
+      loadReport()
+    }
+
     /* ---------- 生命周期 ---------- */
     const mql = window.matchMedia(MOBILE_MEDIA)
     const onMqlChange = e => { isMobile.value = e.matches }
@@ -1210,16 +1203,16 @@ createApp({
       } catch (e) { /* 忽略隐私模式等 */ }
     })
 
+    watch(entered, v => { if (v) connectWs(); else disconnectWs() })
+
     onMounted(async () => {
       mql.addEventListener('change', onMqlChange)
       window.addEventListener('keydown', onKeydown)
 
-      // PWA Service Worker
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => {})
       }
 
-      // 恢复上次搜索条件
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
         if (saved.server) form.server = String(saved.server).replace(/\D/g, '')
@@ -1227,12 +1220,12 @@ createApp({
         if (saved.commodity) form.commodity = saved.commodity
       } catch (e) { /* ignore */ }
 
-      // 已缓存昵称：直接进入并加载数据
       if (entered.value) {
         try {
           await Promise.all([loadDict(), loadServers()])
           buildRowsFromDict()
           dataLoaded.value = true
+          connectWs()
         } catch (e) {
           ElMessage.error('数据加载失败，请刷新重试')
         }
@@ -1242,6 +1235,7 @@ createApp({
     onUnmounted(() => {
       mql.removeEventListener('change', onMqlChange)
       window.removeEventListener('keydown', onKeydown)
+      disconnectWs()
     })
 
     return {
@@ -1250,6 +1244,8 @@ createApp({
       // 基础
       isMobile, form, cities, commodities, serverList, rows, queried, loading,
       citySelect, commoditySelect,
+      // 实时协作
+      wsConnected, wsClients, conflictCount,
       // 查询
       searchServers, onQuery, onReset, doFetch,
       // 编辑
@@ -1269,12 +1265,20 @@ createApp({
       trendView, trendDragging, zoomTrend, resetTrendView, onTrendWheel,
       onTrendMouseDown, onTrendMouseMove, onTrendMouseUp,
       matrixVisible, matrixCommodity, matrixLoading, matrixData, openMatrix, loadMatrix,
-      matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute,
+      matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute, openArbitrageFromMatrix,
       // 导入导出
-      importVisible, importTab, importFileName, importPreview, importAutoCreate, importing,
+      importVisible, importFileName, importPreview, importAutoCreate, importMerge, importing,
       importFileEl, openImport, clearImportFile, onImportFile, downloadImportTemplate, submitImport,
-      ocrFileEl, ocrImages, ocrRunning, onOcrFiles, clearOcr, runOcr, rebuildOcrPreview,
       exportCsv,
+      // 游戏同步
+      syncVisible, syncing, syncToken, syncServer, syncOperator, syncResult, syncHasSavedToken,
+      openSync, doSync,
+      // 定时设置
+      settingsVisible, settingsLoading, settingsSaving, settingsRunning, settings, cronPreset, cronCustom,
+      cronPresets: CRON_PRESETS, syncLogs, openSettings, saveSettings, runSettingsSync,
+      // 报表
+      reportVisible, reportTab, reportServer, reportLoading, reportDays, moversData, arbData, arbParams,
+      heatData, heatBucket, heatDays, heatBars, openReports, loadReport, onReportTabChange, changeClass,
     }
   },
 }).use(ElementPlus, { locale: zhCn }).mount('#app')

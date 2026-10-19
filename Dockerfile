@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
 ########## 三国冰河时代富甲天下跑商价格分享 镜像 ##########
-# 基于 Node 24（内置 node:sqlite，零原生编译依赖），单容器即可运行
+# 基于 Node 24（内置 node:sqlite，零原生编译依赖）。
+# 生产建议配合 docker-compose.yml 使用 MySQL + Redis；
+# 单容器直接运行时自动退化为 SQLite（数据保存在 /app/data）。
 FROM node:24-alpine
 
 # 生产环境
@@ -22,7 +24,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY . .
 RUN chmod +x docker-entrypoint.sh
 
-# SQLite 数据目录（挂载卷场景由入口脚本再次确保权限）
+# 数据/备份目录（SQLite 兜底与迁移源；挂载卷场景由入口脚本再次确保权限）
 RUN mkdir -p /app/data /app/backup && chown -R node:node /app/data /app/backup
 
 # 入口以 root 启动：mkdir/chown 挂载的数据卷后，su-exec 降权为 node 用户运行

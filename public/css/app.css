@@ -66,6 +66,20 @@ body {
 
 /* 已修改行高亮 */
 tr.row-dirty > td { background: #fffaf3 !important; }
+.m-row.conflict { border-color: #e6a23c; background: #fff8ec; }
+
+/* ---------------- 实时连接状态 ---------------- */
+.ws-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px 2px 7px; border-radius: 999px;
+  background: #f3f2ee; border: 1px solid var(--line);
+  font-size: 12px; color: var(--ink-2); white-space: nowrap;
+}
+.ws-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: #c0362c; transition: background .2s, box-shadow .2s;
+}
+.ws-dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(26, 127, 55, .14); }
 
 /* ---------------- 统计条 ---------------- */
 .statusbar {
@@ -156,27 +170,48 @@ tr.row-dirty > td { background: #fffaf3 !important; }
 .chart-box { border: 1px solid var(--line); border-radius: 8px; padding: 12px 10px 8px; background: #fff; }
 .trend-svg { width: 100%; display: block; aspect-ratio: 640 / 260; }
 
-/* ---------------- OCR 截图识别 ---------------- */
-.ocr-item { display: flex; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
-.ocr-thumb { width: 72px; height: 54px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); flex: none; }
-.ocr-meta { flex: 1; min-width: 0; }
-.ocr-status { font-size: 12.5px; color: var(--ink-2); }
-.ocr-status.ok { color: var(--ok, #16a34a); }
-.ocr-status.danger { color: #dc2626; }
-.ocr-raw {
-  margin: 6px 0 0;
-  max-height: 120px;
-  overflow: auto;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
-  background: #f8f6f2;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 6px 8px;
-  color: var(--ink-2);
+/* ---------------- 同步 / 报表 / 设置 ---------------- */
+.hint-line { font-size: 12px; color: var(--ink-2); line-height: 1.7; margin-top: 4px; }
+.hint-line code { background: #f3f2ee; border-radius: 4px; padding: 0 4px; }
+.failed-list { margin-top: 6px; font-size: 12px; line-height: 1.7; color: #a35b00; word-break: break-all; }
+.import-switches { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin-top: 10px; }
+.report-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 10px;
 }
+.report-toolbar .param-label { font-size: 12.5px; color: var(--ink-2); }
+.report-toolbar .hint-line { margin-top: 0; }
+
+/* 热度柱状图 */
+.heat-bars {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 170px; padding: 10px 8px 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #fcfcfb; overflow-x: auto;
+}
+.heat-col {
+  flex: 1 0 9px; min-width: 8px;
+  display: flex; flex-direction: column; align-items: stretch;
+  height: 100%; cursor: default;
+}
+.heat-track { flex: 1; display: flex; align-items: flex-end; }
+.heat-bar {
+  width: 100%; min-height: 2px;
+  background: linear-gradient(180deg, #c0564f, var(--accent));
+  border-radius: 2px 2px 0 0;
+  transition: filter .15s;
+}
+.heat-col:hover .heat-bar { filter: brightness(1.15); }
+.heat-label {
+  flex: none; margin-top: 4px;
+  font-size: 10px; color: var(--ink-2); white-space: nowrap;
+  transform: rotate(-35deg); transform-origin: top left;
+  height: 26px; overflow: visible;
+}
+
+/* 冲突确认弹窗保留换行 */
+.pre-wrap-confirm .el-message-box__message { white-space: pre-wrap; }
+
 .chart-legend { display: flex; align-items: center; gap: 6px; padding: 6px 4px 0; font-size: 13px; }
 .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 
@@ -196,6 +231,13 @@ tr.row-dirty > td { background: #fffaf3 !important; }
   .statusbar { font-size: 12px; gap: 6px 12px; }
   .el-dialog { width: 94% !important; margin-top: 6vh !important; }
   .confirm-list { max-height: 52vh; }
+  .ws-pill { padding: 2px 7px; }
+  .ws-pill .ws-text { display: none; }
+  .report-toolbar .el-input-number { width: 92px !important; }
+  .heat-bars { height: 140px; }
+  .heat-col { flex-basis: 8px; min-width: 7px; }
+  .heat-label { font-size: 9px; }
+  .import-switches { gap: 10px; }
 }
 
 /* 手机上保存按钮吸底，随用随点 */

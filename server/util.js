@@ -34,11 +34,14 @@ function parsePrice(v) {
   return { ok: true, value: Math.round(n * 100) / 100 };
 }
 
-/** 判断 SQLite 唯一约束冲突 */
+/** 判断唯一约束冲突（SQLite / MySQL） */
 function isUniqueConstraintError(err) {
-  return err && (err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
-    (err.errcode === 2067) ||
-    String(err.message || '').includes('UNIQUE constraint failed'));
+  return !!err && (err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+    err.code === 'ER_DUP_ENTRY' ||
+    Number(err.errcode) === 2067 ||
+    Number(err.errno) === 1062 ||
+    String(err.message || '').includes('UNIQUE constraint failed') ||
+    String(err.message || '').includes('Duplicate entry'));
 }
 
 module.exports = { ok, fail, asyncHandler, cleanName, isBlank, parsePrice, isUniqueConstraintError };

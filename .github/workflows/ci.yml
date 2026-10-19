@@ -20,5 +20,55 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests
+      - name: Run tests (SQLite)
         run: npm test
+
+  mysql-redis:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: sgbhsd_ci
+          MYSQL_USER: sgbhsd
+          MYSQL_PASSWORD: sgbhsd
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -usgbhsd -psgbhsd --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 30s
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Smoke test (MySQL + Redis)
+        env:
+          DB_DRIVER: mysql
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: '3306'
+          MYSQL_DATABASE: sgbhsd_ci
+          MYSQL_USER: sgbhsd
+          MYSQL_PASSWORD: sgbhsd
+          REDIS_URL: redis://127.0.0.1:6379
+        run: npm run test:smoke

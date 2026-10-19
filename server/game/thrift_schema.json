@@ -1,0 +1,738 @@
+{
+ "messages": {
+  "1": "CgLogin",
+  "2": "CgEnterMap",
+  "3": "GcEnterMap",
+  "4": "CgSynchronizeTime",
+  "5": "GcSynchronizeTime",
+  "8": "GcReconnect",
+  "10": "GcEnterGamingStatus",
+  "11": "GcGameErrorRet",
+  "12": "GcLogin",
+  "15": "GcMixedKeys",
+  "22": "GcReconnectFinished",
+  "2101": "CgMonopolyInfo",
+  "2102": "GcMonopolyInfo",
+  "2103": "CgMonopolyCapitalProductInfo",
+  "2104": "GcMonopolyCapitalProductInfo",
+  "2106": "GcMonopolySetOut",
+  "2112": "GcMonopolyTradeProduct",
+  "2114": "GcMonopolyCapitalTaxInfo",
+  "2121": "CgMonopolyTradeRoute",
+  "2122": "GcMonopolyTradeRoute",
+  "2125": "GcMonopolyInit",
+  "2127": "GcMonopolyUpgradeInfo",
+  "2129": "GcMonopolyCapitalTask",
+  "2131": "GcMonopolyOptTask",
+  "2133": "GcMonopolyTask",
+  "2134": "GcMonopolyProfitPush",
+  "2136": "GcMonopolyNews",
+  "6905": "CgRegionCapitalApplyList"
+ },
+ "structs": {
+  "msg:1": {
+   "1": [
+    "uid",
+    10
+   ],
+   "2": [
+    "roleId",
+    10
+   ],
+   "3": [
+    "timestamp",
+    10
+   ],
+   "4": [
+    "sign",
+    11
+   ],
+   "5": [
+    "device",
+    8
+   ],
+   "6": [
+    "language",
+    11
+   ],
+   "7": [
+    "deviceId",
+    11
+   ],
+   "8": [
+    "gaid",
+    11
+   ],
+   "9": [
+    "clientVersion",
+    11
+   ],
+   "10": [
+    "platform",
+    8
+   ],
+   "11": [
+    "country",
+    11
+   ],
+   "12": [
+    "rollback",
+    2
+   ],
+   "13": [
+    "channelF",
+    11
+   ],
+   "14": [
+    "username",
+    11
+   ],
+   "15": [
+    "head",
+    11
+   ],
+   "16": [
+    "appKey",
+    11
+   ],
+   "17": [
+    "clientIsHF",
+    2
+   ],
+   "18": [
+    "loginToken",
+    11
+   ],
+   "19": [
+    "activityCountry",
+    11
+   ],
+   "20": [
+    "serverType",
+    8
+   ],
+   "21": [
+    "pushPlatform",
+    8
+   ],
+   "22": [
+    "wxCollection",
+    8
+   ],
+   "23": [
+    "wxOpenId",
+    11
+   ],
+   "24": [
+    "sharerId",
+    10
+   ],
+   "25": [
+    "clientId",
+    11
+   ],
+   "26": [
+    "intClientId",
+    8
+   ],
+   "27": [
+    "subChannel",
+    11
+   ],
+   "28": [
+    "customParam",
+    11
+   ],
+   "29": [
+    "adGames",
+    [
+     15,
+     8
+    ]
+   ],
+   "30": [
+    "earlyType",
+    11
+   ],
+   "32": [
+    "abGroupMap",
+    [
+     13,
+     11,
+     11
+    ]
+   ],
+   "33": [
+    "wxSessionKey",
+    11
+   ],
+   "34": [
+    "t",
+    11
+   ],
+   "35": [
+    "afDeviceId",
+    11
+   ]
+  },
+  "msg:2": {
+   "1": [
+    "x",
+    8
+   ],
+   "2": [
+    "y",
+    8
+   ],
+   "3": [
+    "serverPos",
+    3
+   ]
+  },
+  "msg:3": {
+   "1": [
+    "x",
+    8
+   ],
+   "2": [
+    "y",
+    8
+   ],
+   "3": [
+    "serverPos",
+    3
+   ]
+  },
+  "msg:4": {
+   "1": [
+    "clientTime",
+    8
+   ],
+   "2": [
+    "clientUTCTime",
+    10
+   ],
+   "3": [
+    "ver",
+    11
+   ]
+  },
+  "msg:5": {
+   "1": [
+    "clientTime",
+    8
+   ],
+   "2": [
+    "serverTime",
+    10
+   ],
+   "3": [
+    "ver",
+    11
+   ]
+  },
+  "msg:8": {
+   "1": [
+    "succ",
+    2
+   ],
+   "2": [
+    "sequence",
+    8
+   ]
+  },
+  "msg:10": {},
+  "msg:11": {
+   "1": [
+    "messageId",
+    11
+   ],
+   "2": [
+    "params",
+    [
+     15,
+     11
+    ]
+   ]
+  },
+  "msg:12": {
+   "1": [
+    "success",
+    2
+   ],
+   "2": [
+    "loginTime",
+    10
+   ],
+   "3": [
+    "season",
+    8
+   ],
+   "4": [
+    "isChina",
+    2
+   ],
+   "5": [
+    "dramaId",
+    8
+   ],
+   "6": [
+    "oserverOpenTime",
+    10
+   ],
+   "7": [
+    "kserverOpenTime",
+    10
+   ],
+   "8": [
+    "proxySessionId",
+    11
+   ]
+  },
+  "msg:15": {
+   "1": [
+    "firstSvrMixKey",
+    10
+   ],
+   "2": [
+    "secondSvrMixKey",
+    10
+   ]
+  },
+  "msg:22": {},
+  "msg:2101": {},
+  "PsCapitalProduct": {
+   "1": [
+    "id",
+    8
+   ],
+   "2": [
+    "num",
+    8
+   ],
+   "3": [
+    "price",
+    10
+   ],
+   "4": [
+    "capitalNodeId",
+    10
+   ],
+   "5": [
+    "cost",
+    10
+   ],
+   "6": [
+    "otherPrices",
+    [
+     15,
+     [
+      12,
+      "PsCapitalProduct"
+     ]
+    ]
+   ],
+   "7": [
+    "jumpType",
+    8
+   ],
+   "8": [
+    "type",
+    8
+   ],
+   "9": [
+    "energy",
+    8
+   ]
+  },
+  "msg:2102": {
+   "1": [
+    "capitalNodeId",
+    10
+   ],
+   "2": [
+    "armyId",
+    10
+   ],
+   "3": [
+    "nextCapitalNodeIds",
+    [
+     15,
+     10
+    ]
+   ],
+   "4": [
+    "products",
+    [
+     15,
+     [
+      12,
+      "PsCapitalProduct"
+     ]
+    ]
+   ],
+   "5": [
+    "load",
+    8
+   ]
+  },
+  "msg:2103": {
+   "1": [
+    "capitalNodeId",
+    10
+   ],
+   "2": [
+    "type",
+    8
+   ]
+  },
+  "msg:2104": {
+   "1": [
+    "capitalNodeId",
+    10
+   ],
+   "2": [
+    "type",
+    8
+   ],
+   "3": [
+    "products",
+    [
+     15,
+     [
+      12,
+      "PsCapitalProduct"
+     ]
+    ]
+   ],
+   "4": [
+    "tax",
+    4
+   ],
+   "5": [
+    "allianceTax",
+    [
+     13,
+     10,
+     4
+    ]
+   ]
+  },
+  "msg:2106": {
+   "1": [
+    "nextCapitalNodeIds",
+    [
+     15,
+     10
+    ]
+   ],
+   "2": [
+    "energy",
+    8
+   ],
+   "3": [
+    "nextEnergyTime",
+    10
+   ]
+  },
+  "msg:2112": {
+   "1": [
+    "productId",
+    8
+   ],
+   "2": [
+    "capitalNodeId",
+    10
+   ],
+   "3": [
+    "price",
+    10
+   ],
+   "4": [
+    "num",
+    8
+   ],
+   "5": [
+    "type",
+    8
+   ]
+  },
+  "msg:2114": {
+   "1": [
+    "capitalNodeId",
+    10
+   ],
+   "2": [
+    "tax",
+    4
+   ],
+   "3": [
+    "taxCdTime",
+    10
+   ],
+   "4": [
+    "allianceTax",
+    [
+     13,
+     10,
+     4
+    ]
+   ],
+   "5": [
+    "allianceTaxCdTimeMap",
+    [
+     13,
+     10,
+     10
+    ]
+   ],
+   "6": [
+    "todayTax",
+    10
+   ],
+   "7": [
+    "totalTax",
+    10
+   ]
+  },
+  "msg:2121": {
+   "1": [
+    "startCapitalNodeId",
+    10
+   ],
+   "2": [
+    "endCapitalNodeId",
+    10
+   ]
+  },
+  "msg:2122": {
+   "1": [
+    "nextCapitalNodeIds",
+    [
+     15,
+     10
+    ]
+   ]
+  },
+  "msg:2125": {},
+  "msg:2127": {
+   "1": [
+    "energy",
+    8
+   ],
+   "2": [
+    "nextEnergyTime",
+    10
+   ],
+   "3": [
+    "levelMap",
+    [
+     13,
+     8,
+     8
+    ]
+   ],
+   "4": [
+    "weekPrice",
+    8
+   ],
+   "5": [
+    "fastTimes",
+    8
+   ],
+   "6": [
+    "maxLoad",
+    8
+   ]
+  },
+  "PsCapitalTask": {
+   "1": [
+    "type",
+    8
+   ],
+   "2": [
+    "product",
+    [
+     12,
+     "PsCapitalProduct"
+    ]
+   ],
+   "3": [
+    "reward",
+    10
+   ],
+   "4": [
+    "fromCapitalId",
+    10
+   ],
+   "5": [
+    "targetCapitalId",
+    10
+   ],
+   "6": [
+    "dropReward",
+    11
+   ]
+  },
+  "msg:2129": {
+   "1": [
+    "capitalNodeId",
+    10
+   ],
+   "2": [
+    "capitalTask",
+    [
+     12,
+     "PsCapitalTask"
+    ]
+   ]
+  },
+  "msg:2131": {
+   "1": [
+    "type",
+    8
+   ],
+   "2": [
+    "capitalNodeId",
+    10
+   ],
+   "3": [
+    "doubleTimesLeft",
+    8
+   ]
+  },
+  "msg:2133": {
+   "1": [
+    "tasks",
+    [
+     15,
+     [
+      12,
+      "PsCapitalTask"
+     ]
+    ]
+   ],
+   "2": [
+    "finishTasks",
+    [
+     15,
+     [
+      12,
+      "PsCapitalTask"
+     ]
+    ]
+   ],
+   "3": [
+    "doubleTimesLeft",
+    8
+   ]
+  },
+  "PsSimpleItem": {
+   "1": [
+    "metaId",
+    11
+   ],
+   "2": [
+    "count",
+    8
+   ],
+   "3": [
+    "param1",
+    11
+   ],
+   "4": [
+    "type",
+    8
+   ]
+  },
+  "msg:2134": {
+   "1": [
+    "profit",
+    10
+   ],
+   "2": [
+    "beforeRank",
+    10
+   ],
+   "3": [
+    "afterRank",
+    10
+   ],
+   "4": [
+    "rewards",
+    [
+     15,
+     [
+      12,
+      "PsSimpleItem"
+     ]
+    ]
+   ]
+  },
+  "PsMonopolyNews": {
+   "1": [
+    "metaId",
+    11
+   ],
+   "2": [
+    "capitalId",
+    10
+   ],
+   "3": [
+    "startTime",
+    10
+   ],
+   "4": [
+    "endTime",
+    10
+   ],
+   "5": [
+    "productId",
+    8
+   ]
+  },
+  "msg:2136": {
+   "1": [
+    "news",
+    [
+     15,
+     [
+      12,
+      "PsMonopolyNews"
+     ]
+    ]
+   ]
+  },
+  "msg:6905": {}
+ },
+ "msgById": {
+  "1": "CgLogin",
+  "2": "CgEnterMap",
+  "3": "GcEnterMap",
+  "4": "CgSynchronizeTime",
+  "5": "GcSynchronizeTime",
+  "8": "GcReconnect",
+  "10": "GcEnterGamingStatus",
+  "11": "GcGameErrorRet",
+  "12": "GcLogin",
+  "15": "GcMixedKeys",
+  "22": "GcReconnectFinished",
+  "2101": "CgMonopolyInfo",
+  "2102": "GcMonopolyInfo",
+  "2103": "CgMonopolyCapitalProductInfo",
+  "2104": "GcMonopolyCapitalProductInfo",
+  "2106": "GcMonopolySetOut",
+  "2112": "GcMonopolyTradeProduct",
+  "2114": "GcMonopolyCapitalTaxInfo",
+  "2121": "CgMonopolyTradeRoute",
+  "2122": "GcMonopolyTradeRoute",
+  "2125": "GcMonopolyInit",
+  "2127": "GcMonopolyUpgradeInfo",
+  "2129": "GcMonopolyCapitalTask",
+  "2131": "GcMonopolyOptTask",
+  "2133": "GcMonopolyTask",
+  "2134": "GcMonopolyProfitPush",
+  "2136": "GcMonopolyNews",
+  "6905": "CgRegionCapitalApplyList"
+ }
+}

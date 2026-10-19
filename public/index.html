@@ -48,11 +48,20 @@
       <div class="logo">价</div>
       <div>
         <div class="title">三国冰河时代富甲天下跑商价格分享</div>
-        <div class="subtitle">城池 · 商品 买卖价格录入 / 查询 / 共享</div>
+        <div class="subtitle">城池 · 商品 买卖价格录入 / 查询 / 实时共享</div>
       </div>
     </div>
     <div class="spacer"></div>
+    <el-tooltip :content="wsConnected ? `实时协作已连接（在线 ${wsClients} 人）` : '实时协作未连接，正在重连…'">
+      <span class="ws-pill">
+        <span class="ws-dot" :class="{ on: wsConnected }"></span>
+        <span class="ws-text">实时</span>
+      </span>
+    </el-tooltip>
     <div class="tools">
+      <el-button size="small" type="primary" plain @click="openSync">同步</el-button>
+      <el-button size="small" @click="openReports">报表</el-button>
+      <el-button size="small" @click="openSettings">定时</el-button>
       <el-button size="small" @click="openDict">字典</el-button>
       <el-button size="small" @click="openHistory">日志</el-button>
       <el-button size="small" @click="openTrend">趋势</el-button>
@@ -140,6 +149,9 @@
         <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
       </div>
 
+      <el-alert v-if="conflictCount" type="warning" :closable="false" show-icon style="margin-bottom:10px"
+        :title="`有 ${conflictCount} 项价格已被他人更新，你本地有未保存修改；保存时会提示冲突，可覆盖或改用最新数据`"></el-alert>
+
       <!-- 桌面端：表格 -->
       <el-table class="desktop-table" :data="rows" size="default" border stripe
         style="width:100%" :row-class-name="rowClass">
@@ -149,13 +161,15 @@
         <el-table-column label="城池" width="100" align="center">
           <template #default>{{ queried ? form.city : '-' }}</template>
         </el-table-column>
-        <el-table-column label="商品" min-width="150">
+        <el-table-column label="商品" min-width="190">
           <template #default="scope">
             <div class="commodity-cell">
               <span class="name">
                 {{ scope.row.commodity }}
                 <span class="burden-tag" v-if="scope.row.burden != null">负重{{ scope.row.burden }}</span>
                 <span v-if="isDirty(scope.row)" class="dirty-dot">*</span>
+                <el-tag v-if="scope.row._remoteConflict" size="small" type="warning" effect="plain"
+                  style="margin-left:6px">已被他人更新</el-tag>
               </span>
             </div>
           </template>
@@ -200,12 +214,15 @@
 
       <!-- 手机端：卡片列表 -->
       <div class="mobile-cards" v-if="isMobile">
-        <div class="m-row" v-for="(row, i) in rows" :key="row.commodityId" :class="{ dirty: isDirty(row) }">
+        <div class="m-row" v-for="(row, i) in rows" :key="row.commodityId"
+          :class="{ dirty: isDirty(row), conflict: row._remoteConflict }">
           <div class="m-row__head">
             <span class="name">
               {{ row.commodity }}
               <span class="burden-tag" v-if="row.burden != null">负重{{ row.burden }}</span>
               <span v-if="isDirty(row)" class="dirty-dot">*</span>
+              <el-tag v-if="row._remoteConflict" size="small" type="warning" effect="plain"
+                style="margin-left:6px">已被他人更新</el-tag>
             </span>
             <span class="time" v-if="row.updatedAt && queried">{{ row.updatedAt.slice(5, 16) }}</span>
             <span class="time" v-else-if="!queried">-</span>
@@ -247,30 +264,38 @@
         <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称按 <b>Enter</b> 即可写入字典表。</li>
         <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；下拉项显示每个商品的负重。</li>
         <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>
-        <li><b>填写价格</b>：直接在买价/卖价输入框录入；支持「同上一行」。</li>
+        <li><b>填写价格</b>：直接在买价/卖价输入框录入；支持「同上一行」；他人同时改价会实时提示并标记冲突。</li>
         <li><b>点击保存</b>：右上角「保存」→ 弹窗确认变更明细 → 确认后写入数据库，记录更新时间与更新人。</li>
         <li><b>字典管理</b>：「字典」可新增/改名/维护负重/启停/删除城池与商品；被价格引用的项不可删除。</li>
       </ol>
       <div class="help-grid">
         <div class="help-item">
-          <h4>清空输入</h4>
-          <p>区服输入框、城池/商品下拉框均支持一键清空（右侧 × 按钮），清空后可重新选择。</p>
+          <h4>游戏直连同步</h4>
+          <p>点「同步」粘贴游戏登录 token（网页端 localStorage 的 x-game-token-pcweb），即可通过官方接口实时抓取全服约 42 城价格，无需截图逐条录入；同步同时会采集城池间体力消耗。</p>
         </div>
         <div class="help-item">
-          <h4>快捷键</h4>
-          <p>Ctrl / Cmd + Enter 快速保存；Tab 在各输入框间顺序移动；Esc 关闭弹窗。</p>
+          <h4>实时协作</h4>
+          <p>顶栏绿点表示实时连接正常。其他玩家保存价格后，你正在查看的城池会立即刷新；若该行你也有未保存修改，会标记「已被他人更新」，保存时提示冲突，可选覆盖或改用最新数据。</p>
+        </div>
+        <div class="help-item">
+          <h4>定时自动同步</h4>
+          <p>「定时」可配置 cron 频率、区服、更新人与 token，服务器按北京时间自动同步，并保留最近运行记录；也可随时点「立即同步一次」。</p>
+        </div>
+        <div class="help-item">
+          <h4>报表</h4>
+          <p>「报表」提供涨跌幅榜、跨城池套利建议（按载重计算件数，扣除体力成本并可估算每日收益）与改价/同步热度图。</p>
         </div>
         <div class="help-item">
           <h4>批量导入</h4>
-          <p>「导入」支持两种方式：<b>Excel</b>（.xlsx，先「下载模板」按「商品 | 买价 | 卖价 | 负重」填写后上传）与 <b>游戏市场截图 OCR</b>（上传买入坊市/卖出坊市截图，本机离线识别，截图不上传服务器）。识别/解析结果可在预览中直接修改后导入；未知商品可自动创建；OCR 单侧识别采用 merge 模式，不清空另一侧已有价格。</p>
+          <p>「导入」支持 Excel（.xlsx，先「下载模板」按「商品 | 买价 | 卖价 | 负重」填写后上传）；可勾选合并模式，只更新有值字段、不清空另一侧已有价格。</p>
+        </div>
+        <div class="help-item">
+          <h4>快捷键</h4>
+          <p>Ctrl / Cmd + Enter 快速保存；Tab 在各输入框间顺序移动；Esc 关闭弹窗。区服、城池/商品下拉框均支持一键清空。</p>
         </div>
         <div class="help-item">
           <h4>日志 / 趋势 / 比价</h4>
-          <p>「日志」查看改价前后值与操作人；「趋势」看某商品价格曲线；「比价」看同一商品在所有城池的价格。</p>
-        </div>
-        <div class="help-item">
-          <h4>更新人昵称</h4>
-          <p>价格的「更新人」即你进入时输入的昵称；想换名字点右上角「切换昵称」即可，历史记录会保留原昵称。</p>
+          <p>「日志」查看改价前后值与操作人；「趋势」看某商品价格曲线；「比价」看同一商品在所有城池的价格，并可跳转套利报表。</p>
         </div>
         <div class="help-item">
           <h4>负重与利润</h4>
@@ -319,6 +344,8 @@
         </el-table-column>
       </el-table>
     </div>
+    <el-alert v-if="conflictCount" type="warning" :closable="false" show-icon style="margin-top:10px"
+      :title="`其中 ${conflictCount} 项可能已被他人更新，保存时会再次校验并提示冲突`"></el-alert>
     <template #footer>
       <el-button @click="saveVisible = false">取 消</el-button>
       <el-button type="primary" :loading="saving" @click="confirmSave">确认保存</el-button>
@@ -587,6 +614,7 @@
       </el-table>
     </template>
     <template #footer>
+      <el-button @click="openArbitrageFromMatrix">套利建议</el-button>
       <el-button @click="matrixVisible = false">关 闭</el-button>
     </template>
   </el-dialog>
@@ -595,62 +623,20 @@
   <el-dialog v-model="importVisible" title="批量导入价格" width="760px" :fullscreen="isMobile" top="6vh">
     <div class="confirm-summary">
       导入到 <b>{{ form.server || '未选择区服' }}</b> · <b>{{ form.city || '未选择城池' }}</b>。
-      支持 <b>Excel 文件</b> 或 <b>游戏市场截图 OCR 识别</b>；识别/解析结果可在预览中直接修改后导入。
+      支持 <b>Excel 文件</b>，解析结果可在预览中直接修改后导入。
     </div>
-    <el-tabs v-model="importTab" style="margin-top:6px">
-      <el-tab-pane label="Excel 导入" name="excel">
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <el-button size="small" @click="downloadImportTemplate">下载 Excel 模板</el-button>
-          <input type="file" ref="importFileEl" accept=".xlsx,.xls" style="display:none" @change="onImportFile">
-          <el-button size="small" type="primary" plain @click="importFileEl && importFileEl.click()">选择 Excel 文件</el-button>
-          <span style="font-size:12.5px;color:var(--ink-2)">{{ importFileName || '尚未选择文件' }}</span>
-          <el-button v-if="importFileName" size="small" text type="danger" @click="clearImportFile">清除</el-button>
-        </div>
-        <div style="font-size:12px;color:var(--ink-2);margin-top:8px">
-          列顺序：<b>商品 | 买价 | 卖价 | 负重（可选）</b>；首行表头可有可无；买价/卖价可留空（留空且原价存在时清空该价）。
-        </div>
-      </el-tab-pane>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <el-button size="small" @click="downloadImportTemplate">下载 Excel 模板</el-button>
+      <input type="file" ref="importFileEl" accept=".xlsx,.xls" style="display:none" @change="onImportFile">
+      <el-button size="small" type="primary" plain @click="importFileEl && importFileEl.click()">选择 Excel 文件</el-button>
+      <span style="font-size:12.5px;color:var(--ink-2)">{{ importFileName || '尚未选择文件' }}</span>
+      <el-button v-if="importFileName" size="small" text type="danger" @click="clearImportFile">清除</el-button>
+    </div>
+    <div style="font-size:12px;color:var(--ink-2);margin-top:8px">
+      列顺序：<b>商品 | 买价 | 卖价 | 负重（可选）</b>；首行表头可有可无；买价/卖价可留空（留空且原价存在时清空该价）。
+    </div>
 
-      <el-tab-pane label="截图识别" name="ocr">
-        <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:8px">
-          上传游戏内<b>买入坊市</b>/<b>卖出坊市</b>截图（可多张），自动识别商品价格与负重。识别在本机浏览器完成，截图不会上传服务器。
-        </div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <input type="file" ref="ocrFileEl" accept="image/*" multiple style="display:none" @change="onOcrFiles">
-          <el-button size="small" type="primary" plain :disabled="ocrRunning" @click="ocrFileEl && ocrFileEl.click()">选择截图</el-button>
-          <el-button size="small" type="primary" :loading="ocrRunning" :disabled="!ocrImages.length" @click="runOcr">开始识别</el-button>
-          <el-button v-if="ocrImages.length && !ocrRunning" size="small" text type="danger" @click="clearOcr">清空</el-button>
-        </div>
-        <div v-if="ocrImages.length" style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
-          <div v-for="img in ocrImages" :key="img.id" class="ocr-item">
-            <img :src="img.url" class="ocr-thumb" alt="">
-            <div class="ocr-meta">
-              <div style="font-size:12.5px;word-break:break-all">{{ img.name }}</div>
-              <div style="display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap">
-                <el-select v-model="img.mode" size="small" style="width:110px" :disabled="ocrRunning || img.status !== 'done'" @change="rebuildOcrPreview">
-                  <el-option label="卖出坊市" value="sell"></el-option>
-                  <el-option label="买入坊市" value="buy"></el-option>
-                </el-select>
-                <span v-if="img.status==='pending'" class="ocr-status">待识别</span>
-                <span v-else-if="img.status==='running'" class="ocr-status">识别中 {{ Math.round(img.progress * 100) }}%</span>
-                <span v-else-if="img.status==='done'" class="ocr-status ok">识别到 {{ img.rows.length }} 项</span>
-                <span v-else class="ocr-status danger">{{ img.error || '失败' }}</span>
-                <el-button v-if="img.rawText" link type="primary" size="small" @click="img.showText = !img.showText">
-                  {{ img.showText ? '收起原文' : '识别原文' }}
-                </el-button>
-              </div>
-              <div v-if="img.error && img.status==='done'" class="ocr-status danger" style="margin-top:2px">{{ img.error }}</div>
-              <pre v-if="img.showText && img.rawText" class="ocr-raw">{{ img.rawText }}</pre>
-            </div>
-          </div>
-        </div>
-        <div v-else style="border:1px dashed var(--line);border-radius:8px;padding:18px;text-align:center;color:var(--ink-2);font-size:13px;margin-top:8px">
-          点击「选择截图」上传游戏市场界面截图（支持一次选多张）
-        </div>
-      </el-tab-pane>
-    </el-tabs>
-
-    <div v-if="importPreview.length" class="confirm-list" style="max-height:30vh;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:8px">
+    <div v-if="importPreview.length" class="confirm-list" style="max-height:30vh;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:10px">
       <el-table :data="importPreview" size="small" max-height="30vh">
         <el-table-column type="index" label="#" width="50" align="center"></el-table-column>
         <el-table-column label="商品" min-width="100">
@@ -673,11 +659,13 @@
       </el-table>
     </div>
     <div v-else style="border:1px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--ink-2);font-size:13px;margin:10px 0">
-      先上传 Excel 或游戏截图进行识别，结果将显示在此处供确认修改
+      先上传 Excel 文件，解析结果将显示在此处供确认修改
     </div>
-    <div style="display:flex;align-items:center;gap:16px;margin-top:10px">
+    <div class="import-switches">
       <el-switch v-model="importAutoCreate" active-text="自动创建字典中不存在的商品"></el-switch>
-      <div style="flex:1"></div>
+      <el-switch v-model="importMerge" active-text="合并模式（不清空未填写的价格）"></el-switch>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-top:10px">
       <el-button type="primary" :loading="importing" :disabled="!importPreview.length" @click="submitImport">开始导入</el-button>
     </div>
     <template #footer>
@@ -685,12 +673,245 @@
     </template>
   </el-dialog>
 
+  <!-- ================= 游戏同步弹窗 ================= -->
+  <el-dialog v-model="syncVisible" title="从游戏同步价格" width="700px" :fullscreen="isMobile" top="8vh">
+    <el-alert type="info" :closable="false" show-icon style="margin-bottom:14px"
+      title="使用游戏登录 token 通过官方接口实时抓取全服城池价格。token 可在游戏网页端开发者工具 localStorage 的 x-game-token-pcweb 中复制。"></el-alert>
+    <el-form label-position="top">
+      <el-form-item label="区服名称（必填，纯数字）">
+        <el-input :model-value="syncServer" placeholder="纯数字，如 1344" maxlength="12"
+          @update:model-value="v => syncServer = String(v).replace(/\D/g, '')"></el-input>
+      </el-form-item>
+      <el-form-item label="登录 token">
+        <el-input v-model="syncToken" type="textarea" :rows="3"
+          placeholder="粘贴 x-game-token-pcweb；若已在「定时」中保存过可留空"></el-input>
+        <div class="hint-line" v-if="syncHasSavedToken">已保存过 token，可留空直接同步。</div>
+      </el-form-item>
+      <el-form-item label="更新人（可选）">
+        <el-input v-model="syncOperator" maxlength="20" placeholder="默认当前昵称"></el-input>
+      </el-form-item>
+    </el-form>
+    <el-alert v-if="syncResult" type="success" :closable="false" show-icon
+      :title="`同步完成：查询 ${syncResult.queried}/${syncResult.cities} 城，写入 ${syncResult.saved} 条（新增 ${syncResult.created}，更新 ${syncResult.updated}），体力路线 ${syncResult.energyPairs} 条`">
+      <div v-if="syncResult.failed && syncResult.failed.length" class="failed-list">
+        失败：{{ syncResult.failed.map(f => f.city + '（' + f.error + '）').join('；') }}
+      </div>
+    </el-alert>
+    <template #footer>
+      <el-button @click="syncVisible = false">关 闭</el-button>
+      <el-button type="primary" :loading="syncing" @click="doSync">开始同步</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- ================= 定时同步设置弹窗 ================= -->
+  <el-dialog v-model="settingsVisible" title="定时自动同步" width="780px" :fullscreen="isMobile" top="6vh">
+    <div v-loading="settingsLoading">
+      <el-form label-width="110px" label-position="left">
+        <el-form-item label="启用自动同步">
+          <el-switch v-model="settings.enabled"></el-switch>
+        </el-form-item>
+        <el-form-item label="同步频率">
+          <el-select v-model="cronPreset" style="width:170px">
+            <el-option v-for="p in cronPresets" :key="p.value" :label="p.label" :value="p.value"></el-option>
+          </el-select>
+          <el-input v-if="cronPreset === 'custom'" v-model="cronCustom"
+            placeholder="cron 表达式，如 0 */2 * * *" style="width:240px;margin-left:8px"></el-input>
+          <div class="hint-line">按北京时间执行；当前：<code>{{ settings.cron }}</code></div>
+        </el-form-item>
+        <el-form-item label="区服名称">
+          <el-input :model-value="settings.server" placeholder="纯数字，如 1344" maxlength="12"
+            style="width:220px"
+            @update:model-value="v => settings.server = String(v).replace(/\D/g, '')"></el-input>
+        </el-form-item>
+        <el-form-item label="更新人">
+          <el-input v-model="settings.operator" maxlength="20" style="width:220px"></el-input>
+        </el-form-item>
+        <el-form-item label="登录 token">
+          <el-input v-model="settings.token" type="textarea" :rows="3"
+            placeholder="留空表示沿用已保存的 token"></el-input>
+          <div class="hint-line" v-if="settings.hasToken">已保存：{{ settings.tokenHint }}（留空不修改）</div>
+          <div class="hint-line" v-else>尚未保存 token，启用自动同步前必须填写。</div>
+        </el-form-item>
+      </el-form>
+      <div class="statusbar" style="margin-bottom:10px">
+        <span>上次运行 <b>{{ settings.lastRunAt || '-' }}</b></span>
+        <span>状态 <b :class="settings.lastStatus === 'failed' ? 'danger' : 'ok'">{{ settings.lastStatus || '-' }}</b></span>
+        <span v-if="settings.lastMessage">{{ settings.lastMessage }}</span>
+        <span v-if="settings.energy">
+          体力：每次跨城 <b>{{ settings.energy.energyCost }}</b> 点 / 上限 <b>{{ settings.energy.energyLimit }}</b> 点 /
+          <b>{{ settings.energy.energyCDHours }}</b> 小时恢复 1 点
+        </span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin:6px 0 10px">
+        <b style="font-size:13px">最近运行记录</b>
+        <div style="flex:1"></div>
+        <el-button size="small" :loading="settingsRunning" @click="runSettingsSync">立即同步一次</el-button>
+      </div>
+      <el-table :data="syncLogs" size="small" max-height="30vh">
+        <el-table-column label="开始时间" prop="startedAt" width="150"></el-table-column>
+        <el-table-column label="触发" width="70" align="center">
+          <template #default="s">{{ s.row.triggerType === 'cron' ? '定时' : s.row.triggerType === 'cli' ? 'CLI' : '手动' }}</template>
+        </el-table-column>
+        <el-table-column label="区服" prop="server" width="90" align="center"></el-table-column>
+        <el-table-column label="状态" width="80" align="center">
+          <template #default="s">
+            <el-tag size="small" effect="plain"
+              :type="s.row.status === 'success' ? 'success' : s.row.status === 'partial' ? 'warning' : s.row.status === 'running' ? 'info' : 'danger'">
+              {{ s.row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="查询/写入" width="100" align="center">
+          <template #default="s">{{ s.row.queried ?? '-' }} / {{ s.row.saved ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column label="失败城数" width="80" align="center">
+          <template #default="s">{{ s.row.failedCount ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="说明" prop="message" min-width="140" show-overflow-tooltip></el-table-column>
+      </el-table>
+    </div>
+    <template #footer>
+      <el-button @click="settingsVisible = false">关 闭</el-button>
+      <el-button type="primary" :loading="settingsSaving" @click="saveSettings">保存设置</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- ================= 数据报表弹窗 ================= -->
+  <el-dialog v-model="reportVisible" title="数据报表" width="1020px" :fullscreen="isMobile" top="5vh">
+    <div class="report-toolbar">
+      <el-input v-model="reportServer" placeholder="区服，如 1344" style="width:150px"
+        @keyup.enter="loadReport"></el-input>
+      <el-button :loading="reportLoading" @click="loadReport">刷新</el-button>
+    </div>
+    <el-tabs v-model="reportTab" @tab-change="onReportTabChange">
+      <!-- 涨跌幅榜 -->
+      <el-tab-pane label="涨跌幅榜" name="movers">
+        <div class="report-toolbar">
+          <el-select v-model="reportDays" style="width:120px" @change="loadReport">
+            <el-option label="近 7 天" :value="7"></el-option>
+            <el-option label="近 30 天" :value="30"></el-option>
+            <el-option label="近 90 天" :value="90"></el-option>
+          </el-select>
+          <span class="hint-line">按涨跌幅绝对值降序，对比窗口起点与当前库内价格</span>
+        </div>
+        <el-table :data="moversData.items" size="small" max-height="52vh" border stripe>
+          <el-table-column label="城池" prop="city" width="90"></el-table-column>
+          <el-table-column label="商品" prop="commodity" min-width="100"></el-table-column>
+          <el-table-column label="字段" width="70" align="center">
+            <template #default="s">{{ s.row.field === 'buy' ? '买价' : '卖价' }}</template>
+          </el-table-column>
+          <el-table-column label="起始" width="80" align="right">
+            <template #default="s">{{ s.row.start }}</template>
+          </el-table-column>
+          <el-table-column label="当前" width="80" align="right">
+            <template #default="s">{{ s.row.end }}</template>
+          </el-table-column>
+          <el-table-column label="涨跌" width="90" align="right">
+            <template #default="s">
+              <b :class="changeClass(s.row.change)">{{ s.row.change > 0 ? '+' : '' }}{{ s.row.change }}</b>
+            </template>
+          </el-table-column>
+          <el-table-column label="涨跌幅" width="90" align="right">
+            <template #default="s">
+              <b :class="changeClass(s.row.changePct)">{{ s.row.changePct > 0 ? '+' : '' }}{{ s.row.changePct }}%</b>
+            </template>
+          </el-table-column>
+          <el-table-column label="更新时间" prop="updatedAt" width="150"></el-table-column>
+          <template #empty>该时间范围内暂无价格变更记录</template>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 城池间套利 -->
+      <el-tab-pane label="套利建议" name="arbitrage">
+        <div class="report-toolbar">
+          <span class="param-label">载重</span>
+          <el-input-number v-model="arbParams.load" :min="1" :max="100000" size="small"
+            controls-position="right" style="width:110px"></el-input-number>
+          <span class="param-label">体力单价</span>
+          <el-input-number v-model="arbParams.energyPrice" :min="0" :max="999999" size="small"
+            controls-position="right" style="width:110px"></el-input-number>
+          <span class="param-label">每趟体力</span>
+          <el-input-number v-model="arbParams.energyPerTrip" :min="1" :max="99" size="small"
+            controls-position="right" style="width:100px"></el-input-number>
+          <el-checkbox v-model="arbParams.returnTrip">回程也耗体力</el-checkbox>
+          <el-checkbox v-model="arbParams.all">含亏损路线</el-checkbox>
+          <el-button size="small" @click="loadReport">计算</el-button>
+        </div>
+        <el-alert type="info" :closable="false" style="margin-bottom:10px"
+          :title="`体力：每次跨城消耗 ${arbData.energyInfo.energyCost ?? 1} 点，上限 ${arbData.energyInfo.energyLimit ?? 10} 点，${arbData.energyInfo.energyCDHours ?? 4} 小时恢复 1 点；每日最多约 ${arbData.energyInfo.dailyMaxTrips ?? '-'} 趟`"></el-alert>
+        <el-table :data="arbData.items" size="small" max-height="50vh" border stripe>
+          <el-table-column label="商品" prop="commodity" width="90"></el-table-column>
+          <el-table-column label="路线" min-width="130">
+            <template #default="s">
+              <b class="ok">{{ s.row.buyCity }}</b> → <b class="ok">{{ s.row.sellCity }}</b>
+            </template>
+          </el-table-column>
+          <el-table-column label="买价" prop="buyPrice" width="75" align="right"></el-table-column>
+          <el-table-column label="卖价" prop="sellPrice" width="75" align="right"></el-table-column>
+          <el-table-column label="单位利润" width="90" align="right">
+            <template #default="s">
+              <b :class="changeClass(s.row.unitProfit)">{{ s.row.unitProfit > 0 ? '+' : '' }}{{ s.row.unitProfit }}</b>
+            </template>
+          </el-table-column>
+          <el-table-column label="件数" prop="units" width="65" align="right"></el-table-column>
+          <el-table-column label="毛利" width="85" align="right">
+            <template #default="s"><b :class="changeClass(s.row.gross)">{{ s.row.gross }}</b></template>
+          </el-table-column>
+          <el-table-column label="单程体力" width="100" align="center">
+            <template #default="s">
+              {{ s.row.energy }}
+              <el-tag v-if="s.row.energySource === 'game'" size="small" effect="plain" type="success"
+                style="margin-left:4px">实测</el-tag>
+              <el-tag v-else size="small" effect="plain" style="margin-left:4px">默认</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="体力成本" prop="energyCost" width="90" align="right"></el-table-column>
+          <el-table-column label="净利" width="90" align="right">
+            <template #default="s"><b :class="changeClass(s.row.net)">{{ s.row.net > 0 ? '+' : '' }}{{ s.row.net }}</b></template>
+          </el-table-column>
+          <el-table-column label="每日趟数" prop="dailyTrips" width="85" align="right"></el-table-column>
+          <el-table-column label="日净利" width="95" align="right">
+            <template #default="s"><b :class="changeClass(s.row.dailyNet)">{{ s.row.dailyNet }}</b></template>
+          </el-table-column>
+          <template #empty>暂无可计算的套利路线，请先同步或录入更多城池价格</template>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 更新热度 -->
+      <el-tab-pane label="更新热度" name="heat">
+        <div class="report-toolbar">
+          <el-select v-model="heatBucket" style="width:110px" @change="loadReport">
+            <el-option label="按天" value="day"></el-option>
+            <el-option label="按小时" value="hour"></el-option>
+          </el-select>
+          <el-select v-model="heatDays" style="width:120px" @change="loadReport">
+            <el-option label="近 7 天" :value="7"></el-option>
+            <el-option label="近 30 天" :value="30"></el-option>
+            <el-option label="近 90 天" :value="90"></el-option>
+          </el-select>
+          <span class="hint-line">改价 <b>{{ heatData.totalChanges }}</b> 次 · 同步 <b>{{ heatData.totalSyncs }}</b> 次</span>
+        </div>
+        <div v-if="heatData.buckets.length" class="heat-bars">
+          <div class="heat-col" v-for="b in heatBars" :key="b.key"
+            :title="`${b.label}：改价 ${b.changes} 次，同步 ${b.syncs} 次，${b.users} 人参与`">
+            <div class="heat-track">
+              <div class="heat-bar" :style="{ height: b.height + '%' }"></div>
+            </div>
+            <div class="heat-label" v-if="b.showLabel">{{ b.label }}</div>
+          </div>
+        </div>
+        <div v-else class="empty-tip">暂无更新数据</div>
+      </el-tab-pane>
+    </el-tabs>
+    <template #footer>
+      <el-button @click="reportVisible = false">关 闭</el-button>
+    </template>
+  </el-dialog>
+
   </template>
 </div>
 
 <script src="/vendor/xlsx/xlsx.full.min.js"></script>
-<script src="/js/ocr-parse.js"></script>
-<script src="/js/template-match.js"></script>
 <script type="module" src="/js/app.js"></script>
 </body>
 </html>

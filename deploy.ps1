@@ -7,8 +7,8 @@
 #    .\deploy.ps1 stop       停止
 #    .\deploy.ps1 logs       跟踪日志
 #    .\deploy.ps1 status     查看状态
-#    .\deploy.ps1 backup     备份 SQLite 数据库到 .\backup
-#    .\deploy.ps1 restore    从 .\backup 恢复数据库
+#    .\deploy.ps1 backup     备份 MySQL（无 mysql 服务时备份 SQLite）到 .\backup
+#    .\deploy.ps1 restore    从 .\backup 的 .sql / .db 恢复数据库
 #    .\deploy.ps1 clean      停止并删除容器（保留数据卷）
 #  可用环境变量 PORT 覆盖端口（默认 3000）
 # ============================================================
@@ -40,8 +40,8 @@ function Test-Docker {
 }
 
 function Wait-Health {
-  Write-Host "  => 等待服务就绪（http://localhost:$env:PORT）..."
-  for ($i = 0; $i -lt 40; $i++) {
+  Write-Host "  => 等待服务就绪（http://localhost:$env:PORT，首次启动初始化 MySQL 可能较慢）..."
+  for ($i = 0; $i -lt 90; $i++) {
     try {
       $r = Invoke-WebRequest -Uri "http://127.0.0.1:$env:PORT/api/health" -UseBasicParsing -TimeoutSec 3
       if ($r.StatusCode -eq 200) {
@@ -64,7 +64,7 @@ switch ($Command) {
     Wait-Health | Out-Null
     Write-Host ''
     Write-Host "  访问地址 : http://localhost:$env:PORT"
-    Write-Host "  数据目录 : $(Join-Path (Get-Location) 'data\price.db')"
+    Write-Host "  数据存储 : MySQL 数据卷 mysql-data（SQLite 兜底/迁移源：$(Join-Path (Get-Location) 'data\price.db')）"
     Write-Host '  备份命令 : .\deploy.ps1 backup'
     Write-Host ''
   }
@@ -97,32 +97,46 @@ switch ($Command) {
     Test-Docker
     New-Item -ItemType Directory -Force -Path 'backup' | Out-Null
     $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $file = "backup\price-$ts.db"
-    try {
-      & $Compose cp app:/app/data/price.db $file
-    } catch {
-      Copy-Item -LiteralPath 'data\price.db' -Destination $file -Force
+    $services = & $Compose ps --status running --services 2>$null
+    if ($services -contains 'mysql') {
+      $file = "backup\mysql-$ts.sql"
+      & $Compose exec -T mysql sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers --databases "$MYSQL_DATABASE" > "/backup/mysql-$1.sql"' sh $ts
+    } else {
+      $file = "backup\price-$ts.db"
+      try {
+        & $Compose cp app:/app/data/price.db $file
+      } catch {
+        Copy-Item -LiteralPath 'data\price.db' -Destination $file -Force
+      }
     }
     Write-Host "==> 已备份到 $file"
   }
   'restore' {
     Test-Docker
     if (-not $RestoreFile -or -not (Test-Path -LiteralPath $RestoreFile)) {
-      Write-Host '用法: .\deploy.ps1 restore backup\price-YYYYmmdd-HHMMSS.db'
+      Write-Host '用法: .\deploy.ps1 restore backup\mysql-YYYYmmdd-HHMMSS.sql'
+      Write-Host '      .\deploy.ps1 restore backup\price-YYYYmmdd-HHMMSS.db'
       if (Test-Path 'backup') { Get-ChildItem backup | Select-Object -ExpandProperty Name }
       exit 1
     }
     $ok = Read-Host "确认用 $RestoreFile 覆盖当前数据库？（容器将重启）[y/N]"
     if ($ok -ne 'y' -and $ok -ne 'Y') { exit 0 }
-    Copy-Item -LiteralPath $RestoreFile -Destination 'data\price.db' -Force
-    & $Compose restart app
+    if ($RestoreFile -like '*.sql') {
+      $base = Split-Path -Leaf $RestoreFile
+      & $Compose stop app | Out-Null
+      & $Compose exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" < "/backup/$1"' sh $base
+      & $Compose start app | Out-Null
+    } else {
+      Copy-Item -LiteralPath $RestoreFile -Destination 'data\price.db' -Force
+      & $Compose restart app
+    }
     Write-Host '==> 已恢复并重启' -ForegroundColor Green
   }
   'clean' {
     Test-Docker
-    $ok = Read-Host '确认停止并删除容器？（数据卷 .\data 会保留）[y/N]'
+    $ok = Read-Host '确认停止并删除容器？（MySQL 数据卷与 .\data 会保留）[y/N]'
     if ($ok -ne 'y' -and $ok -ne 'Y') { exit 0 }
     & $Compose down
-    Write-Host '==> 已清理（数据库文件仍在 .\data 目录）'
+    Write-Host '==> 已清理（数据仍在 Docker 卷 mysql-data 与 .\data 目录）'
   }
 }

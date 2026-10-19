@@ -1,100 +1,26 @@
 'use strict';
 
 /**
- * 数据层：SQLite（Node 内置 node:sqlite，零原生编译依赖）
- * 表结构：
- *  - dict_items    字典表（城池 / 商品）
- *  - servers       区服表（自由文本输入的区服自动登记）
- *  - prices        价格表（区服 + 城池 + 商品 唯一，买价 / 卖价 / 更新人）
- *  - price_history 价格变更流水（含操作人昵称）
+ * 数据层：MySQL（生产，docker-compose 内置） / SQLite（本地与测试回退）
+ *
+ * 选择规则：
+ *   DB_DRIVER=mysql 或存在 MYSQL_HOST  → MySQL（mysql2 连接池）
+ *   DB_DRIVER=sqlite 或未设置           → SQLite（node:sqlite，PRICE_DB 可指定文件）
+ *
+ * 所有查询统一使用 ? 占位符；时间统一存北京时间字符串 'YYYY-MM-DD HH:MM:SS'。
  */
 
 const fs = require('node:fs');
 const nodePath = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
+
+const DRIVER = (process.env.DB_DRIVER || (process.env.MYSQL_HOST ? 'mysql' : 'sqlite')).toLowerCase();
+const IS_MYSQL = DRIVER === 'mysql';
 
 const DATA_DIR = nodePath.join(__dirname, '..', 'data');
-// PRICE_DB 便于测试使用独立临时库
 const DB_FILE = process.env.PRICE_DB
   ? nodePath.resolve(process.env.PRICE_DB)
   : nodePath.join(DATA_DIR, 'price.db');
-// 确保数据库所在目录存在（含 PRICE_DB 指向自定义路径的场景）
-fs.mkdirSync(nodePath.dirname(DB_FILE), { recursive: true });
-
-let db;
-try {
-  db = new DatabaseSync(DB_FILE);
-} catch (err) {
-  console.error(`[db] 无法打开数据库文件: ${DB_FILE}`);
-  console.error(`[db] ${err.message}`);
-  console.error('[db] 常见原因：数据目录不存在或无写权限（Docker 挂载卷场景：Linux 上可执行 mkdir -p data && chown 1000:1000 data；或检查 PRICE_DB 路径）。');
-  throw err;
-}
-
-db.exec(`
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
-
-CREATE TABLE IF NOT EXISTS dict_items (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  type       TEXT    NOT NULL CHECK (type IN ('city', 'commodity')),
-  name       TEXT    NOT NULL,
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  burden     REAL,                                    -- 负重（商品固有属性，跨城比价时参考）
-  status     INTEGER NOT NULL DEFAULT 1,          -- 1 启用 / 0 停用
-  created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-  updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uk_dict_type_name ON dict_items(type, name);
-
-CREATE TABLE IF NOT EXISTS servers (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT    NOT NULL UNIQUE,
-  created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-  updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
-);
-
-CREATE TABLE IF NOT EXISTS prices (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  server_id    INTEGER NOT NULL REFERENCES servers(id)    ON DELETE CASCADE,
-  city_id      INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
-  commodity_id INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
-  buy_price    REAL,
-  sell_price   REAL,
-  operator     TEXT,                                    -- 最后更新人
-  updated_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-  UNIQUE (server_id, city_id, commodity_id)
-);
-CREATE INDEX IF NOT EXISTS idx_prices_lookup ON prices(server_id, city_id, commodity_id);
-
-CREATE TABLE IF NOT EXISTS price_history (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  server_id    INTEGER NOT NULL,
-  city_id      INTEGER NOT NULL,
-  commodity_id INTEGER NOT NULL,
-  field        TEXT    NOT NULL,                        -- buy_price / sell_price
-  old_value    REAL,
-  new_value    REAL,
-  operator     TEXT,                                    -- 操作人（更新人昵称）
-  created_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
-);
-CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(server_id, city_id, created_at DESC);
-`);
-
-/* 存量库迁移：补 price_history.operator / dict_items.burden / prices.operator 列 */
-const historyCols = db.prepare('PRAGMA table_info(price_history)').all().map(c => c.name);
-if (!historyCols.includes('operator')) {
-  db.exec('ALTER TABLE price_history ADD COLUMN operator TEXT');
-}
-const dictCols = db.prepare('PRAGMA table_info(dict_items)').all().map(c => c.name);
-if (!dictCols.includes('burden')) {
-  db.exec('ALTER TABLE dict_items ADD COLUMN burden REAL');
-}
-const priceCols = db.prepare('PRAGMA table_info(prices)').all().map(c => c.name);
-if (!priceCols.includes('operator')) {
-  db.exec('ALTER TABLE prices ADD COLUMN operator TEXT');
-}
+const HISTORY_LIMIT = Math.max(1000, Number(process.env.HISTORY_LIMIT) || 20000);
 
 /* ------------------------------ 种子数据 ------------------------------ */
 
@@ -119,65 +45,34 @@ const COMMODITY_SEED = [
   { name: '金银器', burden: 27 },
 ];
 
-function seedIfEmpty() {
-  const row = db.prepare('SELECT COUNT(*) AS n FROM dict_items').get();
-  if (row.n > 0) return;
-  const insert = db.prepare(
-    'INSERT INTO dict_items (type, name, sort_order) VALUES (?, ?, ?)'
-  );
-  CITY_LIST.forEach((name, i) => insert.run('city', name, i + 1));
-  COMMODITY_SEED.forEach((c, i) => insert.run('commodity', c.name, i + 1));
-}
-seedIfEmpty();
+/** 富甲天下基础参数（mono setting） */
+const MONOPOLY_DEFAULTS = {
+  energyCost: 1,      // 每次跨城消耗体力
+  energyLimit: 10,    // 体力上限
+  energyCDHours: 4,   // 每点体力恢复小时数
+  baseLoad: 0,
+};
 
-/**
- * 商品字典补齐 / 负重维护：
- *  - 缺失的内置商品自动插入（含负重，如新增的「毛皮」）
- *  - 内置商品负重随代码更新
- *  - 内置商品排序对齐字典顺序，用户自建商品排在其后
- */
-function ensureCommoditiesWithBurden() {
-  const findByName = db.prepare("SELECT id, burden FROM dict_items WHERE type = 'commodity' AND name = ?");
-  const insert = db.prepare(
-    'INSERT INTO dict_items (type, name, sort_order, burden) VALUES (?, ?, ?, ?)'
-  );
+/* ------------------------------ 连接 ------------------------------ */
 
-  COMMODITY_SEED.forEach((c, i) => {
-    const row = findByName.get(c.name);
-    if (row) {
-      if (row.burden !== c.burden) {
-        db.prepare('UPDATE dict_items SET burden = ?, sort_order = ? WHERE id = ?').run(c.burden, i + 1, row.id);
-      }
-    } else {
-      insert.run('commodity', c.name, i + 1, c.burden);
-    }
-  });
+let pool = null;
+let sqlite = null;
+let initPromise = null;
 
-  // 重新对齐排序：内置 1..N，用户自建的按原顺序接在后面
-  const names = COMMODITY_SEED.map(c => c.name);
-  const extras = db.prepare(
-    `SELECT id FROM dict_items WHERE type = 'commodity' AND name NOT IN (${names.map(() => '?').join(',')})
-      ORDER BY sort_order, id`
-  ).all(...names);
-  extras.forEach((row, i) => {
-    db.prepare('UPDATE dict_items SET sort_order = ? WHERE id = ?').run(names.length + i + 1, row.id);
-  });
-}
-ensureCommoditiesWithBurden();
+const MYSQL_CFG = {
+  host: process.env.MYSQL_HOST || '127.0.0.1',
+  port: Number(process.env.MYSQL_PORT) || 3306,
+  user: process.env.MYSQL_USER || 'price',
+  password: process.env.MYSQL_PASSWORD || 'price',
+  database: process.env.MYSQL_DATABASE || 'price_share',
+  waitForConnections: true,
+  connectionLimit: Math.max(2, Number(process.env.MYSQL_POOL) || 10),
+  charset: 'utf8mb4',
+  dateStrings: true,
+  decimalNumbers: true,
+  multipleStatements: false,
+};
 
-// 历史流水只保留最近 2000 条
-function trimHistory() {
-  db.prepare(
-    `DELETE FROM price_history WHERE id NOT IN (
-       SELECT id FROM price_history ORDER BY id DESC LIMIT 2000
-     )`
-  ).run();
-}
-trimHistory();
-
-/* ------------------------------ 通用工具 ------------------------------ */
-
-/** 当前时间：固定北京时间（UTC+8），不依赖系统 TZ / 容器 tzdata */
 function nowText() {
   return new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Asia/Shanghai',
@@ -187,40 +82,489 @@ function nowText() {
   }).format(new Date());
 }
 
-/** 按名称取/建区服 */
-function upsertServer(name) {
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ------------------------------ 建表 ------------------------------ */
+
+const SQLITE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS dict_items (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  type       TEXT    NOT NULL CHECK (type IN ('city', 'commodity')),
+  name       TEXT    NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  burden     REAL,
+  status     INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dict_type_name ON dict_items(type, name);
+
+CREATE TABLE IF NOT EXISTS servers (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT    NOT NULL UNIQUE,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS prices (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id    INTEGER NOT NULL REFERENCES servers(id)    ON DELETE CASCADE,
+  city_id      INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
+  commodity_id INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
+  buy_price    REAL,
+  sell_price   REAL,
+  operator     TEXT,
+  updated_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  UNIQUE (server_id, city_id, commodity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_prices_lookup ON prices(server_id, city_id, commodity_id);
+
+CREATE TABLE IF NOT EXISTS price_history (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id    INTEGER NOT NULL,
+  city_id      INTEGER NOT NULL,
+  commodity_id INTEGER NOT NULL,
+  field        TEXT    NOT NULL,
+  old_value    REAL,
+  new_value    REAL,
+  operator     TEXT,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(server_id, city_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_time ON price_history(created_at);
+
+CREATE TABLE IF NOT EXISTS city_nodes (
+  city_name TEXT PRIMARY KEY,
+  cfg_name  TEXT,
+  node_no   INTEGER,
+  meta_id   INTEGER,
+  grid_x    INTEGER,
+  grid_y    INTEGER,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS route_energy (
+  from_city TEXT NOT NULL,
+  to_city   TEXT NOT NULL,
+  energy    INTEGER NOT NULL,
+  source    TEXT NOT NULL DEFAULT 'game',
+  updated_at TEXT,
+  PRIMARY KEY (from_city, to_city)
+);
+
+CREATE TABLE IF NOT EXISTS sync_settings (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled      INTEGER NOT NULL DEFAULT 0,
+  cron_expr    TEXT    NOT NULL DEFAULT '0 */2 * * *',
+  token        TEXT,
+  server_name  TEXT    NOT NULL DEFAULT '',
+  operator     TEXT    NOT NULL DEFAULT '自动同步',
+  last_run_at  TEXT,
+  last_status  TEXT,
+  last_message TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sync_log (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  trigger_type  TEXT    NOT NULL,
+  server_name   TEXT,
+  started_at    TEXT    NOT NULL,
+  finished_at   TEXT,
+  status        TEXT    NOT NULL,
+  queried       INTEGER NOT NULL DEFAULT 0,
+  saved         INTEGER NOT NULL DEFAULT 0,
+  failed_count  INTEGER NOT NULL DEFAULT 0,
+  message       TEXT
+);
+`;
+
+const MYSQL_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS dict_items (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    type VARCHAR(16) NOT NULL,
+    name VARCHAR(50) NOT NULL,
+    sort_order INT NOT NULL DEFAULT 0,
+    burden DECIMAL(10,2) NULL,
+    status TINYINT NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uk_dict_type_name (type, name)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS servers (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uk_servers_name (name)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS prices (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    server_id INT NOT NULL,
+    city_id INT NOT NULL,
+    commodity_id INT NOT NULL,
+    buy_price DECIMAL(12,2) NULL,
+    sell_price DECIMAL(12,2) NULL,
+    operator VARCHAR(20) NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uk_prices_scope (server_id, city_id, commodity_id),
+    KEY idx_prices_lookup (server_id, city_id, commodity_id),
+    CONSTRAINT fk_prices_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    CONSTRAINT fk_prices_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE,
+    CONSTRAINT fk_prices_commodity FOREIGN KEY (commodity_id) REFERENCES dict_items(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS price_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    server_id INT NOT NULL,
+    city_id INT NOT NULL,
+    commodity_id INT NOT NULL,
+    field VARCHAR(16) NOT NULL,
+    old_value DECIMAL(12,2) NULL,
+    new_value DECIMAL(12,2) NULL,
+    operator VARCHAR(20) NULL,
+    created_at DATETIME NOT NULL,
+    KEY idx_history_scope (server_id, city_id, created_at),
+    KEY idx_history_time (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS city_nodes (
+    city_name VARCHAR(20) PRIMARY KEY,
+    cfg_name VARCHAR(20) NULL,
+    node_no INT NULL,
+    meta_id INT NULL,
+    grid_x INT NULL,
+    grid_y INT NULL,
+    updated_at DATETIME NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS route_energy (
+    from_city VARCHAR(20) NOT NULL,
+    to_city VARCHAR(20) NOT NULL,
+    energy INT NOT NULL,
+    source VARCHAR(8) NOT NULL DEFAULT 'game',
+    updated_at DATETIME NULL,
+    PRIMARY KEY (from_city, to_city)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS sync_settings (
+    id TINYINT PRIMARY KEY,
+    enabled TINYINT NOT NULL DEFAULT 0,
+    cron_expr VARCHAR(64) NOT NULL DEFAULT '0 */2 * * *',
+    token TEXT NULL,
+    server_name VARCHAR(50) NOT NULL DEFAULT '',
+    operator VARCHAR(20) NOT NULL DEFAULT '自动同步',
+    last_run_at DATETIME NULL,
+    last_status VARCHAR(16) NULL,
+    last_message VARCHAR(500) NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS sync_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    trigger_type VARCHAR(16) NOT NULL,
+    server_name VARCHAR(50) NULL,
+    started_at DATETIME NOT NULL,
+    finished_at DATETIME NULL,
+    status VARCHAR(16) NOT NULL,
+    queried INT NOT NULL DEFAULT 0,
+    saved INT NOT NULL DEFAULT 0,
+    failed_count INT NOT NULL DEFAULT 0,
+    message VARCHAR(500) NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+];
+
+/* ------------------------------ 基础操作 ------------------------------ */
+
+function normalize(params) {
+  return (params || []).map(v => (v === undefined ? null : v));
+}
+
+async function rawQuery(sql, params) {
+  if (IS_MYSQL) {
+    const [rows] = await pool.query(sql, normalize(params));
+    return rows;
+  }
+  return sqlite.prepare(sql).all(...normalize(params));
+}
+
+async function rawRun(sql, params) {
+  if (IS_MYSQL) {
+    const [res] = await pool.query(sql, normalize(params));
+    return { insertId: res.insertId, affectedRows: res.affectedRows };
+  }
+  const res = sqlite.prepare(sql).run(...normalize(params));
+  return { insertId: Number(res.lastInsertRowid), affectedRows: res.changes };
+}
+
+/** 事务：fn 内只做同步数据库操作，避免长时间持锁 */
+async function tx(fn) {
+  await init();
+  if (IS_MYSQL) {
+    const conn = await pool.getConnection();
+    const t = {
+      query: async (sql, params = []) => {
+        const [rows] = await conn.query(sql, normalize(params));
+        return rows;
+      },
+      get: async (sql, params = []) => {
+        const [rows] = await conn.query(sql, normalize(params));
+        return rows[0];
+      },
+      run: async (sql, params = []) => {
+        const [res] = await conn.query(sql, normalize(params));
+        return { insertId: res.insertId, affectedRows: res.affectedRows };
+      },
+    };
+    try {
+      await conn.beginTransaction();
+      const out = await fn(t);
+      await conn.commit();
+      return out;
+    } catch (err) {
+      try { await conn.rollback(); } catch { /* ignore */ }
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  sqlite.exec('BEGIN IMMEDIATE');
+  const t = {
+    query: async (sql, params = []) => sqlite.prepare(sql).all(...normalize(params)),
+    get: async (sql, params = []) => sqlite.prepare(sql).get(...normalize(params)),
+    run: async (sql, params = []) => {
+      const res = sqlite.prepare(sql).run(...normalize(params));
+      return { insertId: Number(res.lastInsertRowid), affectedRows: res.changes };
+    },
+  };
+  try {
+    const out = await fn(t);
+    sqlite.exec('COMMIT');
+    return out;
+  } catch (err) {
+    try { sqlite.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw err;
+  }
+}
+
+const query = async (sql, params = []) => { await init(); return rawQuery(sql, params); };
+const get = async (sql, params = []) => { await init(); const rows = await rawQuery(sql, params); return rows[0]; };
+const run = async (sql, params = []) => { await init(); return rawRun(sql, params); };
+
+/* ------------------------------ 初始化 ------------------------------ */
+
+async function init() {
+  if (!initPromise) initPromise = doInit();
+  return initPromise;
+}
+
+async function doInit() {
+  if (IS_MYSQL) {
+    const mysql = require('mysql2/promise');
+    pool = mysql.createPool(MYSQL_CFG);
+    let lastErr;
+    for (let i = 1; i <= 30; i++) {
+      try {
+        await pool.query('SELECT 1');
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (i % 5 === 1) {
+          console.error(`[db] MySQL 连接失败（${MYSQL_CFG.host}:${MYSQL_CFG.port}/${MYSQL_CFG.database}），第 ${i} 次重试… ${err.message}`);
+        }
+        await sleep(2000);
+      }
+    }
+    if (lastErr) throw new Error(`无法连接 MySQL：${lastErr.message}`);
+    for (const sql of MYSQL_SCHEMA) await pool.query(sql);
+  } else {
+    const { DatabaseSync } = require('node:sqlite');
+    fs.mkdirSync(nodePath.dirname(DB_FILE), { recursive: true });
+    try {
+      sqlite = new DatabaseSync(DB_FILE);
+    } catch (err) {
+      console.error(`[db] 无法打开数据库文件: ${DB_FILE}`);
+      throw err;
+    }
+    sqlite.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    sqlite.exec(SQLITE_SCHEMA);
+    migrateSqlite();
+  }
+  await seed();
+  console.log(`[db] 已就绪：${IS_MYSQL ? `MySQL ${MYSQL_CFG.host}:${MYSQL_CFG.port}/${MYSQL_CFG.database}` : `SQLite ${DB_FILE}`}`);
+}
+
+/** 存量 SQLite 库补列（老版本升级） */
+function migrateSqlite() {
+  const hasCol = (table, col) =>
+    sqlite.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
+  if (!hasCol('price_history', 'operator')) sqlite.exec('ALTER TABLE price_history ADD COLUMN operator TEXT');
+  if (!hasCol('dict_items', 'burden')) sqlite.exec('ALTER TABLE dict_items ADD COLUMN burden REAL');
+  if (!hasCol('prices', 'operator')) sqlite.exec('ALTER TABLE prices ADD COLUMN operator TEXT');
+}
+
+async function seed() {
+  const row = await rawQuery('SELECT COUNT(*) AS n FROM dict_items');
+  if (!Number(row[0].n)) {
+    for (let i = 0; i < CITY_LIST.length; i++) {
+      await rawRun(
+        'INSERT INTO dict_items (type, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+        ['city', CITY_LIST[i], i + 1, nowText(), nowText()]
+      );
+    }
+    for (let i = 0; i < COMMODITY_SEED.length; i++) {
+      const c = COMMODITY_SEED[i];
+      await rawRun(
+        'INSERT INTO dict_items (type, name, sort_order, burden, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ['commodity', c.name, i + 1, c.burden, nowText(), nowText()]
+      );
+    }
+  }
+  await ensureCommoditiesWithBurden();
+  await seedCityNodes();
+  await trimHistory();
+  if (IS_MYSQL) {
+    await rawRun(
+      'INSERT IGNORE INTO sync_settings (id, enabled, cron_expr, server_name, operator) VALUES (1, 0, ?, ?, ?)',
+      ['0 */2 * * *', '', '自动同步']
+    );
+  } else {
+    await rawRun(
+      'INSERT OR IGNORE INTO sync_settings (id, enabled, cron_expr, server_name, operator) VALUES (1, 0, ?, ?, ?)',
+      ['0 */2 * * *', '', '自动同步']
+    );
+  }
+}
+
+async function ensureCommoditiesWithBurden() {
+  const names = COMMODITY_SEED.map(c => c.name);
+  const placeholders = names.map(() => '?').join(',');
+  for (let i = 0; i < COMMODITY_SEED.length; i++) {
+    const c = COMMODITY_SEED[i];
+    const row = await rawQuery(
+      "SELECT id, burden FROM dict_items WHERE type = 'commodity' AND name = ?",
+      [c.name]
+    );
+    if (row.length) {
+      if (Number(row[0].burden) !== c.burden) {
+        await rawRun('UPDATE dict_items SET burden = ?, sort_order = ? WHERE id = ?', [c.burden, i + 1, row[0].id]);
+      }
+    } else {
+      await rawRun(
+        'INSERT INTO dict_items (type, name, sort_order, burden, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ['commodity', c.name, i + 1, c.burden, nowText(), nowText()]
+      );
+    }
+  }
+  const extras = await rawQuery(
+    `SELECT id FROM dict_items WHERE type = 'commodity' AND name NOT IN (${placeholders})
+      ORDER BY sort_order, id`,
+    names
+  );
+  for (let i = 0; i < extras.length; i++) {
+    await rawRun('UPDATE dict_items SET sort_order = ? WHERE id = ?', [names.length + i + 1, extras[i].id]);
+  }
+}
+
+/** 城池坐标（用于路线体力估算与展示），来源 server/game/data/city_map.json */
+async function seedCityNodes() {
+  let list;
+  try {
+    list = JSON.parse(fs.readFileSync(nodePath.join(__dirname, 'game', 'data', 'city_map.json'), 'utf8'));
+  } catch { return; }
   const t = nowText();
-  db.prepare(
-    `INSERT INTO servers (name, created_at, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(name) DO UPDATE SET updated_at = excluded.updated_at`
-  ).run(name, t, t);
-  return db.prepare('SELECT id FROM servers WHERE name = ?').get(name).id;
+  for (const c of list) {
+    const existing = await rawQuery('SELECT city_name FROM city_nodes WHERE city_name = ?', [c.name]);
+    const vals = [c.cfgName || c.name, c.nodeNo ?? null, c.metaId ?? null, c.gridX ?? null, c.gridY ?? null, t, c.name];
+    if (existing.length) {
+      await rawRun(
+        'UPDATE city_nodes SET cfg_name = ?, node_no = ?, meta_id = ?, grid_x = ?, grid_y = ?, updated_at = ? WHERE city_name = ?',
+        vals
+      );
+    } else {
+      await rawRun(
+        `INSERT INTO city_nodes (cfg_name, node_no, meta_id, grid_x, grid_y, updated_at, city_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        vals
+      );
+    }
+  }
 }
 
-function findServerId(name) {
-  const r = name == null ? null : db.prepare('SELECT id FROM servers WHERE name = ?').get(name);
-  return r ? r.id : null;
+/** 历史流水裁剪（保留最近 N 条） */
+async function trimHistory() {
+  const rows = await rawQuery('SELECT id FROM price_history ORDER BY id DESC LIMIT 1 OFFSET ?', [HISTORY_LIMIT]);
+  if (!rows.length) return;
+  await rawRun('DELETE FROM price_history WHERE id <= ?', [rows[0].id]);
 }
 
-function findDictId(type, name) {
-  const r = db.prepare('SELECT id FROM dict_items WHERE type = ? AND name = ?').get(type, name);
-  return r ? r.id : null;
-}
+/* ------------------------------ 便捷方法 ------------------------------ */
 
-/** 创建字典项（城池/商品可重复时抛冲突错误） */
-function createDictItem(type, name, burden = null) {
-  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM dict_items WHERE type = ?').get(type).m;
+async function upsertServer(name) {
   const t = nowText();
-  const info = db.prepare(
-    'INSERT INTO dict_items (type, name, sort_order, burden, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(type, name, maxSort + 1, burden == null || burden === '' ? null : Number(burden), t, t);
-  return db.prepare('SELECT * FROM dict_items WHERE id = ?').get(info.lastInsertRowid);
+  const existing = await rawQuery('SELECT id FROM servers WHERE name = ?', [name]);
+  if (existing.length) {
+    await rawRun('UPDATE servers SET updated_at = ? WHERE id = ?', [t, existing[0].id]);
+    return existing[0].id;
+  }
+  try {
+    const info = await rawRun('INSERT INTO servers (name, created_at, updated_at) VALUES (?, ?, ?)', [name, t, t]);
+    return info.insertId;
+  } catch (err) {
+    const again = await rawQuery('SELECT id FROM servers WHERE name = ?', [name]);
+    if (again.length) return again[0].id;
+    throw err;
+  }
+}
+
+async function findServerId(name) {
+  if (name == null) return null;
+  const r = await rawQuery('SELECT id FROM servers WHERE name = ?', [name]);
+  return r.length ? r[0].id : null;
+}
+
+async function findDictId(type, name) {
+  const r = await rawQuery('SELECT id FROM dict_items WHERE type = ? AND name = ?', [type, name]);
+  return r.length ? r[0].id : null;
+}
+
+async function createDictItem(type, name, burden = null) {
+  const maxSortRow = await rawQuery(
+    'SELECT COALESCE(MAX(sort_order), 0) AS m FROM dict_items WHERE type = ?',
+    [type]
+  );
+  const t = nowText();
+  const info = await rawRun(
+    'INSERT INTO dict_items (type, name, sort_order, burden, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [type, name, Number(maxSortRow[0].m) + 1, burden == null || burden === '' ? null : Number(burden), t, t]
+  );
+  return get('SELECT * FROM dict_items WHERE id = ?', [info.insertId]);
+}
+
+/** 关闭连接（优雅退出、脚本自检使用） */
+async function close() {
+  if (IS_MYSQL) {
+    if (pool) {
+      const p = pool;
+      pool = null;
+      try { await p.end(); } catch { /* ignore */ }
+    }
+  } else if (sqlite) {
+    try { sqlite.close(); } catch { /* ignore */ }
+    sqlite = null;
+  }
+  initPromise = null;
 }
 
 module.exports = {
-  db,
+  IS_MYSQL,
+  DRIVER,
   DB_FILE,
   DATA_DIR,
+  HISTORY_LIMIT,
+  MONOPOLY_DEFAULTS,
+  ready: init,
+  init,
+  close,
+  query,
+  get,
+  run,
+  tx,
   nowText,
   upsertServer,
   findServerId,

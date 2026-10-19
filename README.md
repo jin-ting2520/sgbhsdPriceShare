@@ -1,189 +1,237 @@
 # 三国冰河时代富甲天下跑商价格分享
 
-城池 / 商品买卖价格的在线录入、查询与共享平台。单容器部署，数据本地持久化，PC 与手机端自适应；输入游戏昵称即可进入（无需注册），价格趋势、跨城池比价与 PWA 离线支持。
+城池 / 商品买卖价格的在线录入、查询与共享平台。支持**游戏直连同步**、**WebSocket 实时协作**、**定时自动同步**、**跨城套利报表**；生产环境使用 **MySQL + Redis**，`docker compose up -d --build` 一键部署，本地开发与测试自动使用 SQLite。PC 与手机端自适应，输入游戏昵称即可进入（无需注册）。
 
 ## 一、技术选型与架构
 
-| 层 | 选型 | 理由 |
+| 层 | 选型 | 说明 |
 | --- | --- | --- |
-| 运行时 | **Node.js 24** | 前后端同语言；内置 `node:sqlite`，**零原生编译依赖**，跨平台（Windows/Linux/macOS）免装环境 |
-| 后端框架 | **Express 4** | 轻量、生态成熟，REST API 足够支撑本场景 |
-| 数据库 | **SQLite（WAL 模式）** | 单文件、免运维、随容器卷持久化；本场景量级（城池×商品×区服）远低于 SQLite 上限；未来可无缝切换到 MySQL/PostgreSQL（DAO 已隔离） |
-| 前端 | **Vue 3 + Element Plus** | 组合式 API + 成熟中后台组件（表格/下拉/弹窗/对话框），**本地 node_modules 直出**，不依赖外网 CDN，内网可用 |
-| 构建 | 无构建步骤（importmap + ESM） | `npm install` 即可运行，无打包等待；生产环境由 Express 直接托管静态资源 |
-| 部署 | **Docker 单容器 + Compose 脚本** | 一条命令完成构建、启动、健康检查、备份恢复 |
+| 运行时 | **Node.js 24** | 前后端同语言；SQLite 使用内置 `node:sqlite`，零原生编译依赖 |
+| 后端框架 | **Express 4 + ws** | REST API + WebSocket 实时推送 |
+| 数据库 | **MySQL 8.4（生产）/ SQLite（本地、测试、兜底）** | 通过 `DB_DRIVER` 或 `MYSQL_HOST` 自动选择；SQL 由 `server/db.js` 统一适配 |
+| 缓存 | **Redis 7（可选）** | 字典数据缓存；未配置或连接失败时自动退化为无缓存 |
+| 定时任务 | **node-cron** | 按北京时间执行游戏同步，可在页面配置频率 |
+| 前端 | **Vue 3 + Element Plus** | importmap + ESM 无构建步骤，本地 node_modules 直出，不依赖外网 CDN |
+| 部署 | **Docker Compose** | app + mysql + redis 一次拉起，健康检查、数据卷、备份脚本齐备 |
 
 ```
-┌──────────────── Docker 容器 (node:24-alpine, 非 root) ────────────────┐
-│  Express (:3000)                                                     │
-│   ├─ /api/dict       字典（城池/商品）CRUD、唯一约束、负重维护             │
-│   ├─ /api/servers    区服登记与联想                                   │
-│   └─ /api/prices     查询 / 保存 / 历史 / 趋势 / 比价 / 导出 / 导入      │
-│   ├─ 静态：index.html + Vue3 ESM + Element Plus（来自 node_modules）   │
-│   └─ SQLite: /app/data/price.db  ←──── 卷挂载 ./data（宿主机持久化）    │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────── docker compose ────────────────────────┐
+│                                                                │
+│  app (node:24-alpine, 非 root, :3000)                          │
+│   ├─ /api/dict            字典 CRUD（Redis 缓存 + 变更广播）     │
+│   ├─ /api/servers         区服                                 │
+│   ├─ /api/prices          查询/保存(乐观并发)/日志/趋势/比价/导入导出 │
+│   ├─ /api/game/sync       游戏直连同步（42 城 + 体力采集）        │
+│   ├─ /api/sync-settings   定时同步配置 / 立即执行 / 运行日志      │
+│   ├─ /api/reports         涨跌幅榜 / 套利建议 / 更新热度          │
+│   ├─ /ws                  WebSocket 实时协作                    │
+│   └─ 静态：index.html + Vue3 ESM + Element Plus                 │
+│                                                                │
+│  mysql:8.4 (mysql-data 卷)      redis:7 (redis-data 卷)         │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-## 二、功能与需求对照
+## 二、功能
 
-| 需求 | 实现 |
+| 模块 | 说明 |
 | --- | --- |
-| 展示列：区服、城池、商品、买价、卖价 | 桌面表格 8 列：区服、城池、商品+负重标签、买价、卖价、**更新时间**、**更新人**、快捷操作；手机端为卡片列表（含更新人） |
-| 搜索：区服输入框 / 城池下拉 / 商品下拉，必选校验，均可清空 | 三个控件均 `clearable`；区服、城池未选时查询/保存给出提示 |
-| 初始区服、城池、买价、卖价显示 `-`，商品固定全部商品；选择后填充并查库，无数据显示 `-` | 未查询时商品列即展示全部 25 个商品（含负重），其余列 `-`；查询后带出价格，无数据显示 `-`（输入框 placeholder） |
-| 买价/卖价为输入框；右上角保存；弹窗确认 | 每行两个输入框；卡片头「保存」按钮 → 明细确认弹窗（原值→新值、负重、新增/修改/清空标记）→ 写入数据库 |
-| 字典表存储城池/商品，不可重复；下拉可输入并保存新增 | `dict_items` 表 + 唯一索引；下拉 `filterable + allow-create`，回车或点保存即入字典；「字典管理」弹窗支持增删改、启停、排序、**商品负重维护** |
-| 操作说明区域 | 页面底部「操作说明」卡片：7 步流程 + 4 个技巧卡片 |
-| 附加 | **昵称即入**（输入三国冰河时代昵称进入，本机缓存免重复输入，自动作为更新人）、**跨城比价利润**（（卖出城卖价−买入城买价）÷负重，自动推荐最优买卖路线）、更新时间/更新人列、价格趋势图、变更日志记录操作人、响应式（PC 表格/手机卡片+底部保存条）、CSV 导出、Excel 批量导入（模板下载）、**游戏截图 OCR 识别导入**（Tesseract.js 本机离线识别，无需上传图片）、快捷键、PWA |
+| 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
+| 查询与字典 | 区服联想、城池/商品下拉（可输入新增）；商品负重维护；被引用项禁止删除 |
+| 实时协作 | WebSocket 推送他人改价，正在查看的城池立即刷新；本地有未保存修改时标记冲突 |
+| 并发保护 | 保存携带 `baseUpdatedAt`，被他人抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
+| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，逐城抓取 42 城买/卖价并入库，同时采集路线体力 |
+| 定时同步 | 页面配置开关、cron 频率、区服、更新人、token；服务器定时执行并保留运行记录 |
+| 报表 | 涨跌幅榜、城池间套利建议（载重/体力成本/每日收益）、改价与同步热度图 |
+| 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天、缩放/拖拽 |
+| 导入导出 | Excel 导入（模板下载、预览修改、自动建商品、merge 模式）、CSV 导出 |
+| 运维 | 健康检查 `/api/health`、Docker 健康依赖、MySQL 备份/恢复脚本、PWA 离线缓存 |
 
 ## 三、快速开始
 
-### 本地开发 / 直接运行
+### Docker 一键部署（推荐）
+
+```bash
+cp .env.example .env        # 可选；不创建则使用默认密码
+docker compose up -d --build
+
+# 或使用脚本
+./deploy.sh                 # Linux / macOS
+.\deploy.ps1                # Windows PowerShell
+```
+
+启动后访问 `http://服务器IP:3000`。首次启动会自动初始化 MySQL 库表与种子数据（40 城池 / 25 商品）。完整部署、备份恢复、反代与升级说明见 **[DEPLOY.md](./DEPLOY.md)**。
+
+### 本地开发（SQLite，无需 MySQL/Redis）
 
 ```bash
 npm install
 npm start          # http://localhost:3000
-npm run dev        # 文件变化自动重启（--watch）
-npm test           # 运行测试（node --test，25 项）
-npm run db:vacuum  # 数据库维护（压缩 + 统计）
+npm run dev        # 文件变化自动重启
+npm test           # 31 项后端/游戏/报表测试
+npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
+npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
 
-要求 Node.js ≥ 22.5（使用内置 SQLite）。
+要求 Node.js ≥ 22.5。未设置 `MYSQL_HOST` / `DB_DRIVER=mysql` 时自动使用 `data/price.db`；连接 Redis 需设置 `REDIS_URL`。
 
-**无需注册/登录**：打开页面输入「三国冰河时代昵称」点「进入」即可；昵称缓存在本机（localStorage），刷新免重复输入，之后每次保存价格都会以该昵称作为**更新人**记录。顶栏昵称按钮可随时切换。
-
-### Docker 一键部署（推荐）
-
-完整部署、备份恢复、镜像发布与反代配置见 **[DEPLOY.md](./DEPLOY.md)**。
-
-**Linux / macOS：**
+### 从旧 SQLite 迁移到 MySQL
 
 ```bash
-chmod +x deploy.sh
-./deploy.sh                # 构建 + 启动 + 健康检查
-PORT=8080 ./deploy.sh      # 换端口
-./deploy.sh logs           # 看日志
-./deploy.sh backup         # 备份数据库
-./deploy.sh update         # 更新代码后重建
+# compose 环境下（./data 已挂载，MySQL 连接信息来自容器环境）
+docker compose exec app npm run db:migrate
+
+# 目标库已有数据时可加 --force 合并
+docker compose exec app npm run db:migrate -- --force
 ```
 
-**Windows（PowerShell）：**
+迁移脚本将字典、区服、价格、历史、城池坐标、路线体力与同步设置写入 MySQL；目标库为空时直接导入。
 
-```powershell
-.\deploy.ps1               # 构建 + 启动 + 健康检查
-$env:PORT=8080; .\deploy.ps1
-.\deploy.ps1 logs
-.\deploy.ps1 backup
-.\deploy.ps1 update
-```
+## 四、环境变量
 
-**手动方式：**
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `3000` | 监听端口 |
+| `DB_DRIVER` | 有 `MYSQL_HOST` 则 `mysql`，否则 `sqlite` | 强制指定驱动 |
+| `MYSQL_HOST` / `MYSQL_PORT` | `127.0.0.1` / `3306` | MySQL 地址 |
+| `MYSQL_USER` / `MYSQL_PASSWORD` | `price` / `price` | MySQL 账号 |
+| `MYSQL_DATABASE` | `price_share` | 数据库名 |
+| `MYSQL_POOL` | `10` | 连接池大小 |
+| `REDIS_URL` | 空 | 如 `redis://redis:6379`；为空则禁用缓存 |
+| `PRICE_DB` | `data/price.db` | SQLite 文件路径 |
+| `HISTORY_LIMIT` | `20000` | 每区服价格历史保留条数 |
+| `TZ` | `Asia/Shanghai` | 时区（时间统一按北京时间存储） |
 
-```bash
-docker compose up -d --build     # 启动
-docker compose logs -f           # 日志
-docker compose down              # 停止
-```
-
-部署后访问 `http://服务器IP:3000`。数据落盘在 `./data/price.db`，删除/重建容器不丢数据。
-
-## 四、目录结构
+## 五、目录结构
 
 ```
 sgbhsdPriceShare/
 ├── server/
-│   ├── index.js            # Express 入口（静态托管 + API + 错误处理）
-│   ├── db.js               # SQLite 连接、建表迁移、种子数据（40 城池 / 25 商品）
-│   ├── util.js             # 统一响应/校验/价格解析
+│   ├── index.js            # Express 入口（静态托管 + API + WS + 健康检查）
+│   ├── db.js               # 双驱动数据层（MySQL/SQLite）、建表、种子、事务
+│   ├── cache.js            # Redis 字典缓存（失败自动退化）
+│   ├── ws.js               # WebSocket 服务端与广播
+│   ├── scheduler.js        # node-cron 定时同步与运行日志
+│   ├── util.js             # 统一响应/校验
 │   ├── routes/
-│   │   ├── dict.js         # /api/dict 城池、商品字典（含负重）
-│   │   ├── servers.js      # /api/servers 区服
-│   │   └── prices.js       # /api/prices 查询/保存/日志/趋势/比价/导出/导入
-│   └── scripts/vacuum.js
+│   │   ├── dict.js         # /api/dict
+│   │   ├── servers.js      # /api/servers
+│   │   ├── prices.js       # 查询/保存/日志/趋势/比价/导出/导入
+│   │   ├── game.js         # /api/game/sync
+│   │   ├── sync-settings.js# 定时同步配置与日志
+│   │   └── reports.js      # 涨跌幅/套利/热度
+│   ├── game/               # 游戏协议直连（登录链 + WS + Thrift 编解码）
+│   │   ├── login.js        # JWT → authCode → SDK 登录 → v1/login
+│   │   ├── client.js       # 游戏 WebSocket 客户端
+│   │   ├── sync.js         # 逐城抓取 → 落库（含体力采集）
+│   │   ├── frame.js        # 10 字节帧头
+│   │   ├── thrift.js       # Thrift Compact Protocol
+│   │   ├── thrift_schema.json
+│   │   └── data/city_map.json  # 42 城池映射（nodeNo/metaId/gridX/gridY）
+│   └── scripts/
+│       ├── game-sync.js        # CLI 同步（--settings 复用定时配置）
+│       ├── migrate-to-mysql.js # SQLite → MySQL
+│       ├── smoke.js            # 冒烟自检
+│       └── vacuum.js           # 数据库维护
 ├── public/
-│   ├── index.html          # 页面骨架（昵称入口 + Vue 模板 + importmap）
-│   ├── js/app.js           # Vue 应用逻辑（昵称/查询/趋势/比价/OCR 导入）
-│   ├── js/ocr-parse.js     # OCR 截图文本解析器（UMD，浏览器与 Node 测试共用）
-│   ├── css/app.css         # 样式 + 响应式
-│   ├── sw.js               # Service Worker（PWA 离线缓存，OCR 大文件不缓存）
-│   ├── manifest.webmanifest# PWA 清单
-│   └── icons/icon.svg      # 应用图标
-├── test/api.test.js        # 后端接口测试（17 项，node:test）
-├── test/ocr-parse.test.js  # OCR 解析器单测（8 项，node:test）
-├── data/                   # SQLite 数据（自动生成，勿提交）
-├── backup/                 # 部署脚本备份目录
-├── .github/workflows/      # CI 测试 + Docker 镜像发布
+│   ├── index.html          # 页面模板（含同步/定时/报表弹窗）
+│   ├── js/app.js           # Vue 应用（WS、乐观并发、导入、报表）
+│   ├── css/app.css
+│   ├── sw.js               # Service Worker
+│   ├── manifest.webmanifest
+│   └── icons/icon.svg
+├── test/
+│   ├── api.test.js         # 接口测试（17）
+│   ├── game.test.js        # 游戏同步模块（7）
+│   └── reports.test.js     # 报表/定时设置/并发（7）
+├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
+├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
+├── docker-compose.yml      # app + mysql + redis
 ├── Dockerfile
-├── docker-compose.yml
-├── deploy.sh / deploy.ps1  # 一键部署脚本
-├── DEPLOY.md               # 部署指南
+├── deploy.sh / deploy.ps1
+├── DEPLOY.md
 └── package.json
 ```
 
-## 五、API 一览
+## 六、API 一览
 
-全部接口开放，无需 Token；保存/导入类接口通过请求体中的 `operator`（更新人昵称）留痕，缺省记为「匿名」。
+除游戏 token 外全部接口开放，无需登录；写操作通过 `operator` 记录更新人昵称。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/dict?type=city\|commodity` | 下拉数据源（支持 `keyword`、`enabled=0`） |
-| GET | `/api/dict/summary` | 管理列表（含负重、价格引用计数） |
-| POST | `/api/dict` `{type,name,burden?}` | 新增字典项（重复返回 409） |
-| PUT | `/api/dict/:id` | 重命名 / 负重 / 启停 / 排序 |
-| DELETE | `/api/dict/:id` | 删除（被价格引用时拒绝） |
-| GET | `/api/servers` | 已登记区服（按最近使用排序） |
-| DELETE | `/api/servers/:id` | 删除区服及其价格 |
-| GET | `/api/prices?server&city&commodity?` | 查询价格（含负重、更新时间、更新人） |
-| POST | `/api/prices` `{server,city,items[],operator}` | 保存价格（事务 + 变更流水 + 记录更新人昵称） |
-| GET | `/api/prices/history?server&city` | 变更日志（含操作人） |
-| GET | `/api/prices/trend?server&city&commodity&days` | 价格趋势（逐次变更时点 buy/sell 点列，前向填充） |
-| GET | `/api/prices/matrix?server&commodity` | 跨城池比价（各城池价格 + 最低买入/最高卖出） |
-| GET | `/api/prices/export?server&city` | CSV 导出（UTF-8 BOM，Excel 兼容） |
-| POST | `/api/prices/import` | 批量导入（`rows` 结构化数组或 `text` 粘贴文本；`merge:true` 时 null 价不清空原值，OCR 单侧识别用；自动创建新商品可选，支持负重列） |
+| GET | `/api/health` | 健康检查（返回驱动、缓存、WS 人数、定时状态） |
+| GET | `/api/dict?type=city\|commodity` | 下拉数据源 |
+| GET | `/api/dict/summary` | 管理列表（负重、引用计数） |
+| POST | `/api/dict` `{type,name,burden?}` | 新增字典项 |
+| PUT/DELETE | `/api/dict/:id` | 重命名/负重/启停/排序/删除 |
+| GET | `/api/servers` | 区服列表 |
+| DELETE | `/api/servers/:id` | 删除区服及价格 |
+| GET | `/api/prices?server&city&commodity?` | 查询价格 |
+| POST | `/api/prices` | 保存价格；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903 |
+| GET | `/api/prices/history` | 变更日志 |
+| GET | `/api/prices/trend` | 价格趋势 |
+| GET | `/api/prices/matrix` | 跨城池比价 |
+| GET | `/api/prices/export` | CSV 导出 |
+| POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选） |
+| GET | `/api/game/meta` | 同步支持城池清单 |
+| POST | `/api/game/sync` | 游戏直连同步 `{token?,server?,operator?,cities?}`；token/区服缺省取定时设置 |
+| GET/PUT | `/api/sync-settings` | 定时同步配置（cron、token、区服、更新人） |
+| POST | `/api/sync-settings/run` | 用已保存配置立即同步 |
+| GET | `/api/sync-settings/logs` | 同步运行记录 |
+| GET | `/api/reports/movers?server&days&limit` | 涨跌幅榜 |
+| GET | `/api/reports/arbitrage?server&load&energyPrice&energyPerTrip&returnTrip&all` | 套利建议（含体力成本） |
+| GET | `/api/reports/heat?server&days&bucket=day\|hour` | 改价/同步热度 |
 
-错误码：`0` 成功；`40901` 重复；`40902` 被引用不可删除。
+错误码：`0` 成功；`40901` 重复；`40902` 被引用不可删除；`40903` 价格已被他人更新（乐观并发冲突）。
 
-## 六、数据表
+### WebSocket `/ws`
 
-- `dict_items`：字典表（`type` = city/commodity，`(type,name)` 唯一，`burden` 商品负重）
-- `servers`：区服（自由文本自动登记）
-- `prices`：价格（`server_id+city_id+commodity_id` 唯一，upsert 覆盖；`operator` 记录最后改动人昵称）
-- `price_history`：买价/卖价每次变更的旧值/新值/时间/操作人昵称
+客户端连接后服务端推送 `hello`；改价、字典变更、同步完成/失败、设置更新等事件会广播给所有在线页面。客户端每 25 秒发送 `{type:'ping'}` 保活，服务端回 `pong`。消息类型：
 
-## 七、备份与恢复
+- `price.updated` `{server,city,operator,items[]}`（`items` 为空表示需刷新）
+- `dict.changed`、`server.deleted`、`settings.updated`
+- `sync.finished`、`sync.failed`
+
+### 游戏直连同步
+
+浏览器登录 https://www.wanyiwan.top/game/sgbhsd ，F12 → Application → Local Storage → 复制 `x-game-token-pcweb`（JWT，有效期约 12 天）填入「同步」或「定时」即可。服务端自动完成：换取 authCode → SDK 登录 → 区服登录 → WebSocket 登录 → 逐城拉取行情（游戏以分为单位，落库自动 ÷100），并采集城池间体力消耗写入 `route_energy`。
+
+- 单次同步全部 42 城约 10 秒，返回 `{queried,saved,created,updated,energyPairs,failed[]}`；赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
+- 命令行：`node server/scripts/game-sync.js <token> [区服] [更新人]`，或 `--settings` 复用定时同步配置。
+
+## 七、数据表
+
+| 表 | 说明 |
+| --- | --- |
+| `dict_items` | 字典（city/commodity，`(type,name)` 唯一，`burden` 负重） |
+| `servers` | 区服 |
+| `prices` | 价格（`server_id+city_id+commodity_id` 唯一，含更新时间/更新人） |
+| `price_history` | 改价流水（旧值/新值/操作人/时间，按 `HISTORY_LIMIT` 裁剪） |
+| `city_nodes` | 城池游戏节点与地图坐标（gridX/gridY） |
+| `route_energy` | 城池间体力消耗（游戏实测，`from_city+to_city` 唯一） |
+| `sync_settings` | 定时同步单行配置（开关/cron/token/区服/更新人/上次状态） |
+| `sync_log` | 同步运行记录（触发方式、查询/写入数、失败数、消息） |
+
+## 八、备份与维护
 
 ```bash
-./deploy.sh backup                 # 生成 backup/price-时间戳.db
-./deploy.sh restore backup/price-xxx.db
+./deploy.sh backup                        # MySQL → backup/mysql-*.sql
+./deploy.sh restore backup/mysql-*.sql    # 恢复（自动暂停 app）
+./deploy.sh backup                        # 无 mysql 服务时备份 SQLite → backup/price-*.db
 ```
 
-建议对 `./data` 目录配置宿主机定时备份（crontab / 任务计划程序）。
+MySQL 数据位于 Docker 卷 `mysql-data`，Redis 位于 `redis-data`；`./data` 保留 SQLite 兜底库与迁移源。`docker compose down` 不会删除命名卷，`down -v` 才会。
 
-## 八、完善与优化建议
+## 九、测试与 CI
 
-**已实现（超出基础需求的部分）**
+- `npm test`：31 项测试，覆盖字典、价格、并发冲突、导入导出、游戏协议解析、报表、定时设置、健康检查（SQLite 临时库）。
+- `npm run test:smoke`：启动真实 HTTP 服务，验证健康检查、价格写入/查询、40903 冲突与清理。
+- GitHub Actions：
+  - `test`：SQLite 全量测试；
+  - `mysql-redis`：启动 MySQL 8.4 + Redis 7 服务，执行冒烟自检，验证双驱动与缓存路径。
 
-1. **昵称即入**：输入三国冰河时代昵称即可进入，无需注册登录；昵称缓存本机（localStorage），保存价格自动以该昵称留痕，顶栏可随时切换昵称。
-2. **跨城比价利润**：利润 =（卖出城卖价 − 买入城买价）÷ 商品负重（真正的跑商语义，非同城差价）；「比价」弹窗可选卖出城（默认最高卖价城），自动推荐「最便宜买入城 → 最高卖出城」路线并按利润排序；商品字典支持负重维护（种子含 25 个商品及负重，含新增「毛皮」）。
-3. **价格趋势图**：基于 `price_history` 的 SVG 折线图（买价/卖价双线、7/14/30 天切换、X 轴日期+时间、滚轮缩放/拖拽平移/重置、悬停提示），零外部图表库依赖。
-4. **跨城池比价**：同一商品在本区服各城池的买/卖价矩阵，自动标出最低买入城与最高卖出城。
-5. **响应式双布局**：PC 端表格、手机端卡片 + 底部吸底保存条，触屏目标区域 ≥ 44px。
-6. **脏值跟踪与局部保存**：只提交有改动的行，确认弹窗展示「原值 → 新值」并标注新增/修改/清空。
-7. **变更审计**：`price_history` 记录每次改价前后值与操作人，页面「日志」可查。
-8. **批量能力**：CSV 导出（含负重/更新时间/更新人，Excel 兼容）+ Excel 导入（.xlsx，提供模板下载、上传预览、自动创建新商品、支持负重列）+ **游戏截图 OCR 识别导入**（Tesseract.js 本机离线识别，截图不上传服务器；自动判买/卖坊市，多图合并，merge 模式不清空另一侧已有价格，预览可手工修正）。识别策略：先按卡片色带切分商品卡，商品名 chi_sim 单行 + 价格行 eng 纯数字分区识别（金字价格远稳于整图中文），卡片法得分不足时回退整图多路预处理择优；识别原文可展开查看，未识别到商品时展示调试信息。
-9. **防错设计**：数字白名单过滤、唯一约束 409 友好提示、被引用的字典项禁止删除、删除需二次确认。
-10. **体验细节**：历史区服联想、最近一次选择记忆（localStorage）、Ctrl+Enter 快捷保存、同上一行复制。
-11. **安全与运维**：容器内非 root 运行、健康检查、数据卷持久化、无外网 CDN 依赖（内网可部署）。
-12. **PWA**：Service Worker 缓存 + manifest，可添加到手机桌面、弱网可用。
-13. **CI/CD**：GitHub Actions 跑测试；推送自动构建 amd64/arm64 镜像并发布 Docker Hub。
-14. **工程质量**：25 项后端/解析器测试（`npm test`）+ 21 步 Chrome CDP 端到端冒烟，覆盖昵称进入、查询、录价保存（更新人留痕）、趋势缩放、比价、Excel 导入、**截图 OCR 识别导入**、字典、日志、刷新免登等。
+## 十、后续可扩展
 
-**后续可扩展路线**
-
-1. **协作实时化**：WebSocket 推送他人改价，避免并发覆盖（当前为最后写入优先 + 流水可查）。
-2. **按区服分配权限**：当前角色为全局，可扩展到「某区服仅某小组可编辑」。
-3. **数据规模升级**：迁移 MySQL/PostgreSQL（改造点仅在 `server/db.js` 与少量 SQL）；引入 Redis 缓存字典。
-4. **自动化**：已支持游戏内物价截图 OCR 识别入库（Tesseract.js 本机离线）；后续可扩展页面抓取自动入库、定时任务汇总日报推送到群机器人。
-5. **更丰富的报表**：涨跌幅榜、城池间套利建议、按时间段的成交热度。
-6. **工程质量**：补充前端 Vitest 单测与 Playwright E2E；Helm Chart 上 K8s。
+1. 按区服分配编辑权限 / 操作审计与回滚。
+2. 定时同步失败通知（企业微信/QQ 机器人）。
+3. 报表导出与历史趋势预测。
+4. 前端组件测试与 Playwright E2E。

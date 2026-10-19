@@ -17,3 +17,6 @@ Thumbs.db
 # 编辑器
 .vscode/
 .idea/
+
+# 本地环境变量（含数据库密码，勿提交；示例见 .env.example）
+.env

@@ -1,7 +1,7 @@
 /* 三国冰河时代富甲天下跑商价格分享 Service Worker
    策略：静态资源缓存优先（刷新即更新），API 一律走网络。 */
 
-const CACHE = 'sgbhsd-price-v1'
+const CACHE = 'sgbhsd-price-v2'
 
 const PRECACHE = [
   '/',
@@ -40,13 +40,7 @@ self.addEventListener('fetch', event => {
 
   // API 与带鉴权的请求永远走网络
   if (url.pathname.startsWith('/api/')) return
-
-  // OCR 大文件（wasm / 语言包 / worker）不进 SW 缓存，避免缓存污染与反复重下
-  if (url.pathname.startsWith('/vendor/tesseract')
-    || url.pathname.startsWith('/vendor/tessdata')
-    || url.pathname.startsWith('/vendor/tesseract-core')) {
-    return
-  }
+  if (url.pathname === '/ws') return
 
   // 导航请求：缓存优先，后台刷新（保证离线可用 + 上线即更新）
   if (req.mode === 'navigate') {

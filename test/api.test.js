@@ -2,13 +2,17 @@
 
 /** API 冒烟测试：node:test，无额外依赖。运行：npm test */
 
-process.env.PRICE_DB = require('node:path').join(
-  require('node:os').tmpdir(), `price-test-${process.pid}.db`
-);
+const fs = require('node:fs');
+const nodePath = require('node:path');
+const os = require('node:os');
+
+process.env.PRICE_DB = nodePath.join(os.tmpdir(), `price-test-${process.pid}-${Date.now()}.db`);
+for (const suffix of ['', '-wal', '-shm']) {
+  try { fs.unlinkSync(process.env.PRICE_DB + suffix); } catch { /* ignore */ }
+}
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const app = require('../server');
 
 const BASE_FILE = process.env.PRICE_DB;
@@ -26,13 +30,14 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 
 before(async () => {
-  server = app.listen(0);
+  server = app.createServer().listen(0);
   await new Promise(res => server.once('listening', res));
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
 after(async () => {
   await new Promise(res => server.close(res));
+  await require('../server/db').close().catch(() => {});
   for (const suffix of ['', '-wal', '-shm']) {
     try { fs.unlinkSync(BASE_FILE + suffix); } catch (e) { /* ignore */ }
   }
@@ -295,7 +300,7 @@ test('导入：Excel 结构化 rows（合法行导入 + 非法行 400 不落库�
   assert.equal(gu.operator, '表格导入');
 });
 
-test('导入：merge 模式单侧识别不清空另一侧价格（OCR 场景）', async () => {
+test('导入：merge 模式单侧导入不清空另一侧价格', async () => {
   // 先造完整双侧价
   const save = await api('/api/prices', {
     method: 'POST',
@@ -306,11 +311,11 @@ test('导入：merge 模式单侧识别不清空另一侧价格（OCR 场景）'
   });
   assert.equal(save.status, 200);
 
-  // OCR 只识别卖出价 → merge 应保留买价
+  // 只提供卖出价 → merge 应保留买价
   const r = await api('/api/prices/import', {
     method: 'POST',
     body: {
-      server: 'T1', city: '零陵', operator: 'OCR',
+      server: 'T1', city: '零陵', operator: '单侧导入',
       rows: [{ commodity: '毛皮', buy: null, sell: 19.7, burden: 18 }],
       merge: true,
       createCommodities: false,
@@ -322,7 +327,7 @@ test('导入：merge 模式单侧识别不清空另一侧价格（OCR 场景）'
   const item = query.json.data.items[0];
   assert.equal(item.buy, 10.5, 'merge 模式 null 买价不应清空原买价');
   assert.equal(item.sell, 19.7, 'merge 模式非空卖价应更新');
-  assert.equal(item.operator, 'OCR');
+  assert.equal(item.operator, '单侧导入');
 });
 
 /* ------------------------------ 健康检查 ------------------------------ */

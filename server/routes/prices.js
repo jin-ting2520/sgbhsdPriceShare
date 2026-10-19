@@ -1,9 +1,13 @@
 'use strict';
 
-/** 价格：查询 / 保存 / 历史 / 趋势 / 比价 / 导出 / 导入 */
+/** 价格：查询 / 保存（乐观锁）/ 历史 / 趋势 / 比价 / 导出 / 导入（实时广播） */
 
 const express = require('express');
-const { db, upsertServer, findServerId, findDictId, createDictItem, nowText } = require('../db');
+const {
+  query, get, run, tx, upsertServer, findServerId, findDictId, createDictItem, nowText,
+} = require('../db');
+const cache = require('../cache');
+const { broadcast } = require('../ws');
 const {
   ok, fail, asyncHandler, cleanName, isBlank, parsePrice,
   isUniqueConstraintError,
@@ -25,7 +29,7 @@ const operatorOf = body => {
 };
 
 /** GET /api/prices?server=&city=&commodity= —— 查询价格（商品列固定展示全部商品） */
-router.get('/', asyncHandler((req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const city = cleanName(req.query.city, 20);
   const commodity = cleanName(req.query.commodity, 20);
@@ -33,39 +37,39 @@ router.get('/', asyncHandler((req, res) => {
   if (isBlank(server)) return fail(res, 400, '请先输入区服');
   if (isBlank(city)) return fail(res, 400, '请先选择城池');
 
-  const commoditySql = commodity ? `AND name = ?` : '';
-  const commodities = db.prepare(
+  const commoditySql = commodity ? 'AND name = ?' : '';
+  const commodities = await query(
     `SELECT id, name, burden, sort_order FROM dict_items
       WHERE type = 'commodity' AND status = 1 ${commoditySql}
-      ORDER BY sort_order, id`
-  ).all(...(commodity ? [commodity] : []));
+      ORDER BY sort_order, id`,
+    commodity ? [commodity] : []
+  );
 
   if (commodity && commodities.length === 0) {
     return fail(res, 400, `商品「${commodity}」不存在，请先通过商品下拉框新增`);
   }
 
-  const serverId = findServerId(server);
-  const cityId = findDictId('city', city);
+  const serverId = await findServerId(server);
+  const cityId = await findDictId('city', city);
   let priceMap = {};
   if (serverId && cityId) {
-    const rows = db.prepare(
+    const rows = await query(
       `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell,
               operator, updated_at AS updatedAt
-         FROM prices WHERE server_id = ? AND city_id = ?`
-    ).all(serverId, cityId);
+         FROM prices WHERE server_id = ? AND city_id = ?`,
+      [serverId, cityId]
+    );
     priceMap = Object.fromEntries(rows.map(r => [r.commodityId, r]));
   }
 
   const items = commodities.map(c => {
     const p = priceMap[c.id];
-    const buy = p ? p.buy : null;
-    const sell = p ? p.sell : null;
     return {
       commodityId: c.id,
       commodity: c.name,
       burden: c.burden,
-      buy,
-      sell,
+      buy: p ? p.buy : null,
+      sell: p ? p.sell : null,
       updatedAt: p ? p.updatedAt : null,
       operator: p ? p.operator : null,
     };
@@ -80,36 +84,38 @@ router.get('/', asyncHandler((req, res) => {
   });
 }));
 
-/** POST /api/prices —— 保存价格（覆盖写，仅提交有改动的行） */
-router.post('/', asyncHandler((req, res) => {
+/** POST /api/prices —— 保存价格（覆盖写，仅提交有改动的行；支持乐观并发校验） */
+router.post('/', asyncHandler(async (req, res) => {
   const server = cleanName(req.body.server, 50);
   const city = cleanName(req.body.city, 20);
   const items = Array.isArray(req.body.items) ? req.body.items : null;
+  const force = req.body.force === true;
 
   if (isBlank(server)) return fail(res, 400, '请先输入区服');
   if (isBlank(city)) return fail(res, 400, '请先选择城池');
   if (!items || items.length === 0) return fail(res, 400, '没有需要保存的价格数据');
   if (items.length > MAX_ITEMS) return fail(res, 400, `单次最多保存 ${MAX_ITEMS} 条`);
 
-  // 城池 / 商品必须已在字典中（新增入口见 /api/dict）
-  const unknownCommodities = [...new Set(items.map(i => cleanName(i.commodity, 20)).filter(Boolean))]
-    .filter(name => !findDictId('commodity', name));
-  if (unknownCommodities.length) {
-    return fail(res, 400, `商品 ${unknownCommodities.map(n => `「${n}」`).join('、')} 不在字典中，请先通过商品下拉框新增`);
+  const unknown = [];
+  for (const name of [...new Set(items.map(i => cleanName(i.commodity, 20)).filter(Boolean))]) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await findDictId('commodity', name))) unknown.push(name);
+  }
+  if (unknown.length) {
+    return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中，请先通过商品下拉框新增`);
   }
 
-  const serverId = upsertServer(server);
-  const cityId = findDictId('city', city);
+  const serverId = await upsertServer(server);
+  const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
 
   const operator = operatorOf(req.body);
 
-  // 校验前置：任何 fail 都必须在事务外返回，避免泄漏未回滚事务导致后续保存报「cannot start a transaction within a transaction」
   const ops = [];
   for (const raw of items) {
     const commodity = cleanName(raw && raw.commodity, 20);
     if (isBlank(commodity)) continue;
-    const commodityId = findDictId('commodity', commodity);
+    const commodityId = await findDictId('commodity', commodity);
     if (!commodityId) continue;
 
     const buy = parsePrice(raw && raw.buy);
@@ -117,79 +123,128 @@ router.post('/', asyncHandler((req, res) => {
     if (!buy.ok) return fail(res, 400, `「${commodity}」买价：${buy.error}`);
     if (!sell.ok) return fail(res, 400, `「${commodity}」卖价：${sell.error}`);
 
-    ops.push({ commodityId, buy: buy.value, sell: sell.value });
+    ops.push({
+      commodityId,
+      commodity,
+      buy: buy.value,
+      sell: sell.value,
+      baseUpdatedAt: raw && raw.baseUpdatedAt != null ? String(raw.baseUpdatedAt) : null,
+    });
   }
 
-  const getExisting = db.prepare(
-    'SELECT id, buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
+  const existingRows = await query(
+    `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell,
+            operator, updated_at AS updatedAt
+       FROM prices WHERE server_id = ? AND city_id = ?`,
+    [serverId, cityId]
   );
-  const upsert = db.prepare(
-    `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(server_id, city_id, commodity_id)
-     DO UPDATE SET buy_price = excluded.buy_price, sell_price = excluded.sell_price,
-                   operator = excluded.operator, updated_at = excluded.updated_at`
-  );
-  const remove = db.prepare(
-    'DELETE FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
-  );
-  const logHistory = db.prepare(
-    `INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  );
+  const existingMap = new Map(existingRows.map(r => [Number(r.commodityId), r]));
+
+  // 乐观并发：客户端带上了读取时的 updatedAt，但数据库已被他人改动 → 拒绝并回传最新值
+  if (!force) {
+    const conflicts = [];
+    for (const op of ops) {
+      if (!op.baseUpdatedAt) continue;
+      const cur = existingMap.get(op.commodityId);
+      if (cur && String(cur.updatedAt) !== op.baseUpdatedAt) {
+        conflicts.push({
+          commodity: op.commodity,
+          baseUpdatedAt: op.baseUpdatedAt,
+          updatedAt: cur.updatedAt,
+          buy: cur.buy,
+          sell: cur.sell,
+          operator: cur.operator,
+        });
+      }
+    }
+    if (conflicts.length) {
+      return res.status(409).json({
+        code: 40903,
+        message: `「${conflicts.map(c => c.commodity).join('、')}」已被他人更新，请刷新后重试`,
+        data: { conflicts },
+      });
+    }
+  }
 
   const summary = { saved: 0, updated: 0, created: 0, cleared: 0 };
-  const t = nowText(); // 同一次保存共用一个北京时间戳
+  const t = nowText();
+  const changed = [];
 
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    for (const { commodityId, buy, sell } of ops) {
-      const existing = getExisting.get(serverId, cityId, commodityId);
+  await tx(async conn => {
+    for (const { commodityId, commodity, buy, sell } of ops) {
+      const existing = existingMap.get(commodityId);
 
       if (buy == null && sell == null) {
         if (existing) {
-          remove.run(serverId, cityId, commodityId);
-          if (existing.buy != null) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator, t);
-          if (existing.sell != null) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, null, operator, t);
+          await conn.run('DELETE FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?', [serverId, cityId, commodityId]);
+          if (existing.buy != null) await conn.run(
+            'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator, t]
+          );
+          if (existing.sell != null) await conn.run(
+            'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [serverId, cityId, commodityId, 'sell_price', existing.sell, null, operator, t]
+          );
           summary.cleared += 1;
+          changed.push({ commodityId, commodity, buy: null, sell: null, updatedAt: t, operator });
         }
         continue;
       }
 
-      upsert.run(serverId, cityId, commodityId, buy, sell, operator, t);
       if (existing) {
+        await conn.run(
+          'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
+          [buy, sell, operator, t, serverId, cityId, commodityId]
+        );
         summary.updated += 1;
-        if (existing.buy !== buy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator, t);
-        if (existing.sell !== sell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator, t);
+        if (Number(existing.buy) !== buy) await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator, t]
+        );
+        if (Number(existing.sell) !== sell) await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator, t]
+        );
       } else {
+        await conn.run(
+          'INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, buy, sell, operator, t]
+        );
         summary.created += 1;
-        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, buy, operator, t);
-        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, sell, operator, t);
+        await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'buy_price', null, buy, operator, t]
+        );
+        await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'sell_price', null, sell, operator, t]
+        );
       }
       summary.saved += 1;
+      changed.push({ commodityId, commodity, buy, sell, updatedAt: t, operator });
     }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    if (isUniqueConstraintError(err)) return fail(res, 409, '同一区服城池商品的价格记录重复', 40901);
-    throw err;
+  });
+
+  if (changed.length) {
+    await cache.invalidate('dict:');
+    broadcast('price.updated', { server, city, operator, items: changed });
   }
 
   return ok(res, summary);
 }));
 
 /** GET /api/prices/history?server=&city=&limit= —— 最近变更流水 */
-router.get('/history', asyncHandler((req, res) => {
+router.get('/history', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const city = cleanName(req.query.city, 20);
   if (isBlank(server) || isBlank(city)) return ok(res, { total: 0, items: [] });
 
   const limit = Math.min(Number(req.query.limit) || 50, 200);
-  const serverId = findServerId(server);
-  const cityId = findDictId('city', city);
+  const serverId = await findServerId(server);
+  const cityId = await findDictId('city', city);
   if (!serverId || !cityId) return ok(res, { total: 0, items: [] });
 
-  const rows = db.prepare(
+  const rows = await query(
     `SELECT h.id, h.field, h.old_value AS oldValue, h.new_value AS newValue, h.created_at AS createdAt,
             h.operator, s.name AS server, c.name AS city, d.name AS commodity
        FROM price_history h
@@ -197,14 +252,15 @@ router.get('/history', asyncHandler((req, res) => {
        JOIN dict_items c ON c.id = h.city_id
        JOIN dict_items d ON d.id = h.commodity_id
       WHERE h.server_id = ? AND h.city_id = ?
-      ORDER BY h.id DESC LIMIT ?`
-  ).all(serverId, cityId, limit);
+      ORDER BY h.id DESC LIMIT ?`,
+    [serverId, cityId, limit]
+  );
 
   return ok(res, { total: rows.length, items: rows });
 }));
 
 /** GET /api/prices/trend?server=&city=&commodity=&days= —— 价格趋势（逐次变更时点 + 前向填充） */
-router.get('/trend', asyncHandler((req, res) => {
+router.get('/trend', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const city = cleanName(req.query.city, 20);
   const commodity = cleanName(req.query.commodity, 20);
@@ -214,27 +270,26 @@ router.get('/trend', asyncHandler((req, res) => {
     return fail(res, 400, '请提供区服、城池和商品');
   }
 
-  const serverId = findServerId(server);
-  const cityId = findDictId('city', city);
-  const commodityRow = db.prepare("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?").get(commodity);
+  const serverId = await findServerId(server);
+  const cityId = await findDictId('city', city);
+  const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
-  const rows = [];
+  let rows = [];
   if (serverId && cityId) {
-    rows.push(...db.prepare(
+    rows = await query(
       `SELECT h.field, h.new_value AS value, h.created_at AS createdAt
          FROM price_history h
         WHERE h.server_id = ? AND h.city_id = ? AND h.commodity_id = ? AND h.new_value IS NOT NULL
-        ORDER BY h.id`
-    ).all(serverId, cityId, commodityRow.id));
+        ORDER BY h.id`,
+      [serverId, cityId, commodityRow.id]
+    );
   }
 
-  // 近 N 天（按北京时间日期切，created_at 为北京时间 'YYYY-MM-DD HH:MM:SS'）
+  // 近 N 天（created_at 为北京时间 'YYYY-MM-DD HH:MM:SS'）
   const cutoff = new Date(Date.now() + 8 * 3600000 - days * 86400000).toISOString().slice(0, 10);
-  // cutoff 之前最后已知值，作为填充种子
   let seedBuy = null;
   let seedSell = null;
-  // 按完整时间点聚合（同秒内多次变更取最后一次），保留时内细节
   const byTime = new Map();
   for (const r of rows) {
     const t = String(r.createdAt);
@@ -247,14 +302,12 @@ router.get('/trend', asyncHandler((req, res) => {
     byTime.get(t)[key] = r.value;
   }
 
-  // 当前价格并入：同日则覆盖最后一点，否则追加新时间点，保证图上始终包含最新买价/卖价
   const current = (serverId && cityId)
-    ? db.prepare('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?')
-        .get(serverId, cityId, commodityRow.id)
+    ? await get('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?', [serverId, cityId, commodityRow.id])
     : null;
   if (current && (current.buy != null || current.sell != null)) {
     const t = nowText();
-    const lastT = byTime.size ? [...byTime.keys()].pop() : null; // Map 保持插入序，最后键为最大时间
+    const lastT = byTime.size ? [...byTime.keys()].pop() : null;
     if (lastT && lastT.slice(0, 10) === t.slice(0, 10)) {
       const slot = byTime.get(lastT);
       if (current.buy != null) slot.buy = current.buy;
@@ -264,7 +317,6 @@ router.get('/trend', asyncHandler((req, res) => {
     }
   }
 
-  // 前向填充：每个数据点都带上最近一次已知的买价与卖价，两条线连续不断裂
   let lastBuy = seedBuy;
   let lastSell = seedSell;
   const points = [...byTime.entries()]
@@ -296,24 +348,25 @@ router.get('/trend', asyncHandler((req, res) => {
 }));
 
 /** GET /api/prices/matrix?server=&commodity= —— 跨城池比价（同一商品在所有城池的价格） */
-router.get('/matrix', asyncHandler((req, res) => {
+router.get('/matrix', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const commodity = cleanName(req.query.commodity, 20);
   if (isBlank(server) || isBlank(commodity)) return fail(res, 400, '请提供区服和商品');
 
-  const serverId = findServerId(server);
-  const commodityRow = db.prepare("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?").get(commodity);
+  const serverId = await findServerId(server);
+  const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
-  const rows = db.prepare(
+  const rows = await query(
     `SELECT c.id AS cityId, c.name AS city, c.sort_order AS sortOrder,
             p.buy_price AS buy, p.sell_price AS sell, p.operator, p.updated_at AS updatedAt
        FROM dict_items c
        LEFT JOIN prices p
               ON p.city_id = c.id AND p.commodity_id = ? AND p.server_id = ?
       WHERE c.type = 'city' AND c.status = 1
-      ORDER BY (p.buy_price IS NULL), p.buy_price, c.sort_order, c.id`
-  ).all(commodityRow.id, serverId || -1);
+      ORDER BY (p.buy_price IS NULL), p.buy_price, c.sort_order, c.id`,
+    [commodityRow.id, serverId || -1]
+  );
 
   const items = rows.map(r => ({
     cityId: r.cityId,
@@ -343,36 +396,33 @@ router.get('/matrix', asyncHandler((req, res) => {
 }));
 
 /** GET /api/prices/export?server=&city= —— CSV 导出（带 BOM，Excel 友好） */
-router.get('/export', asyncHandler((req, res) => {
+router.get('/export', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const city = cleanName(req.query.city, 20);
   if (isBlank(server) || isBlank(city)) return fail(res, 400, '请先选择区服和城池');
 
-  const serverId = findServerId(server);
-  const cityId = findDictId('city', city);
+  const serverId = await findServerId(server);
+  const cityId = await findDictId('city', city);
   let rows = [];
   if (serverId && cityId) {
-    rows = db.prepare(
+    rows = await query(
       `SELECT d.name AS commodity, d.burden, p.buy_price AS buy, p.sell_price AS sell,
               p.operator, p.updated_at AS updatedAt
          FROM prices p JOIN dict_items d ON d.id = p.commodity_id
-        WHERE p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`
-    ).all(serverId, cityId);
+        WHERE p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`,
+      [serverId, cityId]
+    );
   }
-  // 商品列固定展示全部商品：无价格的商品导出空值
-  const existed = new Set(rows.map(r => r.commodity));
-  const all = db.prepare(
+  const all = await query(
     `SELECT name, burden FROM dict_items WHERE type = 'commodity' AND status = 1 ORDER BY sort_order, id`
-  ).all();
+  );
   const full = all.map(c => {
     const hit = rows.find(r => r.commodity === c.name);
-    const buy = hit ? hit.buy : null;
-    const sell = hit ? hit.sell : null;
     return {
       commodity: c.name,
       burden: c.burden,
-      buy,
-      sell,
+      buy: hit ? hit.buy : null,
+      sell: hit ? hit.sell : null,
       updatedAt: hit ? hit.updatedAt : null,
       operator: hit ? hit.operator : null,
     };
@@ -393,8 +443,8 @@ router.get('/export', asyncHandler((req, res) => {
 }));
 
 /** POST /api/prices/import —— 批量导入（rows 结构化数组，或 text 粘贴文本兼容旧客户端）
- *  merge: true 时只覆盖非空字段（OCR 单侧识别用：null 价保留原值） */
-router.post('/import', asyncHandler((req, res) => {
+ *  merge: true 时只覆盖非空字段（单侧数据导入用：null 价保留原值） */
+router.post('/import', asyncHandler(async (req, res) => {
   const server = cleanName(req.body.server, 50);
   const city = cleanName(req.body.city, 20);
   const createMissing = req.body.createCommodities !== false;
@@ -406,8 +456,8 @@ router.post('/import', asyncHandler((req, res) => {
   if (isBlank(city)) return fail(res, 400, '请先选择城池');
   if (!rowsIn && text.trim() === '') return fail(res, 400, '请提供要导入的数据');
 
-  const serverId = upsertServer(server);
-  const cityId = findDictId('city', city);
+  const serverId = await upsertServer(server);
+  const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
   const operator = operatorOf(req.body);
 
@@ -415,10 +465,9 @@ router.post('/import', asyncHandler((req, res) => {
   const parsed = [];
 
   if (rowsIn) {
-    // Excel 解析后的结构化行：{ commodity, buy, sell, burden }
     rowsIn.forEach((raw, idx) => {
       const commodity = cleanName(raw && raw.commodity, 20);
-      if (isBlank(commodity)) return; // 空行/空商品名直接跳过
+      if (isBlank(commodity)) return;
       const pb = parsePrice(raw.buy);
       const ps = parsePrice(raw.sell);
       if (!pb.ok || !ps.ok) {
@@ -432,7 +481,6 @@ router.post('/import', asyncHandler((req, res) => {
     text.split(/\r?\n/).forEach((line, idx) => {
       const raw = line.trim();
       if (!raw || raw.startsWith('#')) return;
-      // 兼容 制表符 / 逗号(中英文) / 分号 / 空格 分隔
       const cols = raw.split(/[\t,，;；]|\s+/).map(s => s.trim()).filter(s => s !== '');
       if (cols.length < 2) {
         errors.push(`第 ${idx + 1} 行：「${raw}」格式应为 商品 + 买价 + 卖价`);
@@ -452,75 +500,88 @@ router.post('/import', asyncHandler((req, res) => {
 
   if (errors.length) return fail(res, 400, `导入失败：${errors.slice(0, 3).join('；')}${errors.length > 3 ? ` 等（共 ${errors.length} 条错误）` : ''}`);
 
-  const unknown = [...new Set(parsed.map(p => p.commodity))].filter(n => !findDictId('commodity', n));
+  const unknown = [];
+  for (const name of [...new Set(parsed.map(p => p.commodity))]) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await findDictId('commodity', name))) unknown.push(name);
+  }
   if (unknown.length && !createMissing) {
     return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中`);
   }
+  let newDictCount = 0;
   for (const p of parsed) {
     if (unknown.includes(p.commodity)) {
-      try { createDictItem('commodity', p.commodity, p.burden); } catch (e) { /* 并发冲突忽略 */ }
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await createDictItem('commodity', p.commodity, p.burden);
+        newDictCount += 1;
+      } catch (e) { /* 并发冲突忽略 */ }
     } else if (p.burden != null && p.burden !== '') {
-      // 导入行可携带负重，更新到字典
       const v = Number(p.burden);
       if (Number.isFinite(v) && v > 0) {
-        db.prepare("UPDATE dict_items SET burden = ? WHERE type = 'commodity' AND name = ? AND (burden IS NULL OR burden = 0)").run(v, p.commodity);
+        // eslint-disable-next-line no-await-in-loop
+        await run("UPDATE dict_items SET burden = ? WHERE type = 'commodity' AND name = ? AND (burden IS NULL OR burden = 0)", [v, p.commodity]);
       }
     }
   }
 
-  const upsert = merge
-    ? db.prepare(
-      `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(server_id, city_id, commodity_id)
-       DO UPDATE SET buy_price = COALESCE(excluded.buy_price, prices.buy_price),
-                     sell_price = COALESCE(excluded.sell_price, prices.sell_price),
-                     operator = excluded.operator, updated_at = excluded.updated_at`
-    )
-    : db.prepare(
-      `INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(server_id, city_id, commodity_id)
-       DO UPDATE SET buy_price = excluded.buy_price, sell_price = excluded.sell_price,
-                     operator = excluded.operator, updated_at = excluded.updated_at`
-    );
-  const getExisting = db.prepare(
-    'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?'
+  const existingRows = await query(
+    `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell, updated_at AS updatedAt
+       FROM prices WHERE server_id = ? AND city_id = ?`,
+    [serverId, cityId]
   );
-  const logHistory = db.prepare(
-    `INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  );
+  const existingMap = new Map(existingRows.map(r => [Number(r.commodityId), r]));
 
   let created = 0;
   let updated = 0;
-  let newDictCount = unknown.length;
   const t = nowText();
-  db.exec('BEGIN IMMEDIATE');
-  try {
+
+  await tx(async conn => {
     for (const p of parsed) {
-      const commodityId = findDictId('commodity', p.commodity);
-      const existing = getExisting.get(serverId, cityId, commodityId);
-      // merge 时 null 价不清空，history 用合并后实际值
+      const row = await conn.get("SELECT id FROM dict_items WHERE type = 'commodity' AND name = ?", [p.commodity]);
+      if (!row) continue;
+      const commodityId = row.id;
+      const existing = existingMap.get(Number(commodityId));
       const newBuy = merge && p.buy == null ? (existing ? existing.buy : null) : p.buy;
       const newSell = merge && p.sell == null ? (existing ? existing.sell : null) : p.sell;
-      upsert.run(serverId, cityId, commodityId, p.buy, p.sell, operator, t);
+
       if (existing) {
+        await conn.run(
+          'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
+          [newBuy, newSell, operator, t, serverId, cityId, commodityId]
+        );
         updated += 1;
-        if (existing.buy !== newBuy) logHistory.run(serverId, cityId, commodityId, 'buy_price', existing.buy, newBuy, operator, t);
-        if (existing.sell !== newSell) logHistory.run(serverId, cityId, commodityId, 'sell_price', existing.sell, newSell, operator, t);
+        if (Number(existing.buy) !== newBuy) await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'buy_price', existing.buy, newBuy, operator, t]
+        );
+        if (Number(existing.sell) !== newSell) await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'sell_price', existing.sell, newSell, operator, t]
+        );
       } else {
+        await conn.run(
+          'INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, newBuy, newSell, operator, t]
+        );
         created += 1;
-        logHistory.run(serverId, cityId, commodityId, 'buy_price', null, newBuy, operator, t);
-        logHistory.run(serverId, cityId, commodityId, 'sell_price', null, newSell, operator, t);
+        await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'buy_price', null, newBuy, operator, t]
+        );
+        await conn.run(
+          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [serverId, cityId, commodityId, 'sell_price', null, newSell, operator, t]
+        );
       }
     }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    if (isUniqueConstraintError(err)) return fail(res, 409, '导入数据存在重复记录', 40901);
-    throw err;
+  });
+
+  if (created || updated) {
+    await cache.invalidate('dict:');
+    broadcast('price.updated', { server, city, operator, items: [] });
   }
+  if (newDictCount) broadcast('dict.changed', {});
 
   return ok(res, { total: parsed.length, created, updated, newDictCount });
 }));
