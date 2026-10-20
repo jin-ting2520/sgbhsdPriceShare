@@ -235,6 +235,8 @@
                       <el-dropdown-item v-else command="deny-server">禁止传区服参数</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.isMaster && !s.row.masterPricesAllowed" command="allow-master-prices">开启主账号价格共享</el-dropdown-item>
                       <el-dropdown-item v-else-if="!s.row.isMaster" command="deny-master-prices">关闭主账号价格共享</el-dropdown-item>
+                      <el-dropdown-item v-if="s.row.isCurrentServerMaster" command="clear-current-master" divided>取消本区服主账号</el-dropdown-item>
+                      <el-dropdown-item v-else command="set-current-master" :disabled="!s.row.currentServer" divided>设为本区服主账号</el-dropdown-item>
                       <el-dropdown-item command="password">重置密码</el-dropdown-item>
                       <el-dropdown-item command="kick">踢下线</el-dropdown-item>
                       <el-dropdown-item command="ban" v-if="s.row.status !== 'banned'">封禁</el-dropdown-item>

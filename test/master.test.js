@@ -345,9 +345,11 @@ test('税率回退与保存/导入换算，本人税率优先', async () => {
   assert.equal(r.json.data.items.find(i => i.commodity === '葡萄').buy, 109.5);
 });
 
-test('取消某区服主账号或删除主账号，只影响对应区服', async () => {
-  const cleared = await admin.post(`/api/admin/servers/${serverAId}/master`, { accountId: null });
+test('账号管理可设/取消当前区服主账号，取消或删除只影响对应区服', async () => {
+  const cleared = await admin.post(`/api/admin/accounts/${masterAId}/master`, { master: false });
   assert.equal(cleared.status, 200);
+  assert.equal(cleared.json.data.changed, true);
+  assert.equal(cleared.json.data.name, SERVER_A);
   assert.equal(await getServerMaster(SERVER_A), null);
   assert.equal((await getServerMaster(SERVER_B)).name, MASTER_B_NAME);
 
@@ -369,7 +371,11 @@ test('取消某区服主账号或删除主账号，只影响对应区服', async
   r = await viewerB.get(`/api/prices?server=${SERVER_B}&city=${CITY}`);
   assert.equal(r.json.data.sharedCount, 1, '取消其他区服主账号不应影响本区服');
 
-  assert.equal((await admin.post(`/api/admin/servers/${serverAId}/master`, { accountId: masterAId })).status, 200);
+  const restored = await admin.post(`/api/admin/accounts/${masterAId}/master`, { master: true });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.json.data.name, SERVER_A);
+  assert.equal((await getServerMaster(SERVER_A)).name, MASTER_A_NAME);
+  assert.equal((await viewerA.get('/api/auth/me')).json.data.viewMasterPrices, true);
   assert.equal((await viewerA.put('/api/auth/master-prices', { enabled: true })).status, 200);
   const removed = await admin.del(`/api/admin/accounts/${masterAId}?confirm=${encodeURIComponent(MASTER_A_NAME)}`);
   assert.equal(removed.status, 200);

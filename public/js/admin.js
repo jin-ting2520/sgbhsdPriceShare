@@ -260,6 +260,19 @@ createApp({
           await api(`/api/admin/accounts/${row.id}/master-prices`, { method: 'POST', body: { allowed } })
           ElMessage.success(allowed ? '已开启主账号价格共享' : '已关闭主账号价格共享')
           await afterAccountChange()
+        } else if (cmd === 'set-current-master' || cmd === 'clear-current-master') {
+          if (!row.currentServer) { ElMessage.warning('该账号尚未设置当前区服'); return }
+          const master = cmd === 'set-current-master'
+          await confirm(
+            master
+              ? `把「${row.name}」设为区服 ${row.currentServer} 的主账号？该区服普通账号将默认开启主账号价格共享。`
+              : `取消「${row.name}」在区服 ${row.currentServer} 的主账号身份？该区服的主账号价格共享将关闭。`,
+            '主账号设置',
+            { type: master ? 'warning' : 'warning' }
+          )
+          await api(`/api/admin/accounts/${row.id}/master`, { method: 'POST', body: { master } })
+          ElMessage.success(master ? `已设为 ${row.currentServer} 的主账号` : `已取消 ${row.currentServer} 的主账号`)
+          await loadServers()
         } else if (cmd === 'password') {
           const pwd = await ask(`为「${row.name}」设置新密码（4~64 位），保存后该账号全部设备将下线`, '重置密码', {
             inputType: 'password', inputPattern: /^.{4,64}$/, inputErrorMessage: '密码长度应为 4~64 位',

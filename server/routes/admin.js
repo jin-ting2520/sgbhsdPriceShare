@@ -309,6 +309,7 @@ router.get('/accounts', asyncHandler(async (req, res) => {
     pageSize,
     items: rows.map(r => {
       const servers = masterServers.get(Number(r.id)) || [];
+      const currentServer = r.currentServer || '';
       return {
         id: r.id,
         name: r.name,
@@ -318,9 +319,10 @@ router.get('/accounts', asyncHandler(async (req, res) => {
         keyCode: r.keyCode || '',
         keyType: KEY_TYPE_NAMES[r.keyType] || (r.keyType ? r.keyType : ''),
         deviceLimit: Number(r.deviceLimit) || 3,
-        currentServer: r.currentServer || '',
+        currentServer,
         allowSyncServer: !!Number(r.allowSyncServer),
         isMaster: servers.length > 0,
+        isCurrentServerMaster: !!currentServer && servers.includes(currentServer),
         masterServers: servers,
         masterPricesAllowed: !!Number(r.masterPricesAllowed),
         viewMasterPrices: !!Number(r.viewMasterPrices),
@@ -564,6 +566,62 @@ router.get('/servers', asyncHandler(async (req, res) => {
   }));
 }));
 
+async function applyServerMaster(server, account) {
+  await tx(async conn => {
+    await conn.run('DELETE FROM server_masters WHERE server_id = ?', [server.id]);
+    if (account) {
+      await conn.run(
+        `INSERT INTO server_masters (server_id, account_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        [server.id, account.id, nowText(), nowText()]
+      );
+      await conn.run(
+        `UPDATE accounts SET view_master_prices =
+           CASE WHEN allow_master_prices = 1 AND id <> ? THEN 1 ELSE 0 END
+         WHERE current_server = ?`,
+        [account.id, server.name]
+      );
+    } else {
+      await conn.run('UPDATE accounts SET view_master_prices = 0 WHERE current_server = ?', [server.name]);
+    }
+  });
+
+  const payload = {
+    id: server.id,
+    name: server.name,
+    masterAccountId: account ? account.id : null,
+    masterAccountName: account ? account.name : '',
+  };
+  ws.broadcast('master.changed', {
+    server: server.name,
+    masterAccountId: payload.masterAccountId,
+    masterAccountName: payload.masterAccountName,
+  });
+  return payload;
+}
+
+/** 账号管理：按账号当前区服设置/取消主账号 */
+router.post('/accounts/:id/master', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const master = req.body && req.body.master;
+  if (typeof master !== 'boolean') return fail(res, 400, 'master 必须为布尔值');
+  const account = await loadAccount(id);
+  if (!account) return fail(res, 404, '账号不存在');
+  const serverName = cleanName(account.current_server, 50);
+  if (!serverName) return fail(res, 400, '该账号尚未设置当前区服，请让用户先选择区服');
+  const server = await get('SELECT * FROM servers WHERE name = ?', [serverName]);
+  if (!server) return fail(res, 400, `当前区服 ${serverName} 不存在，请先在区服页新增`);
+
+  if (!master) {
+    const current = await get('SELECT account_id AS accountId FROM server_masters WHERE server_id = ?', [server.id]);
+    if (!current || Number(current.accountId) !== id) {
+      return ok(res, { id, name: server.name, masterAccountId: null, masterAccountName: '', changed: false });
+    }
+  }
+  const data = await applyServerMaster(server, master ? account : null);
+  return ok(res, { ...data, changed: true });
+}));
+
 /** 设置/取消区服主账号；主账号必须属于该区服，设置后本区服普通账号默认开启共享 */
 router.post('/servers/:id/master', asyncHandler(async (req, res) => {
   const serverId = Number(req.params.id);
@@ -586,36 +644,7 @@ router.post('/servers/:id/master', asyncHandler(async (req, res) => {
     }
   }
 
-  await tx(async conn => {
-    await conn.run('DELETE FROM server_masters WHERE server_id = ?', [serverId]);
-    if (account) {
-      await conn.run(
-        `INSERT INTO server_masters (server_id, account_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?)`,
-        [serverId, account.id, nowText(), nowText()]
-      );
-      await conn.run(
-        `UPDATE accounts SET view_master_prices =
-           CASE WHEN allow_master_prices = 1 AND id <> ? THEN 1 ELSE 0 END
-         WHERE current_server = ?`,
-        [account.id, server.name]
-      );
-    } else {
-      await conn.run('UPDATE accounts SET view_master_prices = 0 WHERE current_server = ?', [server.name]);
-    }
-  });
-
-  ws.broadcast('master.changed', {
-    server: server.name,
-    masterAccountId: account ? account.id : null,
-    masterAccountName: account ? account.name : '',
-  });
-  return ok(res, {
-    id: serverId,
-    name: server.name,
-    masterAccountId: account ? account.id : null,
-    masterAccountName: account ? account.name : '',
-  });
+  return ok(res, await applyServerMaster(server, account));
 }));
 
 router.post('/servers', asyncHandler(async (req, res) => {

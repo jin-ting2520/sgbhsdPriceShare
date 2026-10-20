@@ -47,7 +47,7 @@
 | 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
 | 查询与字典 | 区服必填、城池必选、商品可选；城池 / 商品字典**只读**，由管理员在后台统一维护 |
 | 实时协作 | WebSocket 推送同账号其他设备的改价，正在查看的城池立即刷新；本地未保存修改时标记冲突 |
-| 主账号价格共享 | 管理员在「区服」页为每个区服单独指定主账号；设置后该区服普通账号默认开启共享，管理员也可对特定账号全局禁用（禁用后该账号隐藏「主账号价」开关）；普通账号只关联自己**当前区服**的主账号，本人已录入的商品整行优先，缺失商品回退展示主账号价格并标记来源；主账号保存/导入/游戏同步后仅实时通知本区服查看者。历史、趋势、跨城比价、CSV 导出同样按当前区服回退，报表不混入共享数据 |
+| 主账号价格共享 | 管理员可在「区服」页为每个区服单独指定主账号，也可在「账号」页按账号当前区服设置/取消主账号；设置后该区服普通账号默认开启共享，管理员也可对特定账号全局禁用（禁用后该账号隐藏「主账号价」开关）；普通账号只关联自己**当前区服**的主账号，本人已录入的商品整行优先，缺失商品回退展示主账号价格并标记来源；主账号保存/导入/游戏同步后仅实时通知本区服查看者。历史、趋势、跨城比价、CSV 导出同样按当前区服回退，报表不混入共享数据 |
 | 并发保护 | 保存携带 `baseUpdatedAt`，被其他设备抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
 | 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，默认自动识别 token 所属区服并逐城抓取 175 城价格；管理员可逐账号开启 `server` 覆盖权限 |
 | 赋税换算 | 各城税率自动同步；账号可设「我的赋税减免」（默认 5%），价格按个人减免实时换算 |
@@ -224,7 +224,7 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | GET | `/api/admin/overview` | 概览统计 |
 | GET/POST | `/api/admin/keys`、`/keys/export`、`/keys/revoke`、`/batches` | 卡密生成/列表/导出/作废/批次 |
 | POST | `/api/admin/keys/:id/bind` | 传 `{accountId}` 或 `{accountName}`，把未使用卡密直接绑定到账号；卡密只能消耗一次，有效期从账号当前到期时间顺延；永久账号绑定限时卡密时从现在重新计时 |
-| GET/POST | `/api/admin/accounts`、`/:id/status`、`/:id/expires`、`/:id/device-limit`、`/:id/password`、`/:id/kick`、`/:id/sync-server`、`/:id/master-prices`、`DELETE /:id` | 账号管理；`/expires` 支持 `expiresAt` / `extendDays` / `keyCode`，卡密绑定从当前到期时间顺延且只能使用一次（永久账号从现在重新计时）；`/sync-server` 传 `{allow:boolean}` 控制区服参数权限；`/master-prices` 传 `{allowed:boolean}` 允许/禁止指定账号共享主账号价格 |
+| GET/POST | `/api/admin/accounts`、`/:id/status`、`/:id/expires`、`/:id/device-limit`、`/:id/password`、`/:id/kick`、`/:id/sync-server`、`/:id/master`、`/:id/master-prices`、`DELETE /:id` | 账号管理；`/expires` 支持 `expiresAt` / `extendDays` / `keyCode`，卡密绑定从当前到期时间顺延且只能使用一次（永久账号从现在重新计时）；`/sync-server` 传 `{allow:boolean}` 控制区服参数权限；`/master` 传 `{master:boolean}` 按账号当前区服设置/取消主账号；`/master-prices` 传 `{allowed:boolean}` 允许/禁止指定账号共享主账号价格 |
 | GET/POST/PUT/DELETE | `/api/admin/dict`、`/api/admin/servers` | 字典 / 区服维护（删除被引用项返回 40901/40902，`?force=1` 强制）；区服列表返回 `masterAccountId` 与 `masterCandidates` |
 | POST | `/api/admin/servers/:id/master` | 传 `{accountId:number\|null}` 设置/取消该区服主账号；账号当前区服必须与目标区服一致。设置时本区服允许共享的普通账号默认开启，取消时关闭 |
 | GET/PUT | `/api/admin/settings` | 注册开关、公告、默认设备上限、`keyRequiredAt`、`keyHelpMd`、`tokenHelpMd`；GET/PUT 返回渲染后的 HTML |
