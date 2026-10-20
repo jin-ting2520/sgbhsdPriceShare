@@ -1,8 +1,9 @@
 'use strict';
 
-/** WebSocket 实时协作：价格变更 / 字典变更 / 同步完成 / 配置变更 广播 */
+/** WebSocket 实时协作：需登录（token + device 校验），广播按账号隔离 */
 
 const { WebSocketServer } = require('ws');
+const auth = require('./auth');
 
 let wss = null;
 
@@ -10,7 +11,31 @@ function attach(server) {
   if (wss) return wss;
   wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
 
-  wss.on('connection', ws => {
+  wss.on('connection', async (ws, req) => {
+    let account = null;
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const token = url.searchParams.get('token') || '';
+      const device = url.searchParams.get('device') || '';
+      account = await auth.loadSession(token);
+      if (!account) {
+        try { ws.close(4401, 'unauthorized'); } catch { /* ignore */ }
+        return;
+      }
+      if (auth.accountBlocked(account)) {
+        try { ws.close(4403, 'forbidden'); } catch { /* ignore */ }
+        return;
+      }
+      if (account.deviceId && device && account.deviceId !== device) {
+        try { ws.close(4401, 'device-mismatch'); } catch { /* ignore */ }
+        return;
+      }
+    } catch {
+      try { ws.close(4401, 'unauthorized'); } catch { /* ignore */ }
+      return;
+    }
+
+    ws.accountId = account.id;
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', raw => {
@@ -21,7 +46,7 @@ function attach(server) {
       }
     });
     try {
-      ws.send(JSON.stringify({ type: 'hello', clients: wss.clients.size, time: Date.now() }));
+      ws.send(JSON.stringify({ type: 'hello', account: account.name, time: Date.now() }));
     } catch { /* ignore */ }
   });
 
@@ -39,11 +64,13 @@ function attach(server) {
   return wss;
 }
 
-function broadcast(type, payload, { except } = {}) {
+/** 广播：accountId 提供时仅发给该账号的在线设备 */
+function broadcast(type, payload, { except, accountId } = {}) {
   if (!wss) return;
   const text = JSON.stringify({ type, ...payload, time: Date.now() });
   for (const ws of wss.clients) {
     if (ws === except) continue;
+    if (accountId != null && Number(ws.accountId) !== Number(accountId)) continue;
     if (ws.readyState !== ws.OPEN) continue;
     try { ws.send(text); } catch { /* ignore */ }
   }

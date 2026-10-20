@@ -83,24 +83,56 @@ function parseProducts(products) {
   return out;
 }
 
+/** 登录态所属区服：优先角色所在区服，回退角色区服列表，最后回退赛季服 */
+function serverOfLogin(info) {
+  const candidates = [
+    info && info.oServerId,
+    ...(info && Array.isArray(info.existRoleServerIds) ? info.existRoleServerIds : []),
+    info && info.serverId,
+  ];
+  for (const v of candidates) {
+    const name = v == null ? '' : String(v).trim();
+    if (name) return name;
+  }
+  return '';
+}
+
+/** 探测 token 所属区服（仅展示用，不写库） */
+async function inspectToken(token) {
+  const raw = String(token || '').trim();
+  if (!raw) throw Object.assign(new Error('请提供登录 token'), { status: 400 });
+  const { login: info } = await login(raw);
+  const server = serverOfLogin(info);
+  if (!server) throw Object.assign(new Error('登录信息中缺少区服'), { status: 502 });
+  return {
+    server,
+    roleId: info.roleId,
+    serverId: info.serverId,
+    season: info.season,
+  };
+}
+
 /**
- * 同步指定区服的全部城池价格
+ * 同步登录 token 所属区服的全部城池价格（区服由登录信息自动识别）
  * @param {object} opts
  * @param {string} opts.token    x-game-token-pcweb（登录态 JWT）
- * @param {string} opts.server   区服名称（价格表所用名称）
  * @param {string} [opts.operator] 更新人（默认「游戏同步」）
  * @param {string[]} [opts.cities] 仅同步指定城池（默认全部）
+ * @param {string} [opts.server] 区服覆盖（仅管理员授权账号可用）
  */
 async function syncPrices(opts) {
+  const accountId = Number(opts.accountId);
   const token = String(opts.token || '').trim();
-  const serverName = String(opts.server || '').trim();
   const operator = String(opts.operator || '').trim() || '游戏同步';
+  const serverOverride = String(opts.server || '').trim().slice(0, 50);
   const onlyCities = Array.isArray(opts.cities) && opts.cities.length
     ? new Set(opts.cities.map(s => String(s).trim()))
     : null;
 
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    throw Object.assign(new Error('同步必须指定账号'), { status: 400 });
+  }
   if (!token) throw Object.assign(new Error('请提供登录 token'), { status: 400 });
-  if (!serverName) throw Object.assign(new Error('请提供区服名称'), { status: 400 });
 
   if (onlyCities) {
     const unknown = [...onlyCities].filter(name => !CITY_MAP.some(c => c.name === name));
@@ -115,6 +147,8 @@ async function syncPrices(opts) {
   }
 
   const { login: info, alipayUserId } = await login(token);
+  const serverName = serverOverride || serverOfLogin(info);
+  if (!serverName) throw Object.assign(new Error('登录信息中缺少区服'), { status: 502 });
   const serverId = await upsertServer(serverName);
 
   const client = new GameClient(
@@ -170,7 +204,7 @@ async function syncPrices(opts) {
       }
       if (cityCreated) result.newCities.push(city.name);
 
-      await setCityTax(serverId, cityId, item.res.tax);
+      await setCityTax(accountId, serverId, cityId, item.res.tax);
 
       if (!rows.size) {
         result.failed.push({ city: city.name, error: '该城池没有商品数据' });
@@ -188,8 +222,8 @@ async function syncPrices(opts) {
         await tx(async conn => {
           for (const { commodityId, buy, sell } of ops) {
             const existing = await conn.get(
-              'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
-              [serverId, cityId, commodityId]
+              'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?',
+              [accountId, serverId, cityId, commodityId]
             );
             // 游戏数据可信：只写游戏返回的一侧，另一侧归零（如非可购商品的买入价）
             if (!existing && buy == null && sell == null) continue;
@@ -198,31 +232,31 @@ async function syncPrices(opts) {
               const oldBuy = existing.buy == null ? null : Number(existing.buy);
               const oldSell = existing.sell == null ? null : Number(existing.sell);
               await conn.run(
-                'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
-                [buy, sell, operator, t, serverId, cityId, commodityId]
+                'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?',
+                [buy, sell, operator, t, accountId, serverId, cityId, commodityId]
               );
               result.updated += 1;
               if (oldBuy !== buy) await conn.run(
-                'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'buy_price', oldBuy, buy, operator, t]
+                'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [accountId, serverId, cityId, commodityId, 'buy_price', oldBuy, buy, operator, t]
               );
               if (oldSell !== sell) await conn.run(
-                'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'sell_price', oldSell, sell, operator, t]
+                'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [accountId, serverId, cityId, commodityId, 'sell_price', oldSell, sell, operator, t]
               );
             } else {
               await conn.run(
-                'INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, buy, sell, operator, t]
+                'INSERT INTO prices (account_id, server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [accountId, serverId, cityId, commodityId, buy, sell, operator, t]
               );
               result.created += 1;
               if (buy != null) await conn.run(
-                'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'buy_price', null, buy, operator, t]
+                'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [accountId, serverId, cityId, commodityId, 'buy_price', null, buy, operator, t]
               );
               if (sell != null) await conn.run(
-                'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'sell_price', null, sell, operator, t]
+                'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [accountId, serverId, cityId, commodityId, 'sell_price', null, sell, operator, t]
               );
             }
             result.saved += 1;
@@ -243,4 +277,7 @@ async function syncPrices(opts) {
   return result;
 }
 
-module.exports = { syncPrices, parseProducts, productName, gamePrice, ensureCityId, CITY_MAP };
+module.exports = {
+  syncPrices, inspectToken, serverOfLogin,
+  parseProducts, productName, gamePrice, ensureCityId, CITY_MAP,
+};

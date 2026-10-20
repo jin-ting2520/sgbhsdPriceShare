@@ -6,6 +6,7 @@ const MOBILE_MEDIA = '(max-width: 768px)'
 const STORAGE_KEY = 'sgbhsd.priceShare.form.v1'
 const ACCOUNT_KEY = 'sgbhsd.account.v1'
 const RELIEF_KEY = 'sgbhsd.taxRelief.v1'
+const DEVICE_KEY = 'sgbhsd.device.v1'
 const DEFAULT_RELIEF = 5
 
 const readSavedAccount = () => {
@@ -16,7 +17,141 @@ const readSavedAccount = () => {
   return null
 }
 
+const randomHex = n => {
+  const bytes = new Uint8Array(n)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+}
+
+const readDeviceId = () => {
+  try {
+    const saved = localStorage.getItem(DEVICE_KEY)
+    if (/^[a-f0-9]{16,64}$/.test(saved || '')) return saved
+    const id = randomHex(16)
+    localStorage.setItem(DEVICE_KEY, id)
+    return id
+  } catch (e) {
+    return randomHex(16)
+  }
+}
+
+const deviceLabel = () => {
+  const ua = navigator.userAgent
+  const os = /Windows/i.test(ua) ? 'Windows'
+    : /Android/i.test(ua) ? 'Android'
+      : /iPhone|iPad|iPod/i.test(ua) ? 'iOS'
+        : /Mac OS X/i.test(ua) ? 'macOS'
+          : /Linux/i.test(ua) ? 'Linux' : '设备'
+  const browser = /Edg\//i.test(ua) ? 'Edge'
+    : /Chrome\//i.test(ua) ? 'Chrome'
+      : /Firefox\//i.test(ua) ? 'Firefox'
+        : /Safari\//i.test(ua) ? 'Safari' : '浏览器'
+  return `${os} · ${browser}`
+}
+
+const DEVICE_ID = readDeviceId()
+const DEVICE_NAME = deviceLabel()
+
 let accountSession = (readSavedAccount() || {}).session || ''
+let onAuthInvalid = null
+
+/* ------------------------------ 请求签名（HMAC-SHA256） ------------------------------ */
+/* 纯 JS 实现，保证局域网 HTTP（非安全上下文，crypto.subtle 不可用）下同样可签名 */
+
+const K256 = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+])
+
+const rotr = (x, n) => (x >>> n) | (x << (32 - n))
+
+const sha256Bytes = input => {
+  const H = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ])
+  const bitLen = input.length * 8
+  const padded = new Uint8Array((((input.length + 8) >> 6) + 1) * 64)
+  padded.set(input)
+  padded[input.length] = 0x80
+  const view = new DataView(padded.buffer)
+  view.setUint32(padded.length - 8, Math.floor(bitLen / 0x100000000))
+  view.setUint32(padded.length - 4, bitLen >>> 0)
+  const w = new Uint32Array(64)
+  for (let off = 0; off < padded.length; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4)
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0
+    }
+    let [a, b, c, d, e, f, g, h] = H
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+      const ch = (e & f) ^ (~e & g)
+      const t1 = (h + S1 + ch + K256[i] + w[i]) >>> 0
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+      const maj = (a & b) ^ (a & c) ^ (b & c)
+      const t2 = (S0 + maj) >>> 0
+      h = g; g = f; f = e; e = (d + t1) >>> 0
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0
+    H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0
+    H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0
+  }
+  const out = new Uint8Array(32)
+  const ov = new DataView(out.buffer)
+  for (let i = 0; i < 8; i++) ov.setUint32(i * 4, H[i])
+  return out
+}
+
+const hmacSha256 = (key, msg) => {
+  const block = 64
+  const k = key.length > block ? sha256Bytes(key) : key
+  const ipad = new Uint8Array(block)
+  const opad = new Uint8Array(block)
+  for (let i = 0; i < block; i++) {
+    const b = i < k.length ? k[i] : 0
+    ipad[i] = b ^ 0x36
+    opad[i] = b ^ 0x5c
+  }
+  const inner = sha256Bytes(new Uint8Array([...ipad, ...msg]))
+  return sha256Bytes(new Uint8Array([...opad, ...inner]))
+}
+
+const utf8 = new TextEncoder()
+const bytesHex = bytes => Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+const sha256Hex = text => bytesHex(sha256Bytes(utf8.encode(text)))
+
+const signHeaders = (session, method, path, payload) => {
+  const ts = String(Date.now())
+  const nonce = randomHex(12)
+  const bodyHash = sha256Hex(payload === undefined ? '' : payload)
+  const base = `${method.toUpperCase()}\n${path}\n${ts}\n${nonce}\n${bodyHash}`
+  return {
+    'X-Timestamp': ts,
+    'X-Nonce': nonce,
+    'X-Sign': bytesHex(hmacSha256(utf8.encode(session), utf8.encode(base))),
+  }
+}
+
+async function signedFetch(path, { method = 'GET', body } = {}) {
+  const payload = body === undefined ? undefined : (typeof body === 'string' ? body : JSON.stringify(body))
+  const headers = { 'X-Device-Id': DEVICE_ID }
+  if (payload !== undefined) headers['Content-Type'] = 'application/json'
+  if (accountSession) {
+    headers['X-Account-Token'] = accountSession
+    if (path !== '/api/auth/login') Object.assign(headers, signHeaders(accountSession, method, path, payload))
+  }
+  return fetch(path, { method, headers, body: payload })
+}
 
 const clampRelief = v => {
   if (v == null || v === '') return DEFAULT_RELIEF
@@ -38,15 +173,7 @@ const CRON_PRESETS = [
 /* ------------------------------ 请求封装 ------------------------------ */
 
 async function api(path, options = {}) {
-  const init = {
-    method: options.method || 'GET',
-    headers: { 'Content-Type': 'application/json' },
-  }
-  if (accountSession) init.headers['X-Account-Token'] = accountSession
-  if (options.body !== undefined) {
-    init.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body)
-  }
-  const res = await fetch(path, init)
+  const res = await signedFetch(path, options)
   let json = null
   try { json = await res.json() } catch (e) { json = null }
   if (!json) throw new Error(`服务异常（HTTP ${res.status}）`)
@@ -55,6 +182,7 @@ async function api(path, options = {}) {
     err.status = res.status
     err.code = json.code
     err.data = json.data
+    if (res.status === 401 && path !== '/api/auth/login' && onAuthInvalid) onAuthInvalid()
     throw err
   }
   return json.data
@@ -72,16 +200,71 @@ const fmt = n => (n == null ? '-' : String(n))
 
 createApp({
   setup() {
-    /* ---------- 账号（昵称 + 密码，本机缓存会话） ---------- */
+    /* ---------- 账号（昵称 + 密码 + 卡密，本机缓存会话） ---------- */
     const savedAccount = readSavedAccount()
     const nickname = ref(savedAccount ? savedAccount.name : '')
     const nicknameInput = ref('')
     const passwordInput = ref('')
+    const keyInput = ref('')
     const accountToken = ref('')
+    const accountServer = ref('')
+    const allowSyncServer = ref(false)
+    const accountExpiresAt = ref(null)
+    const accountHasKey = ref(true)
+    const expiryLoaded = ref(false)
+    const keyRequired = ref(false)
+    const keyRequiredAt = ref('2026-10-22 00:00:00')
+    const keyHelpHtml = ref('')
+    const tokenHelpHtml = ref('')
     const sessionOk = ref(!!accountSession)
     const entering = ref(false)
     const entered = computed(() => !!nickname.value && sessionOk.value)
     const dataLoaded = ref(false)
+    const deviceName = DEVICE_NAME
+
+    const applyExpiry = data => {
+      accountExpiresAt.value = (data && data.expiresAt) || null
+      accountHasKey.value = !!(data && data.hasKey)
+      expiryLoaded.value = true
+    }
+
+    const loadPublicConfig = async () => {
+      try {
+        const config = await api('/api/public/config')
+        keyRequired.value = !!config.keyRequired
+        keyRequiredAt.value = config.keyRequiredAt || '2026-10-22 00:00:00'
+        keyHelpHtml.value = config.keyHelpHtml || ''
+        tokenHelpHtml.value = config.tokenHelpHtml || ''
+      } catch (e) { /* 配置加载失败时保留静态提示 */ }
+    }
+
+    const keyRequiredAtText = computed(() => String(keyRequiredAt.value || '').slice(0, 16))
+    const keyPlaceholder = computed(() => (keyRequired.value
+      ? '卡密（必填；到期续期也在此填写）'
+      : '卡密（试用期可留空，如 ABCD-EFGH-JKLM-NPQR）'))
+    const expirySoon = computed(() => {
+      if (!accountHasKey.value || !accountExpiresAt.value) return false
+      const ts = Date.parse(String(accountExpiresAt.value).replace(' ', 'T'))
+      return Number.isFinite(ts) && ts > Date.now() && ts - Date.now() < 86400000
+    })
+    const expiryText = computed(() => {
+      if (!expiryLoaded.value) return '到期时间…'
+      if (!accountHasKey.value) return '试用中'
+      if (!accountExpiresAt.value) return '永久有效'
+      return `有效期至 ${String(accountExpiresAt.value).slice(0, 16)}`
+    })
+    const expiryTooltip = computed(() => {
+      if (!expiryLoaded.value) return '正在读取卡密到期时间'
+      if (!accountHasKey.value) return `试用期至 ${keyRequiredAtText.value}；启用卡密后需输入卡密继续使用`
+      if (!accountExpiresAt.value) return '卡密永久有效'
+      return `卡密到期时间：${accountExpiresAt.value}`
+    })
+    const expiryTagType = computed(() => {
+      if (!expiryLoaded.value) return 'info'
+      if (!accountHasKey.value) return 'success'
+      if (!accountExpiresAt.value) return 'info'
+      return expirySoon.value ? 'warning' : 'info'
+    })
 
     /* ---------- 基础状态 ---------- */
     const isMobile = ref(window.matchMedia(MOBILE_MEDIA).matches)
@@ -101,9 +284,6 @@ createApp({
     }
     const viewBuy = (raw, tax) => (raw == null ? null : Math.round(Number(raw) * (1 + effTax(tax)) * 10) / 10)
     const viewSell = (raw, tax) => (raw == null ? null : Math.round(Number(raw) * (1 - effTax(tax)) * 10) / 10)
-
-    const citySelect = ref(null)
-    const commoditySelect = ref(null)
 
     const rows = ref([])
     const queried = ref(false)
@@ -138,54 +318,106 @@ createApp({
       dataLoaded.value = true
     }
 
-    /** 点击「进入」：昵称 + 密码登录（首次自动注册）→ 缓存会话 → 加载数据 */
-    const enterSite = async () => {
+    /** 点击「进入」：已注册账号用密码登录；卡密启用前新昵称可直接试用 */
+    const enterSite = async (opts = {}) => {
       const name = nicknameInput.value.trim().replace(/\s+/g, ' ')
       const password = passwordInput.value
+      const key = keyInput.value.trim()
       if (!name) { ElMessage.warning('请输入你的三国冰河时代昵称'); return }
       if (name.length > 20) { ElMessage.warning('昵称不能超过 20 个字符'); return }
-      if (!password) { ElMessage.warning('请输入密码（首次登录将自动注册）'); return }
+      if (!password) { ElMessage.warning('请输入密码（新账号注册时自定义）'); return }
       if (password.length < 4) { ElMessage.warning('密码至少 4 位'); return }
       entering.value = true
       try {
-        const data = await api('/api/auth/login', { method: 'POST', body: { name, password } })
+        const body = { name, password, deviceId: DEVICE_ID, deviceName: DEVICE_NAME }
+        if (key) body.key = key
+        if (opts.kick) body.kick = 'all'
+        const data = await api('/api/auth/login', { method: 'POST', body })
         accountSession = data.session
         sessionOk.value = true
         nickname.value = data.name
         accountToken.value = data.token || ''
+        accountServer.value = data.currentServer || ''
+        allowSyncServer.value = !!data.allowSyncServer
+        applyExpiry(data)
+        if (!form.server && accountServer.value) form.server = accountServer.value
         taxRelief.value = clampRelief(data.relief)
         savedRelief.value = taxRelief.value
         try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
         passwordInput.value = ''
+        keyInput.value = ''
         try {
           localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: data.name, session: data.session }))
         } catch (e) { /* 忽略隐私模式等 */ }
-        ElMessage.success(data.created ? `已注册并进入，${data.name}` : `欢迎回来，${data.name}`)
+        const expiry = !data.hasKey
+          ? (data.expiresAt ? `，试用中（至 ${String(data.expiresAt).slice(0, 10)}）` : '，试用中')
+          : (data.expiresAt ? `，有效期至 ${String(data.expiresAt).slice(0, 10)}` : '，永久有效')
+        const prefix = data.created ? '注册成功并进入' : (data.renewed ? '续期成功，欢迎回来' : '欢迎回来')
+        ElMessage.success(`${prefix}，${data.name}${expiry}`)
         try {
           await loadData()
         } catch (e) {
           ElMessage.error('数据加载失败，请刷新重试')
         }
       } catch (e) {
-        if (e.status === 401) accountToken.value = ''
-        ElMessage.error(e.message)
+        if (e.code === 40910) {
+          const sessions = (e.data && e.data.sessions) || []
+          const list = sessions.map(s => `· ${s.deviceName || '未知设备'}（${s.lastSeenAt || '未知时间'}）`).join('\n')
+          try {
+            await ElMessageBox.confirm(
+              `该账号最多同时登录 ${e.data.limit || 3} 台设备，当前已登录：\n${list}\n\n是否退出其他全部设备并继续登录？`,
+              '设备数量已达上限',
+              {
+                type: 'warning',
+                confirmButtonText: '退出其他设备并登录',
+                cancelButtonText: '取消',
+                customClass: 'pre-wrap-confirm',
+              }
+            )
+            entering.value = false
+            await enterSite({ kick: true })
+            return
+          } catch (err) { /* 用户取消 */ }
+        } else {
+          ElMessage.error(e.message)
+        }
       } finally {
         entering.value = false
       }
     }
 
-    /** 右上角「切换账号」：注销当前会话，回到入口 */
+    /** 右上角「退出登录」：注销当前会话，回到入口 */
     const switchAccount = async () => {
       try { await api('/api/auth/logout', { method: 'POST' }) } catch (e) { /* 忽略 */ }
       accountSession = ''
       sessionOk.value = false
       nickname.value = ''
       accountToken.value = ''
+      accountServer.value = ''
+      allowSyncServer.value = false
+      accountExpiresAt.value = null
+      accountHasKey.value = true
+      expiryLoaded.value = false
       nicknameInput.value = ''
       passwordInput.value = ''
+      keyInput.value = ''
       syncToken.value = ''
       syncResult.value = null
+      devicesVisible.value = false
       try { localStorage.removeItem(ACCOUNT_KEY) } catch (e) { /* 忽略 */ }
+    }
+
+    onAuthInvalid = () => {
+      accountSession = ''
+      sessionOk.value = false
+      nickname.value = ''
+      accountToken.value = ''
+      allowSyncServer.value = false
+      accountExpiresAt.value = null
+      accountHasKey.value = true
+      expiryLoaded.value = false
+      try { localStorage.removeItem(ACCOUNT_KEY) } catch (e) { /* 忽略 */ }
+      ElMessage.warning('登录已失效，请重新登录')
     }
 
     /* ---------- 区服输入联想（纯数字） ---------- */
@@ -193,52 +425,6 @@ createApp({
       api(`/api/servers${query ? `?keyword=${encodeURIComponent(query)}` : ''}`)
         .then(res => cb(res.items.filter(i => /^\d+$/.test(i.name)).map(i => ({ value: i.name }))))
         .catch(() => cb([]))
-    }
-
-    /* ---------- 下拉框“已输入未提交”内容 ---------- */
-    const getPendingInput = selectRef => {
-      try {
-        const input = selectRef && selectRef.$el && selectRef.$el.querySelector('input')
-        return input && input.value ? input.value.trim() : ''
-      } catch (e) { return '' }
-    }
-
-    const isKnown = (type, name) =>
-      (type === 'city' ? cities.value : commodities.value).some(i => i.name === name)
-
-    const ensureDictItem = async (type, name) => {
-      if (!name || isKnown(type, name)) return false
-      try {
-        await api('/api/dict', { method: 'POST', body: { type, name } })
-        ElMessage.success(`已将${type === 'city' ? '城池' : '商品'}「${name}」加入字典`)
-        return true
-      } catch (e) {
-        ElMessage.error(e.message)
-        return false
-      }
-    }
-
-    const onDictChange = async (type, val) => {
-      if (!val) return
-      const created = await ensureDictItem(type, val)
-      if (created) await loadDict()
-      if (queried.value) await doFetch(false)
-    }
-
-    const commitPendingDict = async (mode = 'query') => {
-      let changed = false
-      const pendingCity = getPendingInput(citySelect.value)
-      if (pendingCity && pendingCity !== form.city) {
-        if (await ensureDictItem('city', pendingCity)) { form.city = pendingCity; changed = true }
-      }
-      const pendingCommodity = getPendingInput(commoditySelect.value)
-      if (pendingCommodity && pendingCommodity !== form.commodity) {
-        if (await ensureDictItem('commodity', pendingCommodity)) {
-          if (mode === 'query') form.commodity = pendingCommodity
-          changed = true
-        }
-      }
-      if (changed) await loadDict()
     }
 
     /* ---------- 查询 ---------- */
@@ -266,8 +452,6 @@ createApp({
 
     const onQuery = async () => {
       if (!form.server.trim()) { ElMessage.warning('请先输入区服'); return }
-      if (!form.city) { ElMessage.warning('请先选择城池'); return }
-      await commitPendingDict('query')
       if (!form.city) { ElMessage.warning('请先选择城池'); return }
       await doFetch()
     }
@@ -302,10 +486,6 @@ createApp({
     }
 
     const clearRow = row => { row.buy = ''; row.sell = '' }
-
-    /* ---------- 跨城利润展示 ---------- */
-    const profitText = v => (v == null ? '-' : (v > 0 ? '+' : '') + Number(v).toFixed(2))
-    const profitClass = v => (v == null ? '' : v > 0 ? 'profit-pos' : v < 0 ? 'profit-neg' : '')
 
     /* ---------- 脏值与统计 ---------- */
     const hasBaseValue = row => row._base && (row._base.buy != null || row._base.sell != null)
@@ -378,7 +558,7 @@ createApp({
       if (ws || !entered.value) return
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
       try {
-        ws = new WebSocket(`${proto}//${location.host}/ws`)
+        ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(accountSession)}&device=${encodeURIComponent(DEVICE_ID)}`)
       } catch (e) { return }
       ws.onopen = () => {
         wsConnected.value = true
@@ -392,11 +572,13 @@ createApp({
         try { msg = JSON.parse(ev.data) } catch { return }
         handleWsMessage(msg)
       }
-      ws.onclose = () => {
+      ws.onclose = ev => {
         wsConnected.value = false
         ws = null
         clearInterval(wsPing)
         clearTimeout(wsRetry)
+        if (ev && ev.code === 4401) { if (onAuthInvalid) onAuthInvalid(); return }
+        if (ev && ev.code === 4403) { ElMessage.error('账号已被封禁或卡密已到期，实时协作已断开'); return }
         if (entered.value) wsRetry = setTimeout(connectWs, 3000)
       }
       ws.onerror = () => { try { ws.close() } catch { /* ignore */ } }
@@ -502,7 +684,6 @@ createApp({
     const onSave = () => {
       if (!queried.value) { ElMessage.warning('请先选择区服与城池并查询'); return }
       if (!changedCount.value) { ElMessage.warning('暂无修改需要保存'); return }
-      commitPendingDict('save')
       saveVisible.value = true
     }
 
@@ -524,6 +705,7 @@ createApp({
           },
         })
         ElMessage.success(`保存成功：新增 ${res.created} 条，更新 ${res.updated} 条${res.cleared ? `，清空 ${res.cleared} 条` : ''}`)
+        accountServer.value = form.server.trim()
         saveVisible.value = false
         await doFetch(false)
         return true
@@ -563,131 +745,53 @@ createApp({
 
     const confirmSave = () => submitSave(false)
 
-    /* ---------- 字典管理 ---------- */
-    const dictVisible = ref(false)
-    const dictTab = ref('city')
-    const dictData = reactive({ city: [], commodity: [] })
-    const newCity = ref('')
-    const newCommodity = ref('')
-    const newBurden = ref('')
+    /* ---------- 设备管理 ---------- */
+    const devicesVisible = ref(false)
+    const devicesLoading = ref(false)
+    const devices = ref([])
+    const deviceLimit = ref(3)
 
-    const toDrafts = res => {
-      dictData.city = res.city.map(i => ({ ...i, _draft: i.name }))
-      dictData.commodity = res.commodity.map(i => ({
-        ...i,
-        _draft: i.name,
-        _burdenDraft: i.burden != null ? String(i.burden) : '',
-      }))
-    }
-
-    const openDictQuiet = async () => toDrafts(await api('/api/dict/summary'))
-
-    const openDict = async () => {
-      dictVisible.value = true
+    const loadDevices = async () => {
+      devicesLoading.value = true
       try {
-        await openDictQuiet()
-        loadServers().catch(() => {})
-      } catch (e) { ElMessage.error(e.message) }
-    }
-
-    const addDictItem = async type => {
-      const name = (type === 'city' ? newCity.value : newCommodity.value).trim()
-      if (!name) { ElMessage.warning(`请输入${type === 'city' ? '城池' : '商品'}名称`); return }
-      const body = { type, name }
-      if (type === 'commodity') body.burden = newBurden.value
-      try {
-        await api('/api/dict', { method: 'POST', body })
-        ElMessage.success(`已新增「${name}」`)
-        if (type === 'city') newCity.value = ''
-        else { newCommodity.value = ''; newBurden.value = '' }
-        await Promise.all([openDictQuiet(), loadDict()])
-      } catch (e) { ElMessage.error(e.message) }
-    }
-
-    const saveDictRename = async row => {
-      const name = (row._draft || '').trim()
-      if (!name || name === row.name) { row._draft = row.name; return }
-      if (name.length > 20) { ElMessage.error('名称不能超过 20 个字符'); row._draft = row.name; return }
-      try {
-        const updated = await api(`/api/dict/${row.id}`, { method: 'PUT', body: { name } })
-        ElMessage.success(`已重命名为「${updated.name}」`)
-        await Promise.all([openDictQuiet(), loadDict()])
-        if (form.city === row.name) { form.city = updated.name; if (queried.value) doFetch(false) }
-        if (form.commodity === row.name) { form.commodity = updated.name; if (queried.value) doFetch(false) }
-      } catch (e) { ElMessage.error(e.message); row._draft = row.name }
-    }
-
-    const saveDictBurden = async row => {
-      const raw = String(row._burdenDraft == null ? '' : row._burdenDraft).trim()
-      const original = row.burden != null ? String(row.burden) : ''
-      if (raw === original) return
-      if (raw !== '' && !(Number(raw) > 0)) {
-        ElMessage.error('负重必须是大于 0 的数字')
-        row._burdenDraft = original
-        return
+        const data = await api('/api/auth/sessions')
+        devices.value = data.items || []
+        deviceLimit.value = Math.max(1, Number(data.limit) || 3)
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        devicesLoading.value = false
       }
-      try {
-        const updated = await api(`/api/dict/${row.id}`, { method: 'PUT', body: { burden: raw } })
-        row.burden = updated.burden
-        row._burdenDraft = updated.burden != null ? String(updated.burden) : ''
-        ElMessage.success(`「${row.name}」负重已更新为 ${updated.burden ?? '-'}`)
-        await loadDict()
-        if (queried.value) doFetch(false)
-      } catch (e) { ElMessage.error(e.message); row._burdenDraft = original }
     }
 
-    const toggleDict = async row => {
-      try {
-        await api(`/api/dict/${row.id}`, { method: 'PUT', body: { status: row.status ? 1 : 0 } })
-        await loadDict()
-        if (queried.value) doFetch(false)
-      } catch (e) { ElMessage.error(e.message) }
+    const openDevices = () => {
+      devicesVisible.value = true
+      loadDevices()
     }
 
-    const moveDict = async (row, type, dir) => {
-      const list = type === 'city' ? dictData.city : dictData.commodity
-      const i = list.findIndex(x => x.id === row.id)
-      const j = i + dir
-      if (i < 0 || j < 0 || j >= list.length) return
-      const target = list[j]
-      try {
-        await Promise.all([
-          api(`/api/dict/${row.id}`, { method: 'PUT', body: { sort_order: target.sort_order } }),
-          api(`/api/dict/${target.id}`, { method: 'PUT', body: { sort_order: row.sort_order } }),
-        ])
-        await Promise.all([openDictQuiet(), loadDict()])
-        if (queried.value) doFetch(false)
-      } catch (e) { ElMessage.error(e.message) }
-    }
-
-    const removeDictItem = async (row, type) => {
+    const kickDevice = async session => {
       try {
         await ElMessageBox.confirm(
-          `确定删除${type === 'city' ? '城池' : '商品'}「${row.name}」？删除后不可恢复。`,
-          '删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+          session.current
+            ? '退出当前设备将注销登录并返回入口，是否继续？'
+            : `确定退出设备「${session.deviceName || '未知设备'}」？`,
+          '退出设备',
+          { type: 'warning', confirmButtonText: '退 出', cancelButtonText: '取 消' }
         )
       } catch (e) { return }
       try {
-        await api(`/api/dict/${row.id}`, { method: 'DELETE' })
-        ElMessage.success(`已删除「${row.name}」`)
-        await Promise.all([openDictQuiet(), loadDict()])
-        if (form.city === row.name) { form.city = ''; if (queried.value) { queried.value = false; buildRowsFromDict() } }
-        if (form.commodity === row.name) { form.commodity = ''; if (queried.value) doFetch(false) }
+        await api(`/api/auth/sessions/${session.id}`, { method: 'DELETE' })
+        if (session.current) { await switchAccount(); return }
+        ElMessage.success('已退出该设备')
+        await loadDevices()
       } catch (e) { ElMessage.error(e.message) }
     }
 
-    const removeServer = async srv => {
+    const kickOtherDevices = async () => {
       try {
-        await ElMessageBox.confirm(
-          `确定删除区服「${srv.name}」及其全部价格记录？删除后不可恢复。`,
-          '删除确认', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-        )
-      } catch (e) { return }
-      try {
-        await api(`/api/servers/${srv.id}`, { method: 'DELETE' })
-        ElMessage.success(`已删除区服「${srv.name}」`)
-        await loadServers()
-        if (form.server === srv.name) onReset()
+        const res = await api('/api/auth/sessions/kick-others', { method: 'POST' })
+        ElMessage.success(res.count ? `已退出其他 ${res.count} 台设备` : '没有其他在线设备')
+        await loadDevices()
       } catch (e) { ElMessage.error(e.message) }
     }
 
@@ -884,44 +988,17 @@ createApp({
     }
 
     const matrixSellTarget = computed(() => {
-      const items = matrixData.value.items || []
-      if (matrixSellCity.value) {
-        const it = items.find(i => i.city === matrixSellCity.value)
-        return it && it.sell != null ? it : null
-      }
-      let best = null
-      for (const i of items) if (i.sell != null && (best == null || i.sell > best.sell)) best = i
-      return best
+      if (!matrixSellCity.value) return null
+      const it = (matrixData.value.items || []).find(i => i.city === matrixSellCity.value)
+      return it && it.sell != null ? it : null
     })
 
-    const matrixRows = computed(() => {
-      const t = matrixSellTarget.value
-      const burden = matrixData.value.burden
-      const div = (burden != null && burden > 0) ? burden : null
-      return (matrixData.value.items || []).map(i => ({
-        ...i,
-        profit: (t && i.buy != null && div) ? Math.round((t.sell - i.buy) / div * 100) / 100 : null,
-      }))
-    })
-
-    const matrixBestRoute = computed(() => {
-      let buyCity = null
-      for (const i of matrixRows.value) if (i.buy != null && (buyCity == null || i.buy < buyCity.buy)) buyCity = i
-      const sell = matrixSellTarget.value
-      const burden = matrixData.value.burden
-      if (!buyCity || !sell || buyCity.city === sell.city || !(burden > 0)) return null
-      return {
-        buyCity: buyCity.city, buyPrice: buyCity.buy,
-        sellCity: sell.city, sellPrice: sell.sell,
-        profit: Math.round((sell.sell - buyCity.buy) / burden * 100) / 100,
-      }
-    })
+    const matrixRows = computed(() => matrixData.value.items || [])
 
     /* ---------- 批量导入（Excel / 文本） ---------- */
     const importVisible = ref(false)
     const importFileName = ref('')
     const importPreview = ref([])
-    const importAutoCreate = ref(true)
     const importMerge = ref(false)
     const importing = ref(false)
     const importFileEl = ref(null)
@@ -1014,11 +1091,10 @@ createApp({
             operator: nickname.value,
             relief: taxRelief.value,
             rows: rowsIn,
-            createCommodities: importAutoCreate.value,
             merge: importMerge.value,
           },
         })
-        ElMessage.success(`导入完成：新增 ${res.created} 条，更新 ${res.updated} 条${res.newDictCount ? `，创建商品 ${res.newDictCount} 个` : ''}`)
+        ElMessage.success(`导入完成：新增 ${res.created} 条，更新 ${res.updated} 条`)
         importVisible.value = false
         await loadDict()
         if (queried.value) await doFetch(false)
@@ -1037,7 +1113,7 @@ createApp({
       }
       try {
         const q = new URLSearchParams({ server: form.server.trim(), city: form.city, relief: String(taxRelief.value) })
-        const res = await fetch(`/api/prices/export?${q.toString()}`)
+        const res = await signedFetch(`/api/prices/export?${q.toString()}`)
         if (!res.ok) {
           const j = await res.json().catch(() => null)
           throw new Error((j && j.message) || `导出失败（HTTP ${res.status}）`)
@@ -1061,26 +1137,49 @@ createApp({
     const syncing = ref(false)
     const syncToken = ref('')
     const syncServer = ref('')
+    const syncServerLoading = ref(false)
     const syncOperator = ref('')
     const syncResult = ref(null)
     const syncHasSavedToken = computed(() => !!accountToken.value)
 
+    const resolveSyncServer = async () => {
+      const typed = syncToken.value.trim()
+      if (!typed && !syncHasSavedToken.value) { syncServer.value = ''; return }
+      syncServerLoading.value = true
+      try {
+        const info = await api('/api/game/token-info', {
+          method: 'POST',
+          body: { token: typed || undefined },
+        })
+        syncServer.value = info.server
+        if (!typed) accountServer.value = info.server
+      } catch (e) {
+        syncServer.value = ''
+        if (typed) ElMessage.warning(`区服识别失败：${e.message}`)
+      } finally {
+        syncServerLoading.value = false
+      }
+    }
+
+    const onSyncTokenPaste = () => setTimeout(resolveSyncServer, 50)
+
     const openSync = async () => {
       syncVisible.value = true
       syncResult.value = null
-      syncServer.value = form.server.trim()
+      syncServer.value = ''
       syncOperator.value = nickname.value
       syncToken.value = ''
       try {
         const me = await api('/api/auth/me')
         accountToken.value = me.token || ''
+        accountServer.value = me.currentServer || accountServer.value
+        allowSyncServer.value = !!me.allowSyncServer
+        applyExpiry(me)
       } catch (e) { /* 忽略 */ }
+      await resolveSyncServer()
     }
 
     const doSync = async () => {
-      const server = String(syncServer.value || '').replace(/\D/g, '')
-      syncServer.value = server
-      if (!server) { ElMessage.warning('请输入纯数字区服，如 1344'); return }
       if (!syncToken.value.trim() && !syncHasSavedToken.value) {
         ElMessage.warning('请粘贴游戏登录 token（保存后仅本账号可见，可复用）')
         return
@@ -1089,19 +1188,19 @@ createApp({
       syncResult.value = null
       try {
         const typed = syncToken.value.trim()
-        const result = await api('/api/game/sync', {
-          method: 'POST',
-          body: {
-            token: typed || undefined,
-            server,
-            operator: syncOperator.value || nickname.value,
-          },
-        })
+        const body = {
+          token: typed || undefined,
+          operator: syncOperator.value || nickname.value,
+        }
+        if (allowSyncServer.value && syncServer.value.trim()) body.server = syncServer.value.trim()
+        const result = await api('/api/game/sync', { method: 'POST', body })
         if (typed) {
           accountToken.value = typed
           syncToken.value = ''
         }
         syncResult.value = result
+        syncServer.value = result.server
+        accountServer.value = result.server
         if (result.saved > 0) ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
         else ElMessage.warning(`同步完成，但没有写入价格（${result.queried}/${result.cities} 城）`)
         if (result.newCities && result.newCities.length) await loadDict()
@@ -1123,19 +1222,23 @@ createApp({
     const cronCustom = ref('0 */2 * * *')
     const syncLogs = ref([])
     const settings = reactive({
-      enabled: false, cron: '0 */2 * * *', token: '', server: '', operator: '自动同步',
-      hasToken: false, tokenOwner: null, legacyToken: false, lastRunAt: null, lastStatus: null, lastMessage: null,
+      enabled: false, cron: '0 */2 * * *', token: '', server: '', serverOverride: '', operator: '自动同步',
+      allowSyncServer: false, hasToken: false, status: 'active', expiresAt: null,
+      running: false, lastRunAt: null, lastStatus: null, lastMessage: null,
     })
 
     const applySettings = (data, ownToken) => {
       if (!data) return
       settings.enabled = !!data.enabled
       settings.cron = data.cron || '0 */2 * * *'
-      settings.server = String(data.server || '').replace(/\D/g, '')
+      settings.server = String(data.server || '').trim()
+      settings.serverOverride = String(data.serverOverride || '').trim()
+      settings.allowSyncServer = !!data.allowSyncServer
       settings.operator = data.operator || '自动同步'
       settings.hasToken = !!data.hasToken
-      settings.tokenOwner = data.tokenOwner || null
-      settings.legacyToken = !!data.legacyToken
+      settings.status = data.status || 'active'
+      settings.expiresAt = data.expiresAt || null
+      settings.running = !!data.running
       settings.lastRunAt = data.lastRunAt
       settings.lastStatus = data.lastStatus
       settings.lastMessage = data.lastMessage
@@ -1148,29 +1251,40 @@ createApp({
       }
     }
 
+    const onSettingsTokenPaste = () => setTimeout(resolveSettingsServer, 50)
+
+    const resolveSettingsServer = async () => {
+      const typed = String(settings.token || '').trim()
+      if (!typed && !settings.hasToken) { settings.server = ''; return }
+      try {
+        const info = await api('/api/game/token-info', {
+          method: 'POST',
+          body: { token: typed || undefined },
+        })
+        settings.server = info.server
+      } catch (e) {
+        if (typed) ElMessage.warning(`区服识别失败：${e.message}`)
+      }
+    }
+
     const openSettings = async () => {
       settingsVisible.value = true
       settingsLoading.value = true
       try {
-        const [data, logs, me] = await Promise.all([
+        const [data, logs] = await Promise.all([
           api('/api/sync-settings'),
           api('/api/sync-settings/logs?limit=10'),
-          api('/api/auth/me'),
         ])
-        accountToken.value = me.token || ''
-        applySettings(data, accountToken.value)
+        applySettings(data, '')
         syncLogs.value = logs.items
-        if (!settings.server) settings.server = form.server.trim()
         if (!settings.operator) settings.operator = nickname.value
+        await resolveSettingsServer()
       } catch (e) { ElMessage.error(e.message) } finally { settingsLoading.value = false }
     }
 
     const saveSettings = async () => {
       const cron = cronPreset.value === 'custom' ? cronCustom.value.trim() : cronPreset.value
-      const server = String(settings.server || '').replace(/\D/g, '')
-      settings.server = server
       if (!cron) { ElMessage.warning('请填写 cron 表达式'); return }
-      if (settings.enabled && !server) { ElMessage.warning('启用自动同步需要填写纯数字区服，如 1344'); return }
       const token = String(settings.token || '').trim()
       if (settings.enabled && !token && !settings.hasToken) {
         ElMessage.warning('启用自动同步需要填写登录 token')
@@ -1181,13 +1295,17 @@ createApp({
         const body = {
           enabled: settings.enabled,
           cron,
-          server,
           operator: settings.operator,
-          token,
         }
+        if (settings.allowSyncServer) body.server = String(settings.serverOverride || '').trim()
+        if (token) body.token = token
         const data = await api('/api/sync-settings', { method: 'PUT', body })
-        accountToken.value = token
-        applySettings(data, token)
+        if (token) accountToken.value = token
+        applySettings(data, '')
+        if (token) {
+          settings.token = ''
+          await resolveSettingsServer()
+        }
         ElMessage.success(settings.enabled ? '自动同步已启用' : '同步设置已保存')
       } catch (e) {
         ElMessage.error(e.message)
@@ -1223,8 +1341,6 @@ createApp({
     const reportLoading = ref(false)
     const reportDays = ref(7)
     const moversData = ref({ items: [] })
-    const arbData = ref({ items: [], params: {} })
-    const arbParams = reactive({ load: 200, all: false })
     const heatData = ref({ buckets: [], totalChanges: 0, totalSyncs: 0 })
     const heatBucket = ref('day')
     const heatDays = ref(30)
@@ -1245,14 +1361,6 @@ createApp({
         if (reportTab.value === 'movers') {
           const q = new URLSearchParams({ server: reportServer.value.trim(), days: String(reportDays.value), limit: '30', relief: String(taxRelief.value) })
           moversData.value = await api(`/api/reports/movers?${q.toString()}`)
-        } else if (reportTab.value === 'arbitrage') {
-          const q = new URLSearchParams({
-            server: reportServer.value.trim(),
-            load: String(arbParams.load),
-            relief: String(taxRelief.value),
-            all: arbParams.all ? '1' : '0',
-          })
-          arbData.value = await api(`/api/reports/arbitrage?${q.toString()}`)
         } else {
           const q = new URLSearchParams({
             server: reportServer.value.trim(),
@@ -1286,14 +1394,6 @@ createApp({
 
     const changeClass = v => (v == null ? '' : v > 0 ? 'profit-pos' : v < 0 ? 'profit-neg' : '')
 
-    const openArbitrageFromMatrix = () => {
-      matrixVisible.value = false
-      reportTab.value = 'arbitrage'
-      reportVisible.value = true
-      if (!reportServer.value) reportServer.value = form.server.trim()
-      loadReport()
-    }
-
     /* ---------- 生命周期 ---------- */
     const mql = window.matchMedia(MOBILE_MEDIA)
     const onMqlChange = e => { isMobile.value = e.matches }
@@ -1318,6 +1418,7 @@ createApp({
     onMounted(async () => {
       mql.addEventListener('change', onMqlChange)
       window.addEventListener('keydown', onKeydown)
+      loadPublicConfig()
 
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.register('/sw.js').catch(() => {})
@@ -1334,6 +1435,10 @@ createApp({
         try {
           const me = await api('/api/auth/me')
           accountToken.value = me.token || ''
+          accountServer.value = me.currentServer || ''
+          allowSyncServer.value = !!me.allowSyncServer
+          applyExpiry(me)
+          if (!form.server && accountServer.value) form.server = accountServer.value
           taxRelief.value = clampRelief(me.relief)
           savedRelief.value = taxRelief.value
           try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
@@ -1342,12 +1447,12 @@ createApp({
             try { localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: me.name, session: accountSession })) } catch (e) { /* 忽略 */ }
           }
         } catch (e) {
-          if (e.status === 401) {
+          if (e.status === 401 || e.status === 403) {
             accountSession = ''
             sessionOk.value = false
             nickname.value = ''
             try { localStorage.removeItem(ACCOUNT_KEY) } catch (err) { /* 忽略 */ }
-            ElMessage.warning('登录已失效，请重新输入昵称和密码')
+            ElMessage.warning(e.status === 403 ? e.message : '登录已失效，请重新登录')
             return
           }
         }
@@ -1368,10 +1473,12 @@ createApp({
 
     return {
       // 账号入口
-      nickname, nicknameInput, passwordInput, entering, entered, enterSite, switchAccount,
+      nickname, nicknameInput, passwordInput, keyInput, entering, entered, enterSite, switchAccount,
+      accountServer, allowSyncServer, deviceName,
+      keyRequired, keyRequiredAtText, keyPlaceholder, keyHelpHtml, tokenHelpHtml,
+      expiryText, expiryTooltip, expiryTagType,
       // 基础
       isMobile, form, cities, commodities, serverList, rows, queried, loading,
-      citySelect, commoditySelect,
       // 赋税减免
       taxRelief, currentTax, onReliefChange,
       // 实时协作
@@ -1380,14 +1487,13 @@ createApp({
       searchServers, onQuery, onReset, doFetch,
       // 编辑
       onPriceInput, onPriceBlur, copyPrev, clearRow, isDirty, stats,
-      rowClass, profitText, profitClass,
+      rowClass,
       changedCount, changedRows, canSave,
       // 保存
       saveVisible, onSave, confirmSave, saving, rowOpType, rowOpText,
-      // 字典
-      dictVisible, dictTab, dictData, newCity, newCommodity, newBurden,
-      openDict, addDictItem, saveDictRename, saveDictBurden, toggleDict, moveDict,
-      removeDictItem, removeServer, onDictChange, ensureDictItem,
+      // 设备
+      devicesVisible, devicesLoading, devices, deviceLimit,
+      openDevices, loadDevices, kickDevice, kickOtherDevices,
       // 日志 / 趋势 / 比价
       historyVisible, historyList, openHistory, loadHistory,
       trendVisible, trendCommodity, trendDays, trendLoading, trendData, trendPoints,
@@ -1395,19 +1501,20 @@ createApp({
       trendView, trendDragging, zoomTrend, resetTrendView, onTrendWheel,
       onTrendMouseDown, onTrendMouseMove, onTrendMouseUp,
       matrixVisible, matrixCommodity, matrixLoading, matrixData, openMatrix, loadMatrix,
-      matrixSellCity, matrixSellTarget, matrixRows, matrixBestRoute, openArbitrageFromMatrix,
+      matrixSellCity, matrixSellTarget, matrixRows,
       // 导入导出
-      importVisible, importFileName, importPreview, importAutoCreate, importMerge, importing,
+      importVisible, importFileName, importPreview, importMerge, importing,
       importFileEl, openImport, clearImportFile, onImportFile, downloadImportTemplate, submitImport,
       exportCsv,
       // 游戏同步
-      syncVisible, syncing, syncToken, syncServer, syncOperator, syncResult, syncHasSavedToken,
-      openSync, doSync,
+      syncVisible, syncing, syncToken, syncServer, syncServerLoading, syncOperator, syncResult, syncHasSavedToken,
+      openSync, doSync, resolveSyncServer, onSyncTokenPaste,
       // 定时设置
       settingsVisible, settingsLoading, settingsSaving, settingsRunning, settings, cronPreset, cronCustom,
       cronPresets: CRON_PRESETS, syncLogs, openSettings, saveSettings, runSettingsSync,
+      resolveSettingsServer, onSettingsTokenPaste,
       // 报表
-      reportVisible, reportTab, reportServer, reportLoading, reportDays, moversData, arbData, arbParams,
+      reportVisible, reportTab, reportServer, reportLoading, reportDays, moversData,
       heatData, heatBucket, heatDays, heatBars, openReports, loadReport, onReportTabChange, changeClass,
     }
   },

@@ -18,11 +18,12 @@ RUN apk add --no-cache su-exec
 
 # 仅先复制依赖描述文件，利用镜像缓存
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci
 
 # 应用代码（.dockerignore 已排除 node_modules / data 等）
 COPY . .
-RUN chmod +x docker-entrypoint.sh
+# 构建混淆前端产物后裁掉开发依赖
+RUN npm run build:ui -- --force && npm prune --omit=dev && npm cache clean --force && chmod +x docker-entrypoint.sh
 
 # 数据/备份目录（SQLite 兜底与迁移源；挂载卷场景由入口脚本再次确保权限）
 RUN mkdir -p /app/data /app/backup && chown -R node:node /app/data /app/backup

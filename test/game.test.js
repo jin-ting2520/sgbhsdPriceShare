@@ -9,35 +9,36 @@ const nodePath = require('node:path');
 const os = require('node:os');
 
 process.env.PRICE_DB = nodePath.join(os.tmpdir(), `game-test-${process.pid}-${Date.now()}.db`);
+process.env.ADMIN_PASSWORD = 'test-admin-pass';
 for (const suffix of ['', '-wal', '-shm']) {
   try { fs.unlinkSync(process.env.PRICE_DB + suffix); } catch { /* ignore */ }
 }
 const app = require('../server');
-const { productName, gamePrice, parseProducts, ensureCityId, CITY_MAP } = require('../server/game/sync');
+const db = require('../server/db');
+const { productName, gamePrice, parseProducts, ensureCityId, serverOfLogin, CITY_MAP } = require('../server/game/sync');
 const { displayBuy, displaySell, rawBuy, rawSell, clampRelief } = require('../server/tax');
+const { createAdmin, registerAccount, createClient } = require('./helpers');
 
 let server;
 let base = '';
-
-async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(base + path, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const json = await res.json().catch(() => null);
-  return { status: res.status, json };
-}
+let admin;
+let user;
+let accountId;
 
 before(async () => {
   server = app.createServer().listen(0);
   await new Promise(res => server.once('listening', res));
   base = `http://127.0.0.1:${server.address().port}`;
+  admin = createAdmin(base);
+  assert.equal((await admin.login()).status, 200);
+  user = await registerAccount(base, admin, { name: '同步测试' });
+  accountId = (await db.get('SELECT id FROM accounts WHERE name = ?', ['同步测试'])).id;
 });
 
 after(async () => {
+  require('../server/scheduler').stop();
   await new Promise(res => server.close(res));
-  await require('../server/db').close().catch(() => {});
+  await db.close().catch(() => {});
   for (const suffix of ['', '-wal', '-shm']) {
     try { fs.unlinkSync(process.env.PRICE_DB + suffix); } catch { /* ignore */ }
   }
@@ -104,51 +105,84 @@ test('城池映射表：175 城，metaId = 1100000 + nodeNo', () => {
   assert.ok(names.has('绵竹') && names.has('成都') && names.has('晋阳'));
 });
 
-test('GET /api/game/meta 返回城池清单', async () => {
-  const r = await api('/api/game/meta');
+test('GET /api/game/meta 需登录，返回城池清单', async () => {
+  const anon = createClient(base);
+  assert.equal((await anon.get('/api/game/meta')).status, 401);
+  const r = await user.get('/api/game/meta');
   assert.equal(r.status, 200);
   assert.equal(r.json.data.cities.length, 175);
 });
 
-test('POST /api/game/sync 参数校验', async () => {
-  const noToken = await api('/api/game/sync', { method: 'POST', body: { server: 'S1' } });
+test('区服识别：优先角色区服，回退角色区服列表与赛季服', () => {
+  assert.equal(serverOfLogin({ oServerId: 1336, existRoleServerIds: [1337], serverId: 37795 }), '1336');
+  assert.equal(serverOfLogin({ existRoleServerIds: [1337, 1338], serverId: 37795 }), '1337');
+  assert.equal(serverOfLogin({ serverId: 37795 }), '37795');
+  assert.equal(serverOfLogin({}), '');
+  assert.equal(serverOfLogin(null), '');
+});
+
+test('POST /api/game/sync 区服参数权限与参数校验', async () => {
+  const me = await user.get('/api/auth/me');
+  assert.equal(me.json.data.allowSyncServer, false, '默认不允许传区服参数');
+
+  const blocked = await user.post('/api/game/sync', { server: 'S1' });
+  assert.equal(blocked.status, 403);
+  assert.match(blocked.json.message, /未开启区服参数权限/);
+
+  const noToken = await user.post('/api/game/sync', {});
   assert.equal(noToken.status, 400);
   assert.match(noToken.json.message, /token/i);
 
-  const shortToken = await api('/api/game/sync', { method: 'POST', body: { token: 'abc', server: 'S1' } });
+  const shortToken = await user.post('/api/game/sync', { token: 'abc' });
   assert.equal(shortToken.status, 400);
 
-  const noServer = await api('/api/game/sync', {
-    method: 'POST',
-    body: { token: 'x'.repeat(80) },
-  });
-  assert.equal(noServer.status, 400);
-  assert.match(noServer.json.message, /区服/);
+  const allow = await admin.post(`/api/admin/accounts/${accountId}/sync-server`, { allow: true });
+  assert.equal(allow.status, 200);
+  assert.equal(allow.json.data.allowSyncServer, true);
+  assert.equal((await user.get('/api/auth/me')).json.data.allowSyncServer, true);
 
-  const unknownCity = await api('/api/game/sync', {
-    method: 'POST',
-    body: { token: 'x'.repeat(80), server: 'S1', cities: ['不存在城'] },
+  const unknownCity = await user.post('/api/game/sync', {
+    token: 'x'.repeat(80), server: 'S1', cities: ['不存在城'],
   });
   assert.equal(unknownCity.status, 400);
   assert.match(unknownCity.json.message, /不存在城/);
+
+  const anon = await createClient(base).post('/api/game/sync', { token: 'x'.repeat(80), server: 'S1' });
+  assert.equal(anon.status, 401);
+
+  const deny = await admin.post(`/api/admin/accounts/${accountId}/sync-server`, { allow: false });
+  assert.equal(deny.status, 200);
+  assert.equal(deny.json.data.allowSyncServer, false);
+  assert.equal((await user.post('/api/game/sync', { server: 'S1' })).status, 403);
+
+  const badFlag = await admin.post(`/api/admin/accounts/${accountId}/sync-server`, { allow: 'yes' });
+  assert.equal(badFlag.status, 400);
+  const missing = await admin.post('/api/admin/accounts/999999/sync-server', { allow: true });
+  assert.equal(missing.status, 404);
+
+  const noTokenInfo = await user.post('/api/game/token-info', {});
+  assert.equal(noTokenInfo.status, 400);
+  assert.match(noTokenInfo.json.message, /token/i);
+  assert.equal((await createClient(base).post('/api/game/token-info', {})).status, 401);
 });
 
-test('城池税率：每次同步按最新税率覆盖', async () => {
-  const db = require('../server/db');
+test('城池税率：按账号隔离，每次同步按最新税率覆盖', async () => {
   await db.upsertServer('TAX-T');
   const serverRow = await db.get('SELECT id FROM servers WHERE name = ?', ['TAX-T']);
   const cityId = await db.findDictId('city', '桂阳');
   assert.ok(serverRow && cityId);
-  await db.setCityTax(serverRow.id, cityId, 0.1);
-  assert.equal(await db.getCityTax(serverRow.id, cityId), 0.1);
-  await db.setCityTax(serverRow.id, cityId, 0.2);
-  assert.equal(await db.getCityTax(serverRow.id, cityId), 0.2);
-  await db.setCityTax(serverRow.id, cityId, null);
-  assert.equal(await db.getCityTax(serverRow.id, cityId), 0.2);
+
+  await db.setCityTax(accountId, serverRow.id, cityId, 0.1);
+  assert.equal(await db.getCityTax(accountId, serverRow.id, cityId), 0.1);
+  await db.setCityTax(accountId, serverRow.id, cityId, 0.2);
+  assert.equal(await db.getCityTax(accountId, serverRow.id, cityId), 0.2);
+  await db.setCityTax(accountId, serverRow.id, cityId, null);
+  assert.equal(await db.getCityTax(accountId, serverRow.id, cityId), 0.2);
+
+  assert.equal(await db.getCityTax(accountId + 999, serverRow.id, cityId), null, '其他账号不可见');
 });
 
 test('同步自动登记字典：缺失城池新建，已存在不重复', async () => {
-  const db = require('../server/db');
   const first = await ensureCityId('测试新城');
   assert.ok(first.id);
   assert.equal(first.created, true);

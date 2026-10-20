@@ -259,3 +259,47 @@ tr.row-dirty > td { background: #fffaf3 !important; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #d6d2c9; border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------- Markdown 帮助与预览 ---------------- */
+.login-key-help { margin-top: 12px; text-align: left; }
+.login-key-help .el-collapse-item__header { font-size: 13px; color: var(--accent); }
+.md-help, .md-preview {
+  font-size: 13px; line-height: 1.75; color: var(--ink-2);
+  text-align: left; overflow-wrap: anywhere;
+}
+.md-help > :first-child, .md-preview > :first-child { margin-top: 0; }
+.md-help > :last-child, .md-preview > :last-child { margin-bottom: 0; }
+.md-help p, .md-preview p { margin: 6px 0; }
+.md-help h1, .md-preview h1 { font-size: 18px; margin: 10px 0 6px; }
+.md-help h2, .md-preview h2 { font-size: 16px; margin: 10px 0 6px; }
+.md-help h3, .md-preview h3,
+.md-help h4, .md-preview h4 { font-size: 14px; margin: 8px 0 4px; }
+.md-help ul, .md-preview ul,
+.md-help ol, .md-preview ol { margin: 6px 0; padding-left: 22px; }
+.md-help li, .md-preview li { margin: 2px 0; }
+.md-help a, .md-preview a { color: var(--accent); text-decoration: underline; }
+.md-help img, .md-preview img { max-width: 100%; height: auto; border-radius: 8px; margin: 6px 0; }
+.md-help code, .md-preview code {
+  padding: 1px 5px; border-radius: 4px; background: #f0ece5;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
+}
+.md-help pre, .md-preview pre {
+  padding: 10px 12px; border-radius: 8px; background: #f0ece5;
+  overflow: auto; white-space: pre-wrap;
+}
+.md-help pre code, .md-preview pre code { padding: 0; background: transparent; }
+.md-help blockquote, .md-preview blockquote {
+  margin: 8px 0; padding: 4px 10px; border-left: 3px solid var(--accent-soft);
+  color: var(--ink-2); background: #faf8f4;
+}
+.md-help table, .md-preview table { border-collapse: collapse; margin: 8px 0; }
+.md-help th, .md-help td, .md-preview th, .md-preview td {
+  border: 1px solid var(--line); padding: 4px 8px;
+}
+.md-preview {
+  margin-top: 8px; padding: 12px 14px; max-height: 360px; overflow: auto;
+  background: #faf8f4; border: 1px dashed var(--line); border-radius: 8px;
+}
+.settings-tip { width: 100%; margin-top: 4px; line-height: 1.6; }
+.settings-preview-bar { width: 100%; margin-top: 8px; }
+.expiry-tag { white-space: nowrap; }

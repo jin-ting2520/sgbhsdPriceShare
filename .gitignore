@@ -1,6 +1,9 @@
 # 依赖
 node_modules/
 
+# 前端构建产物（npm run build:ui / Docker 构建生成）
+/public/dist/
+
 # 数据与备份（容器内生成，勿提交；仅限根目录，server/game/data 需提交）
 /data/
 /backup/

@@ -9,6 +9,7 @@
     "dev": "node --watch server/index.js",
     "test": "node --test \"test/*.test.js\"",
     "test:smoke": "node server/scripts/smoke.js",
+    "build:ui": "node scripts/build-ui.js",
     "db:vacuum": "node server/scripts/vacuum.js",
     "db:migrate": "node server/scripts/migrate-to-mysql.js",
     "game:sync": "node server/scripts/game-sync.js"
@@ -19,11 +20,17 @@
   "dependencies": {
     "element-plus": "^2.9.0",
     "express": "^4.21.2",
+    "marked": "^18.1.1",
     "mysql2": "^3.24.6",
     "node-cron": "^4.6.0",
     "redis": "^6.3.0",
+    "sanitize-html": "^2.18.1",
     "vue": "^3.5.13",
     "ws": "^8.22.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "javascript-obfuscator": "^4.1.1"
   }
 }

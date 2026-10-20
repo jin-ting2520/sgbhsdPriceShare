@@ -4,37 +4,45 @@
 
 const express = require('express');
 const {
-  query, get, run, tx, upsertServer, findServerId, findDictId,
-  getCityTax, getCityTaxMap, createDictItem, nowText,
+  query, get, tx, upsertServer, findServerId, findDictId,
+  getCityTax, getCityTaxMap, setCurrentServer, nowText,
 } = require('../db');
 const cache = require('../cache');
 const { broadcast } = require('../ws');
+const { requireAccount } = require('../auth');
 const { clampRelief, displayBuy, displaySell, rawBuy, rawSell } = require('../tax');
-const {
-  ok, fail, asyncHandler, cleanName, isBlank, parsePrice,
-  isUniqueConstraintError,
-} = require('../util');
+const { ok, fail, asyncHandler, cleanName, isBlank, parsePrice } = require('../util');
 
 const router = express.Router();
 
+router.use(requireAccount);
+
 const MAX_ITEMS = 500;
 
-const reliefOf = (obj, key) => clampRelief(obj && obj[key]);
+/** 减免：请求未指定时用账号保存的默认减免 */
+const reliefOf = (obj, key, fallback) => {
+  const raw = obj && obj[key];
+  if (raw == null || raw === '') return clampRelief(fallback);
+  return clampRelief(raw);
+};
+
+/** 区服：请求未指定时用账号当前区服（同步/保存时更新） */
+const serverOf = (req, raw) => cleanName(raw, 50) || cleanName(req.account.currentServer, 50);
 
 function csvCell(v) {
   const s = v == null ? '' : String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** 操作人 = 用户进入站点时输入的昵称（客户端随保存请求提交） */
-const operatorOf = body => {
+/** 操作人 = 账号名称（可通过 body.operator 覆盖） */
+const operatorOf = (req, body) => {
   const name = cleanName(body && body.operator, 20);
-  return name || '匿名';
+  return name || cleanName(req.account.name, 20) || '匿名';
 };
 
 /** GET /api/prices?server=&city=&commodity= —— 查询价格（商品列固定展示全部商品） */
 router.get('/', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const city = cleanName(req.query.city, 20);
   const commodity = cleanName(req.query.commodity, 20);
 
@@ -50,20 +58,21 @@ router.get('/', asyncHandler(async (req, res) => {
   );
 
   if (commodity && commodities.length === 0) {
-    return fail(res, 400, `商品「${commodity}」不存在，请先通过商品下拉框新增`);
+    return fail(res, 400, `商品「${commodity}」不存在，请联系管理员维护商品字典`);
   }
 
+  const accountId = req.account.id;
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
-  const relief = reliefOf(req.query, 'relief');
-  const tax = await getCityTax(serverId, cityId);
+  const relief = reliefOf(req.query, 'relief', req.account.relief);
+  const tax = await getCityTax(accountId, serverId, cityId);
   let priceMap = {};
   if (serverId && cityId) {
     const rows = await query(
       `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell,
               operator, updated_at AS updatedAt
-         FROM prices WHERE server_id = ? AND city_id = ?`,
-      [serverId, cityId]
+         FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ?`,
+      [accountId, serverId, cityId]
     );
     priceMap = Object.fromEntries(rows.map(r => [r.commodityId, r]));
   }
@@ -94,7 +103,7 @@ router.get('/', asyncHandler(async (req, res) => {
 
 /** POST /api/prices —— 保存价格（覆盖写，仅提交有改动的行；支持乐观并发校验） */
 router.post('/', asyncHandler(async (req, res) => {
-  const server = cleanName(req.body.server, 50);
+  const server = serverOf(req, req.body.server);
   const city = cleanName(req.body.city, 20);
   const items = Array.isArray(req.body.items) ? req.body.items : null;
   const force = req.body.force === true;
@@ -110,16 +119,17 @@ router.post('/', asyncHandler(async (req, res) => {
     if (!(await findDictId('commodity', name))) unknown.push(name);
   }
   if (unknown.length) {
-    return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中，请先通过商品下拉框新增`);
+    return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中，请联系管理员维护商品字典`);
   }
 
+  const accountId = req.account.id;
   const serverId = await upsertServer(server);
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
 
-  const operator = operatorOf(req.body);
-  const relief = reliefOf(req.body, 'relief');
-  const tax = await getCityTax(serverId, cityId);
+  const operator = operatorOf(req, req.body);
+  const relief = reliefOf(req.body, 'relief', req.account.relief);
+  const tax = await getCityTax(accountId, serverId, cityId);
 
   const ops = [];
   for (const raw of items) {
@@ -145,8 +155,8 @@ router.post('/', asyncHandler(async (req, res) => {
   const existingRows = await query(
     `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell,
             operator, updated_at AS updatedAt
-       FROM prices WHERE server_id = ? AND city_id = ?`,
-    [serverId, cityId]
+       FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ?`,
+    [accountId, serverId, cityId]
   );
   const existingMap = new Map(existingRows.map(r => [Number(r.commodityId), r]));
 
@@ -186,14 +196,14 @@ router.post('/', asyncHandler(async (req, res) => {
 
       if (buy == null && sell == null) {
         if (existing) {
-          await conn.run('DELETE FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?', [serverId, cityId, commodityId]);
+          await conn.run('DELETE FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?', [accountId, serverId, cityId, commodityId]);
           if (existing.buy != null) await conn.run(
-            'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator, t]
+            'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [accountId, serverId, cityId, commodityId, 'buy_price', existing.buy, null, operator, t]
           );
           if (existing.sell != null) await conn.run(
-            'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [serverId, cityId, commodityId, 'sell_price', existing.sell, null, operator, t]
+            'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [accountId, serverId, cityId, commodityId, 'sell_price', existing.sell, null, operator, t]
           );
           summary.cleared += 1;
           changed.push({ commodityId, commodity, buy: null, sell: null, updatedAt: t, operator });
@@ -203,31 +213,31 @@ router.post('/', asyncHandler(async (req, res) => {
 
       if (existing) {
         await conn.run(
-          'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
-          [buy, sell, operator, t, serverId, cityId, commodityId]
+          'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?',
+          [buy, sell, operator, t, accountId, serverId, cityId, commodityId]
         );
         summary.updated += 1;
         if (Number(existing.buy) !== buy) await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'buy_price', existing.buy, buy, operator, t]
         );
         if (Number(existing.sell) !== sell) await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'sell_price', existing.sell, sell, operator, t]
         );
       } else {
         await conn.run(
-          'INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, buy, sell, operator, t]
+          'INSERT INTO prices (account_id, server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, buy, sell, operator, t]
         );
         summary.created += 1;
         await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'buy_price', null, buy, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'buy_price', null, buy, operator, t]
         );
         await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'sell_price', null, sell, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'sell_price', null, sell, operator, t]
         );
       }
       summary.saved += 1;
@@ -235,9 +245,10 @@ router.post('/', asyncHandler(async (req, res) => {
     }
   });
 
+  await setCurrentServer(accountId, server);
   if (changed.length) {
     await cache.invalidate('dict:');
-    broadcast('price.updated', { server, city, operator, tax, items: changed });
+    broadcast('price.updated', { server, city, operator, tax, items: changed }, { accountId });
   }
 
   return ok(res, summary);
@@ -245,17 +256,18 @@ router.post('/', asyncHandler(async (req, res) => {
 
 /** GET /api/prices/history?server=&city=&limit= —— 最近变更流水 */
 router.get('/history', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const city = cleanName(req.query.city, 20);
   if (isBlank(server) || isBlank(city)) return ok(res, { total: 0, items: [] });
 
+  const accountId = req.account.id;
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
   if (!serverId || !cityId) return ok(res, { total: 0, items: [] });
 
-  const relief = reliefOf(req.query, 'relief');
-  const tax = await getCityTax(serverId, cityId);
+  const relief = reliefOf(req.query, 'relief', req.account.relief);
+  const tax = await getCityTax(accountId, serverId, cityId);
   const rows = await query(
     `SELECT h.id, h.field, h.old_value AS oldValue, h.new_value AS newValue, h.created_at AS createdAt,
             h.operator, s.name AS server, c.name AS city, d.name AS commodity
@@ -263,9 +275,9 @@ router.get('/history', asyncHandler(async (req, res) => {
        JOIN servers s    ON s.id = h.server_id
        JOIN dict_items c ON c.id = h.city_id
        JOIN dict_items d ON d.id = h.commodity_id
-      WHERE h.server_id = ? AND h.city_id = ?
+      WHERE h.account_id = ? AND h.server_id = ? AND h.city_id = ?
       ORDER BY h.id DESC LIMIT ?`,
-    [serverId, cityId, limit]
+    [accountId, serverId, cityId, limit]
   );
 
   const items = rows.map(r => {
@@ -278,7 +290,7 @@ router.get('/history', asyncHandler(async (req, res) => {
 
 /** GET /api/prices/trend?server=&city=&commodity=&days= —— 价格趋势（逐次变更时点 + 前向填充） */
 router.get('/trend', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const city = cleanName(req.query.city, 20);
   const commodity = cleanName(req.query.commodity, 20);
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
@@ -287,22 +299,23 @@ router.get('/trend', asyncHandler(async (req, res) => {
     return fail(res, 400, '请提供区服、城池和商品');
   }
 
+  const accountId = req.account.id;
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
-  const relief = reliefOf(req.query, 'relief');
-  const tax = await getCityTax(serverId, cityId);
+  const relief = reliefOf(req.query, 'relief', req.account.relief);
+  const tax = await getCityTax(accountId, serverId, cityId);
 
   let rows = [];
   if (serverId && cityId) {
     rows = await query(
       `SELECT h.field, h.new_value AS value, h.created_at AS createdAt
          FROM price_history h
-        WHERE h.server_id = ? AND h.city_id = ? AND h.commodity_id = ? AND h.new_value IS NOT NULL
+        WHERE h.account_id = ? AND h.server_id = ? AND h.city_id = ? AND h.commodity_id = ? AND h.new_value IS NOT NULL
         ORDER BY h.id`,
-      [serverId, cityId, commodityRow.id]
+      [accountId, serverId, cityId, commodityRow.id]
     );
     rows = rows.map(r => ({
       ...r,
@@ -327,7 +340,7 @@ router.get('/trend', asyncHandler(async (req, res) => {
   }
 
   const current = (serverId && cityId)
-    ? await get('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?', [serverId, cityId, commodityRow.id])
+    ? await get('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?', [accountId, serverId, cityId, commodityRow.id])
     : null;
   if (current) {
     current.buy = displayBuy(current.buy, tax, relief);
@@ -377,26 +390,27 @@ router.get('/trend', asyncHandler(async (req, res) => {
 
 /** GET /api/prices/matrix?server=&commodity= —— 跨城池比价（同一商品在所有城池的价格） */
 router.get('/matrix', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const commodity = cleanName(req.query.commodity, 20);
   if (isBlank(server) || isBlank(commodity)) return fail(res, 400, '请提供区服和商品');
 
+  const accountId = req.account.id;
   const serverId = await findServerId(server);
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
-  const relief = reliefOf(req.query, 'relief');
-  const taxMap = await getCityTaxMap(serverId);
+  const relief = reliefOf(req.query, 'relief', req.account.relief);
+  const taxMap = await getCityTaxMap(accountId, serverId);
 
   const rows = await query(
     `SELECT c.id AS cityId, c.name AS city, c.sort_order AS sortOrder,
             p.buy_price AS buy, p.sell_price AS sell, p.operator, p.updated_at AS updatedAt
        FROM dict_items c
        LEFT JOIN prices p
-              ON p.city_id = c.id AND p.commodity_id = ? AND p.server_id = ?
+              ON p.city_id = c.id AND p.commodity_id = ? AND p.server_id = ? AND p.account_id = ?
       WHERE c.type = 'city' AND c.status = 1
       ORDER BY (p.buy_price IS NULL), p.buy_price, c.sort_order, c.id`,
-    [commodityRow.id, serverId || -1]
+    [commodityRow.id, serverId || -1, accountId]
   );
 
   const items = rows.map(r => {
@@ -440,22 +454,23 @@ router.get('/matrix', asyncHandler(async (req, res) => {
 
 /** GET /api/prices/export?server=&city= —— CSV 导出（带 BOM，Excel 友好） */
 router.get('/export', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const city = cleanName(req.query.city, 20);
   if (isBlank(server) || isBlank(city)) return fail(res, 400, '请先选择区服和城池');
 
+  const accountId = req.account.id;
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
-  const relief = reliefOf(req.query, 'relief');
-  const tax = await getCityTax(serverId, cityId);
+  const relief = reliefOf(req.query, 'relief', req.account.relief);
+  const tax = await getCityTax(accountId, serverId, cityId);
   let rows = [];
   if (serverId && cityId) {
     rows = await query(
       `SELECT d.name AS commodity, d.burden, p.buy_price AS buy, p.sell_price AS sell,
               p.operator, p.updated_at AS updatedAt
          FROM prices p JOIN dict_items d ON d.id = p.commodity_id
-        WHERE p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`,
-      [serverId, cityId]
+        WHERE p.account_id = ? AND p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`,
+      [accountId, serverId, cityId]
     );
     rows = rows.map(r => ({
       ...r,
@@ -495,9 +510,8 @@ router.get('/export', asyncHandler(async (req, res) => {
 /** POST /api/prices/import —— 批量导入（rows 结构化数组，或 text 粘贴文本兼容旧客户端）
  *  merge: true 时只覆盖非空字段（单侧数据导入用：null 价保留原值） */
 router.post('/import', asyncHandler(async (req, res) => {
-  const server = cleanName(req.body.server, 50);
+  const server = serverOf(req, req.body.server);
   const city = cleanName(req.body.city, 20);
-  const createMissing = req.body.createCommodities !== false;
   const merge = req.body.merge === true;
   const text = typeof req.body.text === 'string' ? req.body.text : '';
   const rowsIn = Array.isArray(req.body.rows) ? req.body.rows : null;
@@ -506,12 +520,13 @@ router.post('/import', asyncHandler(async (req, res) => {
   if (isBlank(city)) return fail(res, 400, '请先选择城池');
   if (!rowsIn && text.trim() === '') return fail(res, 400, '请提供要导入的数据');
 
+  const accountId = req.account.id;
   const serverId = await upsertServer(server);
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
-  const operator = operatorOf(req.body);
-  const relief = reliefOf(req.body, 'relief');
-  const tax = await getCityTax(serverId, cityId);
+  const operator = operatorOf(req, req.body);
+  const relief = reliefOf(req.body, 'relief', req.account.relief);
+  const tax = await getCityTax(accountId, serverId, cityId);
 
   const errors = [];
   const parsed = [];
@@ -563,30 +578,14 @@ router.post('/import', asyncHandler(async (req, res) => {
     // eslint-disable-next-line no-await-in-loop
     if (!(await findDictId('commodity', name))) unknown.push(name);
   }
-  if (unknown.length && !createMissing) {
-    return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中`);
-  }
-  let newDictCount = 0;
-  for (const p of parsed) {
-    if (unknown.includes(p.commodity)) {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        await createDictItem('commodity', p.commodity, p.burden);
-        newDictCount += 1;
-      } catch (e) { /* 并发冲突忽略 */ }
-    } else if (p.burden != null && p.burden !== '') {
-      const v = Number(p.burden);
-      if (Number.isFinite(v) && v > 0) {
-        // eslint-disable-next-line no-await-in-loop
-        await run("UPDATE dict_items SET burden = ? WHERE type = 'commodity' AND name = ? AND (burden IS NULL OR burden = 0)", [v, p.commodity]);
-      }
-    }
+  if (unknown.length) {
+    return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中，请联系管理员维护商品字典`);
   }
 
   const existingRows = await query(
     `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell, updated_at AS updatedAt
-       FROM prices WHERE server_id = ? AND city_id = ?`,
-    [serverId, cityId]
+       FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ?`,
+    [accountId, serverId, cityId]
   );
   const existingMap = new Map(existingRows.map(r => [Number(r.commodityId), r]));
 
@@ -605,43 +604,43 @@ router.post('/import', asyncHandler(async (req, res) => {
 
       if (existing) {
         await conn.run(
-          'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
-          [newBuy, newSell, operator, t, serverId, cityId, commodityId]
+          'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?',
+          [newBuy, newSell, operator, t, accountId, serverId, cityId, commodityId]
         );
         updated += 1;
         if (Number(existing.buy) !== newBuy) await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'buy_price', existing.buy, newBuy, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'buy_price', existing.buy, newBuy, operator, t]
         );
         if (Number(existing.sell) !== newSell) await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'sell_price', existing.sell, newSell, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'sell_price', existing.sell, newSell, operator, t]
         );
       } else {
         await conn.run(
-          'INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, newBuy, newSell, operator, t]
+          'INSERT INTO prices (account_id, server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, newBuy, newSell, operator, t]
         );
         created += 1;
         await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'buy_price', null, newBuy, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'buy_price', null, newBuy, operator, t]
         );
         await conn.run(
-          'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [serverId, cityId, commodityId, 'sell_price', null, newSell, operator, t]
+          'INSERT INTO price_history (account_id, server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [accountId, serverId, cityId, commodityId, 'sell_price', null, newSell, operator, t]
         );
       }
     }
   });
 
+  await setCurrentServer(accountId, server);
   if (created || updated) {
     await cache.invalidate('dict:');
-    broadcast('price.updated', { server, city, operator, tax, items: [] });
+    broadcast('price.updated', { server, city, operator, tax, items: [] }, { accountId });
   }
-  if (newDictCount) broadcast('dict.changed', {});
 
-  return ok(res, { total: parsed.length, created, updated, newDictCount });
+  return ok(res, { total: parsed.length, created, updated });
 }));
 
 module.exports = router;

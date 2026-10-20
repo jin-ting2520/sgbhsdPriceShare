@@ -66,6 +66,7 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-sgbhsd_pass}
       REDIS_URL: redis://redis:6379
       HISTORY_LIMIT: ${HISTORY_LIMIT:-20000}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     volumes:
       # SQLite 旧库/兜底库与迁移源（容器内 /app/data/price.db）
       - ./data:/app/data

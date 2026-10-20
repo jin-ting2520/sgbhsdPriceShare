@@ -1,6 +1,8 @@
-# 三国冰河时代富甲天下跑商价格分享
+# 三国冰河时代富甲天下跑商价格分享（卡密版）
 
-城池 / 商品买卖价格的在线录入、查询与共享平台。支持**游戏直连同步**、**WebSocket 实时协作**、**定时自动同步**、**跨城套利报表**；生产环境使用 **MySQL + Redis**，`docker compose up -d --build` 一键部署，本地开发与测试自动使用 SQLite。PC 与手机端自适应。昵称 + 密码登录（首次输入即自动注册），各账号的游戏 token 独立存储、仅本人可见。
+城池 / 商品买卖价格的在线录入、查询与共享平台，支持**游戏直连同步**、**WebSocket 实时协作**、**定时自动同步**、**涨跌幅与更新热度报表**。账号采用**限时试用 + 卡密注册**（管理后台配置卡密启用时间，默认 `2026-10-22 00:00:00`；启用后新账号必须使用卡密，卡密分 1 天 / 1 月 / 永久），每个账号的数据完全私有；独立 `/admin` 管理后台可生成卡密、查看账号、维护字典与区服、配置登录页提示与 token 教程、封禁与续期。生产环境使用 **MySQL + Redis**，`docker compose up -d --build` 一键部署，本地开发与测试自动使用 SQLite。
+
+> 升级提示：本项目已从「共享价格表」改为「按账号隔离」。旧版 SQLite 数据迁移后归入历史归属账号（详见「备份与迁移」）。
 
 ## 一、技术选型与架构
 
@@ -9,25 +11,25 @@
 | 运行时 | **Node.js 24** | 前后端同语言；SQLite 使用内置 `node:sqlite`，零原生编译依赖 |
 | 后端框架 | **Express 4 + ws** | REST API + WebSocket 实时推送 |
 | 数据库 | **MySQL 8.4（生产）/ SQLite（本地、测试、兜底）** | 通过 `DB_DRIVER` 或 `MYSQL_HOST` 自动选择；SQL 由 `server/db.js` 统一适配 |
-| 缓存 | **Redis 7（可选）** | 字典数据缓存；未配置或连接失败时自动退化为无缓存 |
-| 定时任务 | **node-cron** | 按北京时间执行游戏同步，可在页面配置频率 |
-| 前端 | **Vue 3 + Element Plus** | importmap + ESM 无构建步骤，本地 node_modules 直出，不依赖外网 CDN |
+| 缓存 | **Redis 7（可选）** | 字典缓存；未配置或连接失败时自动退化为无缓存 |
+| 定时任务 | **node-cron** | 按账号注册定时同步，频率可在页面配置 |
+| 前台 | **Vue 3 + Element Plus** | 源码开发，生产构建为压缩 + 混淆产物；importmap 指向本地 vendor，不依赖外网 CDN |
+| 加固 | **HMAC 请求签名 + 设备会话 + 限流** | 所有已登录请求需签名，时间窗 ±5 分钟、nonce 防重放 |
 | 部署 | **Docker Compose** | app + mysql + redis 一次拉起，健康检查、数据卷、备份脚本齐备 |
 
 ```
 ┌──────────────────────── docker compose ────────────────────────┐
-│                                                                │
 │  app (node:24-alpine, 非 root, :3000)                          │
-│   ├─ /api/dict            字典 CRUD（Redis 缓存 + 变更广播）     │
-│   ├─ /api/servers         区服                                 │
-│   ├─ /api/prices          查询/保存(乐观并发)/日志/趋势/比价/导入导出 │
-│   ├─ /api/game/sync       游戏直连同步（175 城 × 25 商品，原价 + 税率入账）  │
-│   ├─ /api/auth            账号登录 / 会话 / 本人 token                    │
-│   ├─ /api/sync-settings   定时同步配置 / 立即执行 / 运行日志      │
-│   ├─ /api/reports         涨跌幅榜 / 套利建议 / 更新热度          │
-│   ├─ /ws                  WebSocket 实时协作                    │
-│   └─ 静态：index.html + Vue3 ESM + Element Plus                 │
-│                                                                │
+│   ├─ /                用户端（卡密登录 / 价格 / 报表）          │
+│   ├─ /admin           管理后台（ADMIN_PASSWORD 登录）           │
+│   ├─ /api/auth        卡密注册 / 密码登录 / 设备会话            │
+│   ├─ /api/admin       卡密 / 账号 / 字典 / 区服 / 设置 / 日志   │
+│   ├─ /api/prices      查询/保存(乐观并发)/趋势/比价/导入导出    │
+│   ├─ /api/game/sync   游戏直连同步（175 城 × 25 商品）          │
+│   ├─ /api/sync-settings 按账号定时同步 / 立即执行 / 运行日志    │
+│   ├─ /api/reports     涨跌幅榜 / 更新热度                       │
+│   ├─ /ws              WebSocket 实时协作（按账号隔离）          │
+│   └─ /bundle/*        构建后的混淆前端产物                      │
 │  mysql:8.4 (mysql-data 卷)      redis:7 (redis-data 卷)         │
 └────────────────────────────────────────────────────────────────┘
 ```
@@ -36,17 +38,23 @@
 
 | 模块 | 说明 |
 | --- | --- |
-| 账号入口 | 昵称 + 密码登录，首次输入即自动注册；无角色权限，仅以账号区分更新人并隔离各账号的游戏 token 与赋税减免（存库，仅本人可见） |
+| 注册与试用 | 后台配置卡密启用时间（默认 `2026-10-22`）。启用前新账号可不填卡密直接注册，到期位置显示「试用中」；启用后新注册必须填写卡密。卡密一次性使用，1 天 / 30 天 / 永久，从使用时刻起算 |
+| 卡密续期 | 已注册账号卡密到期或试用结束后，在登录页输入新卡密即可续期；后台也可直接修改到期时间或用未使用卡密续期 |
+| 密码登录 | 已注册账号直接「昵称 + 密码」登录；到期或试用结束返回 40301，封禁返回 40302，后台关闭注册返回 40303 |
+| 帮助配置 | 后台可用 Markdown 配置「卡密获取提示」和「token 获取教程」，支持链接、图片、列表等；服务端清洗危险 HTML，公开配置接口无需登录 |
+| 数据隔离 | 价格、历史、税率、定时同步配置、游戏 token、当前区服均按账号隔离，未登录不可访问业务接口 |
+| 设备管理 | 每账号默认 3 台设备；超限登录返回设备列表，可踢出单个或全部其他设备；后台可调整单账号上限并强制下线 |
 | 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
-| 查询与字典 | 区服联想、城池/商品下拉（可输入新增）；商品负重维护；被引用项禁止删除 |
-| 实时协作 | WebSocket 推送他人改价，正在查看的城池立即刷新；本地有未保存修改时标记冲突 |
-| 并发保护 | 保存携带 `baseUpdatedAt`，被他人抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
-| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，逐城抓取 175 城价格，落库税前原价与城池税率（每城 3 个商品可买入、25 个可卖出） |
-| 赋税换算 | 各城税率自动同步；用户可设「我的赋税减免」（默认 5%，按账号保存在服务端），价格按个人减免实时换算，手工录入/导入自动反推原价 |
-| 定时同步 | 页面配置开关、cron 频率、区服、更新人；token 存于保存者账号并绑定该账号，服务器定时执行并保留运行记录 |
-| 报表 | 涨跌幅榜、城池间套利建议（按载重估算可购件数与毛利）、改价与同步热度图 |
-| 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天、缩放/拖拽 |
-| 导入导出 | Excel 导入（模板下载、预览修改、自动建商品、merge 模式）、CSV 导出 |
+| 查询与字典 | 区服必填、城池必选、商品可选；城池 / 商品字典**只读**，由管理员在后台统一维护 |
+| 实时协作 | WebSocket 推送同账号其他设备的改价，正在查看的城池立即刷新；本地未保存修改时标记冲突 |
+| 并发保护 | 保存携带 `baseUpdatedAt`，被其他设备抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
+| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，默认自动识别 token 所属区服并逐城抓取 175 城价格；管理员可逐账号开启 `server` 覆盖权限 |
+| 赋税换算 | 各城税率自动同步；账号可设「我的赋税减免」（默认 5%），价格按个人减免实时换算 |
+| 定时同步 | 页面配置开关、cron 频率与 token；默认按 token 自动识别区服，授权账号可保存 `server_override`；按账号独立调度、独立运行记录 |
+| 报表 | 涨跌幅榜、改价与同步热度图 |
+| 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天 |
+| 导入导出 | Excel 导入（模板下载、预览、merge 模式；未知商品需管理员先维护）、CSV 导出 |
+| 管理后台 | 概览、卡密批量生成（单批最多 500）/导出/作废、账号续期/改设备上限/重置密码/踢下线/封禁/删除、区服参数授权、字典与区服维护、卡密启用时间、注册开关与公告、卡密提示与 token 教程 Markdown 配置、同步日志 |
 | 运维 | 健康检查 `/api/health`、Docker 健康依赖、MySQL 备份/恢复脚本、PWA 离线缓存 |
 
 ## 三、快速开始
@@ -54,7 +62,7 @@
 ### Docker 一键部署（推荐）
 
 ```bash
-cp .env.example .env        # 可选；不创建则使用默认密码
+cp .env.example .env        # 必须设置 ADMIN_PASSWORD
 docker compose up -d --build
 
 # 或使用脚本
@@ -62,38 +70,54 @@ docker compose up -d --build
 .\deploy.ps1                # Windows PowerShell
 ```
 
-启动后访问 `http://服务器IP:3000`。首次启动会自动初始化 MySQL 库表与种子数据（40 城池 / 25 商品）。首次打开输入昵称与自定义密码即可（自动注册）；进入后在「同步」粘贴自己的游戏 token，token 仅本账号可见、可留空复用。完整部署、备份恢复、反代与升级说明见 **[DEPLOY.md](./DEPLOY.md)**。
+启动后：
+
+1. 打开 `http://服务器IP:3000/admin`，用 `.env` 中的 `ADMIN_PASSWORD` 登录；
+2. 在「设置」确认「卡密启用时间」（默认 `2026-10-22 00:00:00`），按需编辑卡密获取提示与 token 教程；
+3. 在「卡密」页批量生成卡密（选择 1 天 / 1 月 / 永久）；启用前用户也可「昵称 + 密码」直接试用；
+4. 把卡密发给用户，启用后在首页输入「昵称 + 密码 + 卡密」注册并进入；
+5. 在「设置」中粘贴自己的游戏 token（仅本账号可见）。
+
+管理员密码未配置时，`/admin` 与 `/api/admin/*` 全部返回 503（后台禁用），用户端不受影响。完整部署、备份恢复、反向代理与升级说明见 **[DEPLOY.md](./DEPLOY.md)**。
 
 ### 本地开发（SQLite，无需 MySQL/Redis）
 
 ```bash
-npm install
+npm install --registry=https://registry.npmmirror.com   # 国内网络建议
+npm run build:ui   # 可选：生成混淆产物；不做则回退源码
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 39 项后端/账号/游戏/报表测试
+npm test           # 50 项后端/账号/设备/游戏/报表测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
 
-要求 Node.js ≥ 22.5。未设置 `MYSQL_HOST` / `DB_DRIVER=mysql` 时自动使用 `data/price.db`；连接 Redis 需设置 `REDIS_URL`。
-
-### 从旧 SQLite 迁移到 MySQL
+要求 Node.js ≥ 22.5。未设置 `MYSQL_HOST` / `DB_DRIVER=mysql` 时自动使用 `data/price.db`；连接 Redis 需设置 `REDIS_URL`。管理后台需设置 `ADMIN_PASSWORD`，例如：
 
 ```bash
-# compose 环境下（./data 已挂载，MySQL 连接信息来自容器环境）
-docker compose exec app npm run db:migrate
-
-# 目标库已有数据时可加 --force 合并
-docker compose exec app npm run db:migrate -- --force
+# PowerShell
+$env:ADMIN_PASSWORD='your-strong-password'; npm start
+# bash
+ADMIN_PASSWORD='your-strong-password' npm start
 ```
 
-迁移脚本将字典、区服、价格、历史、城池坐标、城池税率与同步设置写入 MySQL；目标库为空时直接导入。
+## 四、账号、卡密与设备规则
 
-## 四、环境变量
+- 卡密格式 `XXXX-XXXX-XXXX-XXXX`，字符集去掉易混淆字符（无 0/O/1/I）；生成时记录批次、备注与类型。
+- `day` = 使用后 1 天，`month` = 使用后 30 天，`forever` = 无到期时间；到期后登录返回 40301，在线会话立即失效，数据保留。
+- 后台「卡密启用时间」默认 `2026-10-22 00:00:00`。启用前新账号可不填卡密注册，账号无卡密、到期时间为启用时间，界面显示「试用中」；启用后新注册必须填卡密，已有试用账号也需补卡密才能登录。
+- 修改启用时间会同步所有无卡密试用账号的到期时间；试用账号在启用前也可提前输入卡密转为正式账号。
+- 后台可对账号直接修改到期时间，也可「用卡密续期」：输入一张未使用卡密，按其类型从当前到期时间（已过期则从现在）顺延。
+- 设备会话：登录必须携带 `deviceId`/`deviceName`（浏览器自动生成）。默认上限 3 台；超限时返回 `40910` 与在线设备列表，用户确认后可踢出全部其他设备再登录。
+- 后台可踢出单台设备、踢出全部设备、重置密码（同时注销全部会话）、封禁（同时删除全部会话）与解封。
+- 同一账号的多台设备共享价格与游戏 token，可实现实时协作；不同账号之间完全不可见。
+
+## 五、环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `3000` | 监听端口 |
+| `ADMIN_PASSWORD` | 空 | 管理后台密码；为空则后台禁用（生产必填） |
 | `DB_DRIVER` | 有 `MYSQL_HOST` 则 `mysql`，否则 `sqlite` | 强制指定驱动 |
 | `MYSQL_HOST` / `MYSQL_PORT` | `127.0.0.1` / `3306` | MySQL 地址 |
 | `MYSQL_USER` / `MYSQL_PASSWORD` | `price` / `price` | MySQL 账号 |
@@ -101,30 +125,34 @@ docker compose exec app npm run db:migrate -- --force
 | `MYSQL_POOL` | `10` | 连接池大小 |
 | `REDIS_URL` | 空 | 如 `redis://redis:6379`；为空则禁用缓存 |
 | `PRICE_DB` | `data/price.db` | SQLite 文件路径 |
-| `HISTORY_LIMIT` | `20000` | 每区服价格历史保留条数 |
+| `HISTORY_LIMIT` | `20000` | 每账号价格历史保留条数 |
 | `TZ` | `Asia/Shanghai` | 时区（时间统一按北京时间存储） |
 
-## 五、目录结构
+## 六、目录结构
 
 ```
 sgbhsdPriceShare/
 ├── server/
-│   ├── index.js            # Express 入口（静态托管 + API + WS + 健康检查）
+│   ├── index.js            # Express 入口（静态托管、bundle、API、WS、健康检查）
 │   ├── db.js               # 双驱动数据层（MySQL/SQLite）、建表、种子、事务
 │   ├── cache.js            # Redis 字典缓存（失败自动退化）
-│   ├── dict-cache.js       # 字典缓存失效 + 广播（字典/同步共用）
-│   ├── ws.js               # WebSocket 服务端与广播
-│   ├── scheduler.js        # node-cron 定时同步与运行日志
+│   ├── dict-cache.js       # 字典缓存失效 + 广播
+│   ├── ws.js               # WebSocket 认证、按账号广播
+│   ├── scheduler.js        # 按账号 cron 定时同步与运行日志
 │   ├── util.js             # 统一响应/校验
-│   ├── auth.js             # 账号密码（scrypt）、会话与 token 隔离
+│   ├── auth.js             # 密码（scrypt）、设备会话、账号状态
+│   ├── sign.js             # HMAC 请求签名 + nonce 防重放
+│   ├── ratelimit.js        # 内存限流
+│   ├── keys.js             # 卡密生成/校验/类型
 │   ├── routes/
-│   │   ├── auth.js         # /api/auth 登录注册/会话/本人 token
-│   │   ├── dict.js         # /api/dict
+│   │   ├── auth.js         # 卡密注册 / 登录 / 设备会话
+│   │   ├── admin.js        # /api/admin 管理接口
+│   │   ├── dict.js         # /api/dict（只读）
 │   │   ├── servers.js      # /api/servers
 │   │   ├── prices.js       # 查询/保存/日志/趋势/比价/导出/导入
 │   │   ├── game.js         # /api/game/sync
-│   │   ├── sync-settings.js# 定时同步配置与日志
-│   │   └── reports.js      # 涨跌幅/套利/热度
+│   │   ├── sync-settings.js# 按账号定时同步配置与日志
+│   │   └── reports.js      # 涨跌幅/热度
 │   ├── game/               # 游戏协议直连（登录链 + WS + Thrift 编解码）
 │   │   ├── login.js        # JWT → authCode → SDK 登录 → v1/login
 │   │   ├── client.js       # 游戏 WebSocket 客户端
@@ -134,22 +162,22 @@ sgbhsdPriceShare/
 │   │   ├── thrift_schema.json
 │   │   └── data/city_map.json  # 175 城池映射（nodeNo/metaId/gridX/gridY）
 │   └── scripts/
-│       ├── game-sync.js        # CLI 同步（--settings 复用定时配置）
-│       ├── migrate-to-mysql.js # SQLite → MySQL
+│       ├── game-sync.js        # CLI 同步（<账号ID> <token> [操作人]，区服自动识别）
+│       ├── migrate-to-mysql.js # SQLite → MySQL（兼容旧共享库）
 │       ├── smoke.js            # 冒烟自检
 │       └── vacuum.js           # 数据库维护
 ├── public/
-│   ├── index.html          # 页面模板（含同步/定时/报表弹窗）
-│   ├── js/app.js           # Vue 应用（WS、乐观并发、导入、报表）
+│   ├── index.html          # 用户端模板
+│   ├── admin.html          # 管理后台模板
+│   ├── js/app.js           # 用户端源码（WS、签名、设备管理、报表）
+│   ├── js/admin.js         # 管理后台源码
+│   ├── dist/               # 构建产物（app.js / admin.js，混淆）
 │   ├── css/app.css
-│   ├── sw.js               # Service Worker
+│   ├── sw.js               # Service Worker（/admin 不做缓存）
 │   ├── manifest.webmanifest
 │   └── icons/icon.svg
-├── test/
-│   ├── api.test.js         # 接口测试（17）
-│   ├── auth.test.js        # 账号/会话/token 隔离（4）
-│   ├── game.test.js        # 游戏同步模块（9）
-│   └── reports.test.js     # 报表/定时设置/并发（8）
+├── scripts/build-ui.js     # esbuild 打包 + javascript-obfuscator 混淆
+├── test/                   # api / auth / game / reports 共 50 项
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -159,77 +187,116 @@ sgbhsdPriceShare/
 └── package.json
 ```
 
-## 六、API 一览
+## 七、API 概览
 
-除各账号自己的游戏 token 外全部接口开放，无需登录；写操作通过 `operator` 记录更新人昵称。涉账号自身 token 的接口需携带会话头 `X-Account-Token`。
+除 `/api/auth/login`、`/api/health` 与管理后台登录外，所有接口都要求已登录并携带签名头。登录成功后返回 `X-Account-Token` 会话 token，后续请求需带：
+
+```
+X-Account-Token: <session token>
+X-Device-Id:     <device id>
+X-Timestamp:     <毫秒时间戳>
+X-Nonce:         <随机串>
+X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + TS + "\n" + NONCE + "\n" + SHA256(rawBody))
+```
+
+服务端校验时间窗 ±5 分钟、nonce 10 分钟去重、设备与会话绑定；失败返回 401（`40111` 设备不匹配，`40112` 签名无效/重放）。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查（返回驱动、缓存、WS 人数、定时状态） |
-| POST | `/api/auth/login` `{name,password}` | 昵称 + 密码登录；首次输入自动注册，返回 `{name,session,token,relief,created}` |
+| GET | `/api/health` | 健康检查（驱动、缓存、WS 人数、调度状态） |
+| GET | `/api/public/config` | 公开配置：卡密是否启用、启用时间、注册开关、公告、卡密提示与 token 教程的已清洗 HTML |
+| POST | `/api/auth/login` | `{name,password,key?,deviceId,deviceName,kick?}`；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；超设备上限返回 `40910` |
 | POST | `/api/auth/logout` | 注销当前会话 |
-| GET | `/api/auth/me` | 当前账号、本人的游戏 token 与赋税减免（仅本人可见） |
-| PUT | `/api/auth/token` `{token}` | 更新本人游戏 token |
-| PUT | `/api/auth/relief` `{relief}` | 更新本人赋税减免（0~100，默认 5） |
-| GET | `/api/dict?type=city\|commodity` | 下拉数据源 |
-| GET | `/api/dict/summary` | 管理列表（负重、引用计数） |
-| POST | `/api/dict` `{type,name,burden?}` | 新增字典项 |
-| PUT/DELETE | `/api/dict/:id` | 重命名/负重/启停/排序/删除 |
+| GET | `/api/auth/me` | 当前账号、到期时间、游戏 token（仅本人）、赋税减免、当前区服、`allowSyncServer` |
+| PUT | `/api/auth/relief` | 更新赋税减免（0~100） |
+| PUT | `/api/auth/token` | 更新本人游戏 token |
+| GET | `/api/auth/sessions` | 当前账号在线设备列表 |
+| DELETE | `/api/auth/sessions/:id` | 踢出指定设备 |
+| POST | `/api/auth/sessions/kick-others` | 踢出除本机外的全部设备 |
+| POST | `/api/admin/login` | 管理后台登录（`X-Admin-Token` 有效期 12 小时，重启失效） |
+| GET | `/api/admin/overview` | 概览统计 |
+| GET/POST | `/api/admin/keys`、`/keys/export`、`/keys/revoke`、`/batches` | 卡密生成/列表/导出/作废/批次 |
+| GET/POST | `/api/admin/accounts`、`/:id/status`、`/:id/expires`、`/:id/device-limit`、`/:id/password`、`/:id/kick`、`/:id/sync-server`、`DELETE /:id` | 账号管理；`/sync-server` 传 `{allow:boolean}` 控制区服参数权限 |
+| GET/POST/PUT/DELETE | `/api/admin/dict`、`/api/admin/servers` | 字典 / 区服维护（删除被引用项返回 40901/40902，`?force=1` 强制） |
+| GET/PUT | `/api/admin/settings` | 注册开关、公告、默认设备上限、`keyRequiredAt`、`keyHelpMd`、`tokenHelpMd`；GET/PUT 返回渲染后的 HTML |
+| POST | `/api/admin/markdown/preview` | `{text}` 预览 Markdown（服务端清洗后返回 HTML） |
+| GET/DELETE | `/api/admin/sync-logs` | 全部账号同步日志 |
+| GET | `/api/dict?type=city\|commodity` | 下拉数据源（登录可读） |
 | GET | `/api/servers` | 区服列表 |
-| DELETE | `/api/servers/:id` | 删除区服及价格 |
 | GET | `/api/prices?server&city&commodity?&relief=5` | 查询价格（按个人减免换算为游戏显示价） |
-| POST | `/api/prices` | 保存价格（税后显示值 + `relief`，服务端反推原价）；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903 |
-| GET | `/api/prices/history` | 变更日志（按当前减免换算显示） |
-| GET | `/api/prices/trend` | 价格趋势（`relief` 可选） |
-| GET | `/api/prices/matrix` | 跨城池比价（`relief` 可选，返回各城税率） |
-| GET | `/api/prices/export` | CSV 导出（按当前减免） |
-| POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选；按 `relief` 反推原价） |
+| POST | `/api/prices` | 保存价格；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903 |
+| GET | `/api/prices/history`、`/trend`、`/matrix`、`/export` | 历史 / 趋势 / 跨城比价 / CSV 导出 |
+| POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选；未知商品需管理员先维护） |
 | GET | `/api/game/meta` | 同步支持城池清单 |
-| POST | `/api/game/sync` | 游戏直连同步 `{token?,server?,operator?,cities?}`；token 缺省用本账号已保存 token（同步成功后保存） |
-| GET | `/api/sync-settings` | 定时同步配置（不返回 token 明文；`hasToken/tokenOwner`） |
-| PUT | `/api/sync-settings` | 保存配置（需登录；`token` 存本账号并绑定定时同步） |
-| POST | `/api/sync-settings/run` | 用已保存配置立即同步（需登录） |
-| GET | `/api/sync-settings/logs` | 同步运行记录 |
-| GET | `/api/reports/movers?server&days&limit&relief` | 涨跌幅榜 |
-| GET | `/api/reports/arbitrage?server&load&relief&all` | 套利建议（按载重与个人减免估算毛利） |
-| GET | `/api/reports/heat?server&days&bucket=day\|hour` | 改价/同步热度 |
+| POST | `/api/game/token-info` | 识别 token 所属区服（仅展示，不保存 token；不接收区服参数） |
+| POST | `/api/game/sync` | 游戏直连同步；可带可选 `server`（仅 `allowSyncServer` 账号生效，否则 403）；每账号 30 秒一次；token 缺省用本账号已保存 token |
+| GET/PUT | `/api/sync-settings` | 本账号定时同步配置；PUT 可带 `server` 写入 `server_override`（无权限且非空返回 403）；不返回 token 明文，返回 `hasToken`、`serverOverride`、`allowSyncServer` |
+| POST | `/api/sync-settings/run` | 立即同步 |
+| GET | `/api/sync-settings/logs` | 本账号同步记录 |
+| GET | `/api/reports/movers`、`/heat` | 涨跌幅 / 热度 |
 
-错误码：`0` 成功；`40901` 重复；`40902` 被引用不可删除；`40903` 价格已被他人更新（乐观并发冲突）。
+错误码：`0` 成功；`40010` 卡密启用后新账号缺卡密；`40111` 设备不匹配；`40112` 签名无效；`40301` 卡密到期或试用结束；`40302` 账号封禁；`40303` 注册关闭；`40901` 字典重复/被引用；`40902` 区服被引用；`40903` 价格并发冲突；`40910` 设备数超限；`50301` 后台未启用。
 
 ### WebSocket `/ws`
 
-客户端连接后服务端推送 `hello`；改价、字典变更、同步完成/失败、设置更新等事件会广播给所有在线页面。客户端每 25 秒发送 `{type:'ping'}` 保活，服务端回 `pong`。消息类型：
+连接地址 `/ws?token=<session>&device=<deviceId>`，校验失败关闭码 4401（未认证）/ 4403（账号不可用）。服务端只向同账号在线设备广播：
 
+- `hello`（账号昵称、在线设备数）
 - `price.updated` `{server,city,operator,items[]}`（`items` 为空表示需刷新）
 - `dict.changed`、`server.deleted`、`settings.updated`
 - `sync.finished`、`sync.failed`
 
-### 游戏直连同步
+客户端每 25 秒发送 `{type:'ping'}`，服务端回 `pong`。
 
-浏览器登录 https://www.wanyiwan.top/game/sgbhsd ，F12 → Application → Local Storage → 复制 `x-game-token-pcweb`（JWT，有效期约 12 天）填入「同步」或「定时」即可。token 保存在当前账号下（换账号登录只能看到自己的 token）；服务端自动完成：换取 authCode → SDK 登录 → 区服登录 → WebSocket 登录 → 逐城拉取行情（游戏以分为单位，落库 ÷100 为税前原价），并将各城税率写入 `city_taxes`（每次同步按最新税率覆盖）。
+## 八、游戏直连同步
 
-- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%，随账号保存在服务端，换设备登录自动恢复）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数与游戏显示一致。切换减免只影响显示，不写库。
-- 手工录入 / Excel 导入填写的是自己看到税后价，服务端按当前减免与该城税率反推原价入库；税率未知的城池按原价处理（不折算）。
+浏览器登录 https://www.wanyiwan.top/game/sgbhsd ，复制 `x-game-token-pcweb`（JWT，有效期约 12 天）填入「同步」或「定时」。token 保存在当前账号下，其他账号不可见。服务端自动完成：换取 authCode → SDK 登录 → 识别 token 所属区服 → 区服登录 → WebSocket 登录 → 逐城拉取行情（游戏以分为单位，落库 ÷100 为税前原价），并将各城税率写入 `city_taxes`（每次同步按最新税率覆盖）。
+
+### 获取登录 token
+
+1. 在电脑浏览器打开游戏网页端，登录要同步价格的账号。
+2. 按 `F12`（或右键 → 检查）打开开发者工具，切换到 **Application / 应用**。
+3. 左侧选择 **Storage → Local Storage**，点击游戏页面对应的域名。
+4. 在右侧列表找到键名 `x-game-token-pcweb`，复制它的 **Value**。
+5. 回到本系统，把完整 Value 粘贴到「从游戏同步价格」或「定时自动同步」的登录 token 输入框。
+
+Chrome / Edge 在 Application → Local Storage；Firefox 在 存储 → 本地存储。token 一般可用约 12 天，失效后重新登录并重新复制。token 等同于游戏账号登录凭证，请勿发给他人或提交到仓库。
+
+以上为默认教程。管理员可在后台「设置 → token 获取教程」用 Markdown 自定义文字、链接和图片，登录页的「如何获取卡密」提示同样可配置；服务端会过滤脚本、事件属性等危险 HTML，外链图片需使用 HTTPS。
+
+### 区服处理
+
+- 默认按 token 登录信息自动识别：优先角色区服 `oServerId`，回退角色区服列表与赛季服。
+- 管理员可在后台按账号开启「区服参数」权限，默认关闭。开启后手动同步可传 `server`，定时同步可保存 `server_override`；留空仍自动识别。
+- 覆盖值只替换价格落库的区服名；赛季节点 / `capitalNodeId` 仍由 token 的 `serverId` 决定，不能把显示区服与赛季服混用。
+
+### 同步细节
+
+- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%，按账号保存）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数。
+- 手工录入 / Excel 导入填写的是税后价，服务端按当前减免与该城税率反推原价入库；税率未知的城池按原价处理。
 - 每城仅 3 个商品可买入（2104 中 type=2），全部 25 个商品均可卖出（type=0/1）；非可购商品的买入价落库为 NULL。
-- 单次同步全部 175 城约 30~60 秒，返回 `{queried,saved,created,updated,newCities[],failed[]}`；字典里缺失的城池同步时自动登记（见 `newCities`）并清缓存广播刷新，赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
-- 定时同步使用「定时」页保存 token 的账号的 token（`sync_settings.token_account_id`），到期换 token 后重新保存即可；旧版单行 token 仅作升级兜底。
-- 命令行：`node server/scripts/game-sync.js <token> [区服] [更新人]`，或 `--settings` 复用定时同步配置。
+- 单次同步全部 175 城约 30~60 秒；赛季未开放的州城（当前为 node 156-175，lv5-7）可能超时并列入 `failed`，不影响其他城池。
+- 调度器按账号注册 cron，同账号同步串行；修改定时设置后自动重建任务。
+- 命令行：`node server/scripts/game-sync.js <账号ID> <token> [操作人]` 直接按 token 自动识别；`--settings` 方式执行本账号定时配置，授权账号会使用已保存的 `server_override`。
 
-## 七、数据表
+## 九、数据表
 
 | 表 | 说明 |
 | --- | --- |
-| `accounts` | 账号（昵称唯一、scrypt 密码哈希、会话、本人游戏 token） |
+| `accounts` | 账号（昵称唯一、scrypt 密码、状态、到期时间、卡密、设备上限、当前区服、区服参数权限） |
+| `sessions` | 设备会话（token、账号、device_id/name、IP、最后活跃） |
+| `invite_keys` | 卡密（code 唯一、类型、状态、批次、备注、使用者、使用时间） |
+| `app_settings` | 全局设置单行（注册开关、公告、默认设备上限、卡密启用时间、卡密提示与 token 教程 Markdown） |
 | `dict_items` | 字典（city/commodity，`(type,name)` 唯一，`burden` 负重） |
 | `servers` | 区服 |
-| `prices` | 税前原价（`server_id+city_id+commodity_id` 唯一，含更新时间/更新人） |
-| `price_history` | 改价流水（原价旧值/新值/操作人/时间，按 `HISTORY_LIMIT` 裁剪） |
-| `city_taxes` | 城池税率（`server_id+city_id` 唯一，游戏同步写入，0.1~0.9） |
-| `city_nodes` | 城池游戏节点与地图坐标（gridX/gridY） |
-| `sync_settings` | 定时同步单行配置（开关/cron/区服/更新人/绑定 token 的账号/上次状态） |
-| `sync_log` | 同步运行记录（触发方式、查询/写入数、失败数、消息） |
+| `prices` | 税前原价（`account_id+server_id+city_id+commodity_id` 唯一） |
+| `price_history` | 改价流水（按账号隔离，按 `HISTORY_LIMIT` 裁剪） |
+| `city_taxes` | 城池税率（`account_id+server_id+city_id` 唯一，游戏同步写入） |
+| `city_nodes` | 城池游戏节点与地图坐标（全局共享） |
+| `sync_settings` | 每账号一行定时配置（开关/cron/更新人/上次状态；`server_name` 为展示缓存，`server_override` 为授权账号的区服覆盖值） |
+| `sync_log` | 同步运行记录（按账号隔离） |
 
-## 八、备份与维护
+## 十、备份与迁移
 
 ```bash
 ./deploy.sh backup                        # MySQL → backup/mysql-*.sql
@@ -237,19 +304,36 @@ sgbhsdPriceShare/
 ./deploy.sh backup                        # 无 mysql 服务时备份 SQLite → backup/price-*.db
 ```
 
-MySQL 数据位于 Docker 卷 `mysql-data`，Redis 位于 `redis-data`；`./data` 保留 SQLite 兜底库与迁移源。`docker compose down` 不会删除命名卷，`down -v` 才会。
+从旧 SQLite 迁移到 MySQL：
 
-## 九、测试与 CI
+```bash
+docker compose exec app npm run db:migrate            # 目标库为空时
+docker compose exec app npm run db:migrate -- --force # 目标库已有数据时合并
+```
 
-- `npm test`：39 项测试，覆盖账号会话、字典、价格、并发冲突、导入导出、游戏协议解析、税率与账号减免、报表、定时设置、健康检查（SQLite 临时库）。
-- `npm run test:smoke`：启动真实 HTTP 服务，验证健康检查、价格写入/查询、40903 冲突与清理。
+迁移脚本兼容旧版共享库与新卡密库：字典、区服、账号（含区服参数权限）、卡密、价格、历史、税率、坐标、定时设置（含 `server_override`）与同步日志都会导入；旧数据没有 `account_id` 时归入「历史归属账号」（旧 token 所属账号，否则最早注册账号）。本地 SQLite 旧库没有账号时，**首个注册的账号会自动接管旧数据**。会话不迁移，升级后需重新登录以绑定设备。
+
+## 十一、安全与加固说明
+
+- 所有已登录 API 强制 HMAC 签名 + 时间窗 + nonce 去重，降低抓包重放与脚本直刷风险。
+- 登录限流：用户登录 40 次 / 5 分钟 / IP；后台登录 10 次 / 15 分钟 / IP；同步 1 次 / 30 秒 / 账号。
+- 会话 token 仅存服务端，浏览器 localStorage 保存；封禁/重置密码/到期会立即注销会话。
+- 管理 token 保存在服务端内存（12 小时），服务重启后需重新登录。
+- 前端生产构建使用 esbuild 压缩 + javascript-obfuscator 混淆；`/bundle/*` 优先返回 `public/dist` 产物，缺失时回退源码（不影响功能）。
+- CSP、`X-Frame-Options`、`nosniff` 等安全头默认开启；`/admin` 不被 Service Worker 缓存，避免缓存串页。
+- 前端会在非安全上下文（HTTP 局域网）使用内置纯 JS SHA-256/HMAC 实现，保证签名在无 `crypto.subtle` 时仍可用；正式环境仍建议启用 HTTPS。
+
+## 十二、测试与 CI
+
+- `npm test`：50 项，覆盖账号/卡密/试用启用/续期/到期/封禁、设备上限与踢出、签名与重放、数据隔离、字典只读、价格并发、导入导出、游戏协议解析、税率、报表、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
+- `npm run test:smoke`：启动真实 HTTP 服务（SQLite 默认使用临时库），验证卡密注册、HMAC 签名请求、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；
-  - `mysql-redis`：启动 MySQL 8.4 + Redis 7 服务，执行冒烟自检，验证双驱动与缓存路径。
+  - `mysql-redis`：启动 MySQL 8.4 + Redis 7，执行冒烟自检，验证双驱动与缓存路径。
 
-## 十、后续可扩展
+## 十三、后续可扩展
 
-1. 按区服分配编辑权限 / 操作审计与回滚。
+1. 卡密使用审计与导出增强（按批次统计注册转化）。
 2. 定时同步失败通知（企业微信/QQ 机器人）。
 3. 报表导出与历史趋势预测。
 4. 前端组件测试与 Playwright E2E。

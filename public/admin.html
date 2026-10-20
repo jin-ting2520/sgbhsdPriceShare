@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#9e2b25">
+  <title>管理后台 · 三国冰河时代跑商价格</title>
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/element-plus/index.css">
+  <link rel="stylesheet" href="/css/app.css">
+  <style>
+    [v-cloak]{display:none}
+    body{background:#f5f3ee}
+    .admin-head{display:flex;align-items:center;gap:12px;padding:14px 20px;background:#fff;border-bottom:1px solid #e6e3dc}
+    .admin-head .logo{width:38px;height:38px;border-radius:10px;background:#9e2b25;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+    .admin-head .title{font-weight:700}
+    .admin-head .sub{font-size:12px;color:#6b7280}
+    .admin-wrap{max-width:1400px;margin:0 auto;padding:16px}
+    .admin-wrap .el-tabs{background:#fff;border-radius:12px;padding:12px 16px}
+    .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-bottom:8px}
+    .stat-card{background:#faf9f6;border:1px solid #e6e3dc;border-radius:10px;padding:12px}
+    .stat-card b{display:block;font-size:22px;margin-top:4px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+    .code-box{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;background:#faf9f6;border:1px solid #e6e3dc;border-radius:8px;padding:10px;max-height:220px;overflow:auto}
+    .muted{color:#6b7280;font-size:12px}
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "vue": "/vendor/vue/vue.esm-browser.prod.js",
+      "element-plus": "/vendor/element-plus/index.full.min.mjs",
+      "element-plus/locale/zh-cn": "/vendor/element-plus/locale/zh-cn.min.mjs"
+    }
+  }
+  </script>
+</head>
+
+<body>
+<div id="admin" v-cloak>
+
+  <div v-if="!token" class="login-page">
+    <div class="login-card">
+      <div class="login-logo">管</div>
+      <div class="login-title">管理后台</div>
+      <el-input v-model="password" type="password" show-password size="large"
+        placeholder="请输入管理密码（ADMIN_PASSWORD）" @keyup.enter="login"></el-input>
+      <el-button type="primary" size="large" style="width:100%;margin-top:14px"
+        :loading="loggingIn" @click="login">登 录</el-button>
+      <p class="login-hint">仅限管理员使用。未配置 ADMIN_PASSWORD 时后台自动禁用。</p>
+    </div>
+  </div>
+
+  <template v-else>
+    <div class="admin-head">
+      <div class="logo">价</div>
+      <div>
+        <div class="title">三国冰河时代跑商价格 · 管理后台</div>
+        <div class="sub">卡密 · 账号 · 字典 · 区服 · 全局设置 · 同步日志</div>
+      </div>
+      <div style="flex:1"></div>
+      <el-button size="small" @click="logout">退出登录</el-button>
+    </div>
+
+    <div class="admin-wrap">
+      <el-tabs v-model="tab" @tab-change="onTabChange">
+        <el-tab-pane label="概览" name="overview">
+          <div class="stat-grid" v-loading="loading.overview">
+            <div class="stat-card">账号总数<b>{{ overview.accounts }}</b></div>
+            <div class="stat-card">封禁中<b>{{ overview.banned }}</b></div>
+            <div class="stat-card">已过期<b>{{ overview.expired }}</b></div>
+            <div class="stat-card">在线会话<b>{{ overview.sessions }}</b></div>
+            <div class="stat-card">未使用卡密<b>{{ overview.keysUnused }}</b></div>
+            <div class="stat-card">已使用卡密<b>{{ overview.keysUsed }}</b></div>
+            <div class="stat-card">价格记录<b>{{ overview.prices }}</b></div>
+            <div class="stat-card">变更历史<b>{{ overview.history }}</b></div>
+            <div class="stat-card">区服数<b>{{ overview.servers }}</b></div>
+            <div class="stat-card">同步成功<b>{{ overview.syncOk }}/{{ overview.syncTotal }}</b></div>
+          </div>
+          <p class="muted">管理登录有效期 {{ overview.adminTtlHours || 12 }} 小时；数据按账号隔离，管理端可查看与维护全部账号。</p>
+          <el-button size="small" @click="loadOverview">刷新</el-button>
+        </el-tab-pane>
+
+        <el-tab-pane label="卡密" name="keys">
+          <div class="toolbar">
+            <el-select v-model="keyForm.type" style="width:130px">
+              <el-option label="1 天卡" value="day"></el-option>
+              <el-option label="1 月卡" value="month"></el-option>
+              <el-option label="永久卡" value="forever"></el-option>
+            </el-select>
+            <el-input-number v-model="keyForm.count" :min="1" :max="500" style="width:120px"></el-input-number>
+            <el-button-group>
+              <el-button size="small" @click="keyForm.count = 10">10</el-button>
+              <el-button size="small" @click="keyForm.count = 50">50</el-button>
+              <el-button size="small" @click="keyForm.count = 100">100</el-button>
+              <el-button size="small" @click="keyForm.count = 500">500</el-button>
+            </el-button-group>
+            <el-input v-model="keyForm.note" placeholder="批次备注（可选）" style="width:180px" maxlength="100"></el-input>
+            <el-button type="primary" :loading="loading.keys" @click="createKeys">生成卡密</el-button>
+            <span class="muted">单批最多 500 张</span>
+            <el-button @click="exportKeys">导出 CSV</el-button>
+          </div>
+          <div v-if="createdCodes.length" style="margin-bottom:10px">
+            <div class="toolbar">
+              <b>本批卡密（{{ createdCodes.length }} 条，批次 {{ createdBatch }}）</b>
+              <el-button size="small" @click="copyCodes">复制全部</el-button>
+              <el-button size="small" @click="createdCodes = []">收起</el-button>
+            </div>
+            <div class="code-box">{{ createdCodes.join('\n') }}</div>
+          </div>
+
+          <div class="toolbar">
+            <el-input v-model="keyFilter.q" placeholder="搜索卡密/备注" style="width:200px" clearable
+              @keyup.enter="loadKeys(1)" @clear="loadKeys(1)"></el-input>
+            <el-select v-model="keyFilter.status" placeholder="状态" clearable style="width:120px" @change="loadKeys(1)">
+              <el-option label="未使用" value="unused"></el-option>
+              <el-option label="已使用" value="used"></el-option>
+              <el-option label="已作废" value="revoked"></el-option>
+            </el-select>
+            <el-select v-model="keyFilter.type" placeholder="类型" clearable style="width:120px" @change="loadKeys(1)">
+              <el-option label="1 天" value="day"></el-option>
+              <el-option label="1 月" value="month"></el-option>
+              <el-option label="永久" value="forever"></el-option>
+            </el-select>
+            <el-button @click="loadKeys(1)">查询</el-button>
+          </div>
+
+          <el-table :data="keys.items" size="small" border stripe max-height="46vh" v-loading="loading.keys">
+            <el-table-column label="卡密" prop="code" width="210"></el-table-column>
+            <el-table-column label="类型" prop="typeName" width="80" align="center"></el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="s">
+                <el-tag size="small" effect="plain"
+                  :type="s.row.status === 'unused' ? 'success' : s.row.status === 'used' ? 'info' : 'danger'">
+                  {{ s.row.statusName }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="备注" prop="note" min-width="120" show-overflow-tooltip></el-table-column>
+            <el-table-column label="使用账号" prop="accountName" width="120"></el-table-column>
+            <el-table-column label="批次" prop="batchId" width="170" show-overflow-tooltip></el-table-column>
+            <el-table-column label="生成时间" prop="createdAt" width="150"></el-table-column>
+            <el-table-column label="使用时间" prop="usedAt" width="150"></el-table-column>
+            <el-table-column label="操作" width="80" align="center">
+              <template #default="s">
+                <el-button v-if="s.row.status === 'unused'" link type="danger" size="small"
+                  @click="revokeKey(s.row)">作废</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
+            <el-pagination layout="total, prev, pager, next" :total="keys.total" :page-size="keys.pageSize"
+              :current-page="keys.page" @current-change="loadKeys"></el-pagination>
+          </div>
+
+          <div class="toolbar" style="margin-top:16px"><b>批次汇总</b><el-button size="small" @click="loadBatches">刷新</el-button></div>
+          <el-table :data="batches" size="small" border max-height="34vh">
+            <el-table-column label="批次" prop="batchId" width="180" show-overflow-tooltip></el-table-column>
+            <el-table-column label="类型" prop="typeName" width="80" align="center"></el-table-column>
+            <el-table-column label="总数" prop="total" width="70" align="center"></el-table-column>
+            <el-table-column label="未用" prop="unused" width="70" align="center"></el-table-column>
+            <el-table-column label="已用" prop="used" width="70" align="center"></el-table-column>
+            <el-table-column label="作废" prop="revoked" width="70" align="center"></el-table-column>
+            <el-table-column label="备注" prop="note" min-width="120" show-overflow-tooltip></el-table-column>
+            <el-table-column label="生成时间" prop="createdAt" width="150"></el-table-column>
+            <el-table-column label="操作" width="110" align="center">
+              <template #default="s">
+                <el-button link type="danger" size="small" @click="revokeBatch(s.row)">作废未用</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="账号" name="accounts">
+          <div class="toolbar">
+            <el-input v-model="accountFilter.q" placeholder="搜索昵称" style="width:200px" clearable
+              @keyup.enter="loadAccounts(1)" @clear="loadAccounts(1)"></el-input>
+            <el-select v-model="accountFilter.status" placeholder="状态" clearable style="width:130px" @change="loadAccounts(1)">
+              <el-option label="正常" value="active"></el-option>
+              <el-option label="封禁" value="banned"></el-option>
+              <el-option label="已过期" value="expired"></el-option>
+            </el-select>
+            <el-button @click="loadAccounts(1)">查询</el-button>
+          </div>
+          <el-table :data="accounts.items" size="small" border stripe max-height="56vh" v-loading="loading.accounts">
+            <el-table-column label="ID" prop="id" width="60" align="center"></el-table-column>
+            <el-table-column label="昵称" prop="name" min-width="110"></el-table-column>
+            <el-table-column label="状态" width="80" align="center">
+              <template #default="s">
+                <el-tag size="small" effect="plain" :type="s.row.status === 'banned' ? 'danger' : s.row.expired ? 'warning' : 'success'">
+                  {{ s.row.status === 'banned' ? '封禁' : s.row.expired ? '已过期' : '正常' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="到期时间" width="150">
+              <template #default="s">{{ s.row.expiresAt || '永久' }}</template>
+            </el-table-column>
+            <el-table-column label="卡密" prop="keyCode" width="190" show-overflow-tooltip></el-table-column>
+            <el-table-column label="设备" width="90" align="center">
+              <template #default="s">{{ s.row.sessions }}/{{ s.row.deviceLimit }}</template>
+            </el-table-column>
+            <el-table-column label="价格数" prop="prices" width="75" align="center"></el-table-column>
+            <el-table-column label="当前区服" prop="currentServer" width="100" align="center"></el-table-column>
+            <el-table-column label="区服参数" width="90" align="center">
+              <template #default="s">
+                <el-tag size="small" effect="plain" :type="s.row.allowSyncServer ? 'success' : 'info'">
+                  {{ s.row.allowSyncServer ? '允许' : '禁止' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近活跃" prop="lastSeenAt" width="150"></el-table-column>
+            <el-table-column label="注册时间" prop="createdAt" width="150"></el-table-column>
+            <el-table-column label="操作" width="110" align="center">
+              <template #default="s">
+                <el-dropdown trigger="click" @command="cmd => accountAction(s.row, cmd)">
+                  <el-button size="small" plain>管理</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="extend">续期（按天）</el-dropdown-item>
+                      <el-dropdown-item command="renew">使用卡密续期</el-dropdown-item>
+                      <el-dropdown-item command="expires">设置到期时间</el-dropdown-item>
+                      <el-dropdown-item command="device">调整设备上限</el-dropdown-item>
+                      <el-dropdown-item v-if="!s.row.allowSyncServer" command="allow-server">允许传区服参数</el-dropdown-item>
+                      <el-dropdown-item v-else command="deny-server">禁止传区服参数</el-dropdown-item>
+                      <el-dropdown-item command="password">重置密码</el-dropdown-item>
+                      <el-dropdown-item command="kick">踢下线</el-dropdown-item>
+                      <el-dropdown-item command="ban" v-if="s.row.status !== 'banned'">封禁</el-dropdown-item>
+                      <el-dropdown-item command="unban" v-else>解封</el-dropdown-item>
+                      <el-dropdown-item command="delete" divided style="color:#c0392b">删除账号</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
+            <el-pagination layout="total, prev, pager, next" :total="accounts.total" :page-size="accounts.pageSize"
+              :current-page="accounts.page" @current-change="loadAccounts"></el-pagination>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="字典" name="dict">
+          <div class="toolbar">
+            <el-radio-group v-model="dictType" @change="loadDict">
+              <el-radio-button label="city">城池</el-radio-button>
+              <el-radio-button label="commodity">商品</el-radio-button>
+            </el-radio-group>
+            <el-input v-model="newDictName" :placeholder="dictType === 'city' ? '新城池名称' : '新商品名称'" style="width:180px"
+              maxlength="50" @keyup.enter="addDict"></el-input>
+            <el-input v-if="dictType === 'commodity'" v-model="newDictBurden" placeholder="负重（可选）"
+              style="width:130px" inputmode="decimal"></el-input>
+            <el-button type="primary" @click="addDict">新增</el-button>
+            <el-button @click="loadDict">刷新</el-button>
+          </div>
+          <el-table :data="dictItems" size="small" border stripe max-height="56vh" v-loading="loading.dict">
+            <el-table-column label="ID" prop="id" width="70" align="center"></el-table-column>
+            <el-table-column label="名称" prop="name" min-width="140"></el-table-column>
+            <el-table-column label="负重" width="90" align="center">
+              <template #default="s">{{ s.row.burden ?? '-' }}</template>
+            </el-table-column>
+            <el-table-column label="排序" prop="sortOrder" width="80" align="center"></el-table-column>
+            <el-table-column label="更新时间" prop="updatedAt" width="160"></el-table-column>
+            <el-table-column label="操作" width="150" align="center">
+              <template #default="s">
+                <el-button link size="small" @click="renameDict(s.row)">改名</el-button>
+                <el-button v-if="dictType === 'commodity'" link size="small" @click="setBurden(s.row)">负重</el-button>
+                <el-button link type="danger" size="small" @click="deleteDict(s.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="区服" name="servers">
+          <div class="toolbar">
+            <el-input v-model="newServer" placeholder="新区服名称（如 1344）" style="width:180px" maxlength="50"
+              @keyup.enter="addServer"></el-input>
+            <el-button type="primary" @click="addServer">新增</el-button>
+            <el-button @click="loadServers">刷新</el-button>
+          </div>
+          <el-table :data="servers" size="small" border stripe max-height="56vh" v-loading="loading.servers">
+            <el-table-column label="ID" prop="id" width="70" align="center"></el-table-column>
+            <el-table-column label="区服" prop="name" min-width="130"></el-table-column>
+            <el-table-column label="价格条数" prop="prices" width="100" align="center"></el-table-column>
+            <el-table-column label="绑定定时账号" prop="boundAccounts" width="120" align="center"></el-table-column>
+            <el-table-column label="创建时间" prop="createdAt" width="160"></el-table-column>
+            <el-table-column label="操作" width="140" align="center">
+              <template #default="s">
+                <el-button link size="small" @click="renameServer(s.row)">改名</el-button>
+                <el-button link type="danger" size="small" @click="deleteServer(s.row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="设置" name="settings">
+          <el-form label-width="150px" style="max-width:900px" v-loading="loading.settings">
+            <el-form-item label="开放注册">
+              <el-switch v-model="appSettings.registrationEnabled"></el-switch>
+              <span class="muted" style="margin-left:8px">关闭后新昵称无法注册，已注册账号仍可登录</span>
+            </el-form-item>
+            <el-form-item label="卡密启用时间">
+              <el-date-picker v-model="appSettings.keyRequiredAt" type="datetime" value-format="YYYY-MM-DD HH:mm:ss"
+                format="YYYY-MM-DD HH:mm" placeholder="选择启用时间" style="width:240px"></el-date-picker>
+              <div class="muted settings-tip">启用前新账号可不填卡密直接注册，到期处显示“试用中”；启用后必须输入卡密才能注册，试用账号也需补卡密才能登录。修改时间会同步所有无卡密试用账号的到期时间。</div>
+            </el-form-item>
+            <el-form-item label="默认设备上限">
+              <el-input-number v-model="appSettings.defaultDeviceLimit" :min="1" :max="20"></el-input-number>
+              <span class="muted" style="margin-left:8px">仅影响新注册账号</span>
+            </el-form-item>
+            <el-form-item label="公告">
+              <el-input v-model="appSettings.announcement" type="textarea" :rows="4" maxlength="500" show-word-limit
+                placeholder="可选，保存后展示给用户"></el-input>
+            </el-form-item>
+            <el-form-item label="卡密获取提示">
+              <el-input v-model="appSettings.keyHelpMd" type="textarea" :rows="7" maxlength="20000" show-word-limit
+                placeholder="支持 Markdown，显示在登录页卡密输入框下方"></el-input>
+              <div class="toolbar settings-preview-bar">
+                <el-button size="small" :loading="previewing.key" @click="previewHelp('key')">预览</el-button>
+                <span class="muted">支持标题、列表、链接、图片，危险 HTML 会被过滤</span>
+              </div>
+              <div v-if="appSettings.keyHelpHtml" class="md-preview" v-html="appSettings.keyHelpHtml"></div>
+            </el-form-item>
+            <el-form-item label="token 获取教程">
+              <el-input v-model="appSettings.tokenHelpMd" type="textarea" :rows="9" maxlength="20000" show-word-limit
+                placeholder="支持 Markdown，显示在同步价格和定时同步弹窗中"></el-input>
+              <div class="toolbar settings-preview-bar">
+                <el-button size="small" :loading="previewing.token" @click="previewHelp('token')">预览</el-button>
+                <span class="muted">用户端会渲染为富文本，可放文字、图片和链接</span>
+              </div>
+              <div v-if="appSettings.tokenHelpHtml" class="md-preview" v-html="appSettings.tokenHelpHtml"></div>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="loading.settings" @click="saveSettings">保存设置</el-button>
+              <el-button @click="loadSettings">重置</el-button>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+
+        <el-tab-pane label="同步日志" name="logs">
+          <div class="toolbar">
+            <el-input v-model="logAccountId" placeholder="账号 ID（可选）" style="width:150px" inputmode="numeric"
+              @keyup.enter="loadLogs(1)"></el-input>
+            <el-button @click="loadLogs(1)">查询</el-button>
+            <el-button type="danger" plain @click="clearLogs">清空日志</el-button>
+          </div>
+          <el-table :data="logs.items" size="small" border stripe max-height="56vh" v-loading="loading.logs">
+            <el-table-column label="ID" prop="id" width="70" align="center"></el-table-column>
+            <el-table-column label="账号" prop="accountName" width="110"></el-table-column>
+            <el-table-column label="账号ID" prop="account_id" width="75" align="center"></el-table-column>
+            <el-table-column label="区服" prop="serverName" width="90"></el-table-column>
+            <el-table-column label="触发" width="70" align="center">
+              <template #default="s">{{ s.row.trigger_type === 'cron' ? '定时' : s.row.trigger_type === 'cli' ? 'CLI' : '手动' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" prop="status" width="80" align="center"></el-table-column>
+            <el-table-column label="查询/写入" width="100" align="center">
+              <template #default="s">{{ s.row.queried ?? '-' }} / {{ s.row.saved ?? '-' }}</template>
+            </el-table-column>
+            <el-table-column label="失败" prop="failed_count" width="65" align="center"></el-table-column>
+            <el-table-column label="开始时间" prop="started_at" width="150"></el-table-column>
+            <el-table-column label="结束时间" prop="finished_at" width="150"></el-table-column>
+            <el-table-column label="说明" prop="message" min-width="150" show-overflow-tooltip></el-table-column>
+          </el-table>
+          <div class="toolbar" style="margin-top:10px;justify-content:flex-end">
+            <el-pagination layout="total, prev, pager, next" :total="logs.total" :page-size="logs.pageSize"
+              :current-page="logs.page" @current-change="loadLogs"></el-pagination>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
+    </div>
+  </template>
+</div>
+
+<script type="module" src="/bundle/admin.js"></script>
+</body>
+</html>

@@ -12,6 +12,7 @@
 
 const fs = require('node:fs');
 const nodePath = require('node:path');
+const { DEFAULT_KEY_HELP_MD, DEFAULT_TOKEN_HELP_MD } = require('./markdown');
 
 const DRIVER = (process.env.DB_DRIVER || (process.env.MYSQL_HOST ? 'mysql' : 'sqlite')).toLowerCase();
 const IS_MYSQL = DRIVER === 'mysql';
@@ -21,6 +22,7 @@ const DB_FILE = process.env.PRICE_DB
   ? nodePath.resolve(process.env.PRICE_DB)
   : nodePath.join(DATA_DIR, 'price.db');
 const HISTORY_LIMIT = Math.max(1000, Number(process.env.HISTORY_LIMIT) || 20000);
+const DEFAULT_KEY_REQUIRED_AT = '2026-10-22 00:00:00';
 
 /* ------------------------------ 种子数据 ------------------------------ */
 
@@ -65,13 +67,17 @@ const MYSQL_CFG = {
   multipleStatements: false,
 };
 
-function nowText() {
+function formatTime(ms) {
   return new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'Asia/Shanghai',
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false,
-  }).format(new Date());
+  }).format(new Date(ms));
+}
+
+function nowText() {
+  return formatTime(Date.now());
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -100,6 +106,7 @@ CREATE TABLE IF NOT EXISTS servers (
 
 CREATE TABLE IF NOT EXISTS prices (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id   INTEGER NOT NULL DEFAULT 0,
   server_id    INTEGER NOT NULL REFERENCES servers(id)    ON DELETE CASCADE,
   city_id      INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
   commodity_id INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
@@ -107,12 +114,13 @@ CREATE TABLE IF NOT EXISTS prices (
   sell_price   REAL,
   operator     TEXT,
   updated_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-  UNIQUE (server_id, city_id, commodity_id)
+  UNIQUE (account_id, server_id, city_id, commodity_id)
 );
-CREATE INDEX IF NOT EXISTS idx_prices_lookup ON prices(server_id, city_id, commodity_id);
+CREATE INDEX IF NOT EXISTS idx_prices_lookup ON prices(account_id, server_id, city_id, commodity_id);
 
 CREATE TABLE IF NOT EXISTS price_history (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id   INTEGER NOT NULL DEFAULT 0,
   server_id    INTEGER NOT NULL,
   city_id      INTEGER NOT NULL,
   commodity_id INTEGER NOT NULL,
@@ -122,15 +130,16 @@ CREATE TABLE IF NOT EXISTS price_history (
   operator     TEXT,
   created_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
-CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(server_id, city_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(account_id, server_id, city_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_history_time ON price_history(created_at);
 
 CREATE TABLE IF NOT EXISTS city_taxes (
+  account_id INTEGER NOT NULL DEFAULT 0,
   server_id  INTEGER NOT NULL,
   city_id    INTEGER NOT NULL,
   tax        REAL    NOT NULL,
   updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-  PRIMARY KEY (server_id, city_id)
+  PRIMARY KEY (account_id, server_id, city_id)
 );
 
 CREATE TABLE IF NOT EXISTS city_nodes (
@@ -150,25 +159,68 @@ CREATE TABLE IF NOT EXISTS accounts (
   token         TEXT,
   session_token TEXT    UNIQUE,
   relief        REAL    NOT NULL DEFAULT 5,
+  status        TEXT    NOT NULL DEFAULT 'active',
+  expires_at    TEXT,
+  key_code      TEXT,
+  device_limit  INTEGER NOT NULL DEFAULT 3,
+  current_server TEXT   NOT NULL DEFAULT '',
+  allow_sync_server INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  token        TEXT    NOT NULL UNIQUE,
+  account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id    TEXT,
+  device_name  TEXT,
+  ip           TEXT,
+  created_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  last_seen_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS invite_keys (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  code       TEXT    NOT NULL UNIQUE,
+  type       TEXT    NOT NULL CHECK (type IN ('day', 'month', 'forever')),
+  status     TEXT    NOT NULL DEFAULT 'unused' CHECK (status IN ('unused', 'used', 'revoked')),
+  note       TEXT,
+  batch_id   TEXT,
+  account_id INTEGER,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_keys_status ON invite_keys(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_keys_batch ON invite_keys(batch_id);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  id                   INTEGER PRIMARY KEY CHECK (id = 1),
+  registration_enabled INTEGER NOT NULL DEFAULT 1,
+  announcement         TEXT    NOT NULL DEFAULT '',
+  key_help_md          TEXT    NOT NULL DEFAULT '',
+  token_help_md        TEXT    NOT NULL DEFAULT '',
+  key_required_at      TEXT    NOT NULL DEFAULT '2026-10-22 00:00:00',
+  default_device_limit INTEGER NOT NULL DEFAULT 3,
+  updated_at           TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS sync_settings (
-  id               INTEGER PRIMARY KEY CHECK (id = 1),
-  enabled          INTEGER NOT NULL DEFAULT 0,
-  cron_expr        TEXT    NOT NULL DEFAULT '0 */2 * * *',
-  token            TEXT,
-  token_account_id INTEGER,
-  server_name      TEXT    NOT NULL DEFAULT '',
-  operator         TEXT    NOT NULL DEFAULT '自动同步',
-  last_run_at      TEXT,
-  last_status      TEXT,
-  last_message     TEXT
+  account_id   INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  enabled      INTEGER NOT NULL DEFAULT 0,
+  cron_expr    TEXT    NOT NULL DEFAULT '0 */2 * * *',
+  server_name  TEXT    NOT NULL DEFAULT '',
+  server_override TEXT NOT NULL DEFAULT '',
+  operator     TEXT    NOT NULL DEFAULT '定时同步',
+  last_run_at  TEXT,
+  last_status  TEXT,
+  last_message TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sync_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id    INTEGER,
   trigger_type  TEXT    NOT NULL,
   server_name   TEXT,
   started_at    TEXT    NOT NULL,
@@ -179,6 +231,7 @@ CREATE TABLE IF NOT EXISTS sync_log (
   failed_count  INTEGER NOT NULL DEFAULT 0,
   message       TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_sync_log_account ON sync_log(account_id, id DESC);
 `;
 
 const MYSQL_SCHEMA = [
@@ -202,6 +255,7 @@ const MYSQL_SCHEMA = [
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS prices (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NOT NULL DEFAULT 0,
     server_id INT NOT NULL,
     city_id INT NOT NULL,
     commodity_id INT NOT NULL,
@@ -209,14 +263,15 @@ const MYSQL_SCHEMA = [
     sell_price DECIMAL(12,2) NULL,
     operator VARCHAR(20) NULL,
     updated_at DATETIME NOT NULL,
-    UNIQUE KEY uk_prices_scope (server_id, city_id, commodity_id),
-    KEY idx_prices_lookup (server_id, city_id, commodity_id),
+    UNIQUE KEY uk_prices_scope (account_id, server_id, city_id, commodity_id),
+    KEY idx_prices_lookup (account_id, server_id, city_id, commodity_id),
     CONSTRAINT fk_prices_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
     CONSTRAINT fk_prices_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE,
     CONSTRAINT fk_prices_commodity FOREIGN KEY (commodity_id) REFERENCES dict_items(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS price_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NOT NULL DEFAULT 0,
     server_id INT NOT NULL,
     city_id INT NOT NULL,
     commodity_id INT NOT NULL,
@@ -225,15 +280,16 @@ const MYSQL_SCHEMA = [
     new_value DECIMAL(12,2) NULL,
     operator VARCHAR(20) NULL,
     created_at DATETIME NOT NULL,
-    KEY idx_history_scope (server_id, city_id, created_at),
+    KEY idx_history_scope (account_id, server_id, city_id, created_at),
     KEY idx_history_time (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS city_taxes (
+    account_id INT NOT NULL DEFAULT 0,
     server_id INT NOT NULL,
     city_id INT NOT NULL,
     tax DECIMAL(4,2) NOT NULL,
     updated_at DATETIME NOT NULL,
-    PRIMARY KEY (server_id, city_id),
+    PRIMARY KEY (account_id, server_id, city_id),
     CONSTRAINT fk_city_taxes_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
     CONSTRAINT fk_city_taxes_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -253,25 +309,69 @@ const MYSQL_SCHEMA = [
     token TEXT NULL,
     session_token VARCHAR(128) NULL,
     relief DECIMAL(5,2) NOT NULL DEFAULT 5,
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    expires_at DATETIME NULL,
+    key_code VARCHAR(32) NULL,
+    device_limit INT NOT NULL DEFAULT 3,
+    current_server VARCHAR(50) NOT NULL DEFAULT '',
+    allow_sync_server TINYINT NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE KEY uk_accounts_name (name),
     UNIQUE KEY uk_accounts_session (session_token)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-  `CREATE TABLE IF NOT EXISTS sync_settings (
+  `CREATE TABLE IF NOT EXISTS sessions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    token VARCHAR(64) NOT NULL,
+    account_id INT NOT NULL,
+    device_id VARCHAR(64) NULL,
+    device_name VARCHAR(80) NULL,
+    ip VARCHAR(45) NULL,
+    created_at DATETIME NOT NULL,
+    last_seen_at DATETIME NULL,
+    UNIQUE KEY uk_sessions_token (token),
+    KEY idx_sessions_account (account_id, id),
+    CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS invite_keys (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(32) NOT NULL,
+    type VARCHAR(16) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'unused',
+    note VARCHAR(200) NULL,
+    batch_id VARCHAR(40) NULL,
+    account_id INT NULL,
+    created_at DATETIME NOT NULL,
+    used_at DATETIME NULL,
+    UNIQUE KEY uk_keys_code (code),
+    KEY idx_keys_status (status, id),
+    KEY idx_keys_batch (batch_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS app_settings (
     id TINYINT PRIMARY KEY,
+    registration_enabled TINYINT NOT NULL DEFAULT 1,
+    announcement VARCHAR(500) NOT NULL DEFAULT '',
+    key_help_md MEDIUMTEXT NULL,
+    token_help_md MEDIUMTEXT NULL,
+    key_required_at VARCHAR(19) NOT NULL DEFAULT '2026-10-22 00:00:00',
+    default_device_limit INT NOT NULL DEFAULT 3,
+    updated_at DATETIME NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS sync_settings (
+    account_id INT PRIMARY KEY,
     enabled TINYINT NOT NULL DEFAULT 0,
     cron_expr VARCHAR(64) NOT NULL DEFAULT '0 */2 * * *',
-    token TEXT NULL,
-    token_account_id INT NULL,
     server_name VARCHAR(50) NOT NULL DEFAULT '',
-    operator VARCHAR(20) NOT NULL DEFAULT '自动同步',
+    server_override VARCHAR(50) NOT NULL DEFAULT '',
+    operator VARCHAR(20) NOT NULL DEFAULT '定时同步',
     last_run_at DATETIME NULL,
     last_status VARCHAR(16) NULL,
-    last_message VARCHAR(500) NULL
+    last_message VARCHAR(500) NULL,
+    CONSTRAINT fk_sync_settings_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS sync_log (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NULL,
     trigger_type VARCHAR(16) NOT NULL,
     server_name VARCHAR(50) NULL,
     started_at DATETIME NOT NULL,
@@ -280,7 +380,8 @@ const MYSQL_SCHEMA = [
     queried INT NOT NULL DEFAULT 0,
     saved INT NOT NULL DEFAULT 0,
     failed_count INT NOT NULL DEFAULT 0,
-    message VARCHAR(500) NULL
+    message VARCHAR(500) NULL,
+    KEY idx_sync_log_account (account_id, id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 ];
 
@@ -400,25 +501,145 @@ async function doInit() {
       throw err;
     }
     sqlite.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-    sqlite.exec(SQLITE_SCHEMA);
+    runSqliteSchema(true);
     migrateSqlite();
+    runSqliteSchema(false);
   }
   await seed();
   console.log(`[db] 已就绪：${IS_MYSQL ? `MySQL ${MYSQL_CFG.host}:${MYSQL_CFG.port}/${MYSQL_CFG.database}` : `SQLite ${DB_FILE}`}`);
 }
 
-/** 存量 SQLite 库补列（老版本升级） */
+/** 逐条执行建表语句：老库可能缺列导致索引创建失败，先容错建表再迁移补列 */
+function runSqliteSchema(tolerant) {
+  for (const stmt of SQLITE_SCHEMA.split(';')) {
+    const sql = stmt.trim();
+    if (!sql) continue;
+    try {
+      sqlite.exec(sql);
+    } catch (err) {
+      if (!tolerant) console.warn(`[db] 建表/索引语句跳过：${err.message}`);
+    }
+  }
+}
+
+/** 存量 SQLite 库补列/改表（老版本升级） */
 function migrateSqlite() {
-  const hasCol = (table, col) =>
-    sqlite.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
+  const colsOf = table => sqlite.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  const hasCol = (table, col) => colsOf(table).includes(col);
+  const hasTable = table => !!sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+  const legacyAccount = '(SELECT COALESCE(MIN(id), 0) FROM accounts)';
+
+  // 更早版本的会话表（user_id/expires_at）无法复用，直接重建，强制重新登录
+  if (hasTable('sessions') && !hasCol('sessions', 'account_id')) sqlite.exec('DROP TABLE sessions');
+
   if (!hasCol('price_history', 'operator')) sqlite.exec('ALTER TABLE price_history ADD COLUMN operator TEXT');
   if (!hasCol('dict_items', 'burden')) sqlite.exec('ALTER TABLE dict_items ADD COLUMN burden REAL');
   if (!hasCol('prices', 'operator')) sqlite.exec('ALTER TABLE prices ADD COLUMN operator TEXT');
-  if (!hasCol('sync_settings', 'token_account_id')) sqlite.exec('ALTER TABLE sync_settings ADD COLUMN token_account_id INTEGER');
+
   if (!hasCol('accounts', 'relief')) sqlite.exec('ALTER TABLE accounts ADD COLUMN relief REAL NOT NULL DEFAULT 5');
+  if (!hasCol('accounts', 'status')) sqlite.exec("ALTER TABLE accounts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  if (!hasCol('accounts', 'expires_at')) sqlite.exec('ALTER TABLE accounts ADD COLUMN expires_at TEXT');
+  if (!hasCol('accounts', 'key_code')) sqlite.exec('ALTER TABLE accounts ADD COLUMN key_code TEXT');
+  if (!hasCol('accounts', 'device_limit')) sqlite.exec('ALTER TABLE accounts ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 3');
+  if (!hasCol('accounts', 'current_server')) sqlite.exec("ALTER TABLE accounts ADD COLUMN current_server TEXT NOT NULL DEFAULT ''");
+  if (!hasCol('accounts', 'allow_sync_server')) sqlite.exec('ALTER TABLE accounts ADD COLUMN allow_sync_server INTEGER NOT NULL DEFAULT 0');
+
+  if (!hasCol('app_settings', 'key_help_md')) {
+    sqlite.exec("ALTER TABLE app_settings ADD COLUMN key_help_md TEXT NOT NULL DEFAULT ''");
+    sqlite.prepare('UPDATE app_settings SET key_help_md = ? WHERE id = 1 AND key_help_md = ?').run(DEFAULT_KEY_HELP_MD, '');
+  }
+  if (!hasCol('app_settings', 'token_help_md')) {
+    sqlite.exec("ALTER TABLE app_settings ADD COLUMN token_help_md TEXT NOT NULL DEFAULT ''");
+    sqlite.prepare('UPDATE app_settings SET token_help_md = ? WHERE id = 1 AND token_help_md = ?').run(DEFAULT_TOKEN_HELP_MD, '');
+  }
+  if (!hasCol('app_settings', 'key_required_at')) {
+    sqlite.exec(`ALTER TABLE app_settings ADD COLUMN key_required_at TEXT NOT NULL DEFAULT '${DEFAULT_KEY_REQUIRED_AT}'`);
+  }
+
+  if (!hasCol('price_history', 'account_id')) {
+    sqlite.exec('ALTER TABLE price_history ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0');
+    sqlite.exec(`UPDATE price_history SET account_id = ${legacyAccount}`);
+  }
+  sqlite.exec('DROP INDEX IF EXISTS idx_history_scope');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(account_id, server_id, city_id, created_at DESC)');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_history_time ON price_history(created_at)');
+
+  if (!hasCol('prices', 'account_id')) {
+    sqlite.exec('ALTER TABLE prices RENAME TO prices_legacy');
+    sqlite.exec(`
+      CREATE TABLE prices (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id   INTEGER NOT NULL DEFAULT 0,
+        server_id    INTEGER NOT NULL REFERENCES servers(id)    ON DELETE CASCADE,
+        city_id      INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
+        commodity_id INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
+        buy_price    REAL,
+        sell_price   REAL,
+        operator     TEXT,
+        updated_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+        UNIQUE (account_id, server_id, city_id, commodity_id)
+      )`);
+    sqlite.exec(`INSERT INTO prices (id, account_id, server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at)
+      SELECT id, ${legacyAccount}, server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at FROM prices_legacy`);
+    sqlite.exec('DROP TABLE prices_legacy');
+  }
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_prices_lookup ON prices(account_id, server_id, city_id, commodity_id)');
+
+  if (!hasCol('city_taxes', 'account_id')) {
+    sqlite.exec('ALTER TABLE city_taxes RENAME TO city_taxes_legacy');
+    sqlite.exec(`
+      CREATE TABLE city_taxes (
+        account_id INTEGER NOT NULL DEFAULT 0,
+        server_id  INTEGER NOT NULL,
+        city_id    INTEGER NOT NULL,
+        tax        REAL    NOT NULL,
+        updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+        PRIMARY KEY (account_id, server_id, city_id)
+      )`);
+    sqlite.exec(`INSERT INTO city_taxes (account_id, server_id, city_id, tax, updated_at)
+      SELECT ${legacyAccount}, server_id, city_id, tax, updated_at FROM city_taxes_legacy`);
+    sqlite.exec('DROP TABLE city_taxes_legacy');
+  }
+
+  if (!hasCol('sync_settings', 'account_id')) {
+    let legacy = null;
+    try { legacy = sqlite.prepare('SELECT * FROM sync_settings WHERE id = 1').get(); } catch { /* ignore */ }
+    sqlite.exec('ALTER TABLE sync_settings RENAME TO sync_settings_legacy');
+    sqlite.exec(`
+      CREATE TABLE sync_settings (
+        account_id   INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        enabled      INTEGER NOT NULL DEFAULT 0,
+        cron_expr    TEXT    NOT NULL DEFAULT '0 */2 * * *',
+        server_name  TEXT    NOT NULL DEFAULT '',
+        server_override TEXT NOT NULL DEFAULT '',
+        operator     TEXT    NOT NULL DEFAULT '定时同步',
+        last_run_at  TEXT,
+        last_status  TEXT,
+        last_message TEXT
+      )`);
+    if (legacy && Number(legacy.token_account_id) > 0) {
+      const owner = sqlite.prepare('SELECT id FROM accounts WHERE id = ?').get(Number(legacy.token_account_id));
+      if (owner) {
+        sqlite.prepare(`INSERT OR IGNORE INTO sync_settings
+          (account_id, enabled, cron_expr, server_name, operator, last_run_at, last_status, last_message)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          owner.id, legacy.enabled ? 1 : 0, legacy.cron_expr || '0 */2 * * *',
+          legacy.server_name || '', legacy.operator || '定时同步',
+          legacy.last_run_at || null, legacy.last_status || null, legacy.last_message || null
+        );
+      }
+    }
+    sqlite.exec('DROP TABLE sync_settings_legacy');
+  }
+  if (!hasCol('sync_settings', 'server_override')) {
+    sqlite.exec("ALTER TABLE sync_settings ADD COLUMN server_override TEXT NOT NULL DEFAULT ''");
+  }
+
+  if (!hasCol('sync_log', 'account_id')) sqlite.exec('ALTER TABLE sync_log ADD COLUMN account_id INTEGER');
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_sync_log_account ON sync_log(account_id, id DESC)');
 }
 
-/** 存量 MySQL 库补列（老版本升级） */
+/** 存量 MySQL 库补列/改表（老版本升级） */
 async function migrateMysql() {
   const colsOf = async table => {
     const [cols] = await pool.query(
@@ -427,13 +648,120 @@ async function migrateMysql() {
     );
     return cols;
   };
-  const syncCols = await colsOf('sync_settings');
-  if (!syncCols.some(c => c.name === 'token_account_id')) {
-    await pool.query('ALTER TABLE sync_settings ADD COLUMN token_account_id INT NULL');
+  const hasCol = async (table, col) => (await colsOf(table)).some(c => c.name === col);
+  const legacyAccount = '(SELECT COALESCE(MIN(id), 0) FROM accounts)';
+  const tryQuery = async sql => { try { await pool.query(sql); } catch { /* 老库缺少对应索引时忽略 */ } };
+
+  if (!(await hasCol('sessions', 'account_id'))) {
+    await tryQuery('DROP TABLE sessions');
+    await pool.query(`CREATE TABLE sessions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      token VARCHAR(64) NOT NULL,
+      account_id INT NOT NULL,
+      device_id VARCHAR(64) NULL,
+      device_name VARCHAR(80) NULL,
+      ip VARCHAR(45) NULL,
+      created_at DATETIME NOT NULL,
+      last_seen_at DATETIME NULL,
+      UNIQUE KEY uk_sessions_token (token),
+      KEY idx_sessions_account (account_id, id),
+      CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   }
-  const accountCols = await colsOf('accounts');
-  if (!accountCols.some(c => c.name === 'relief')) {
+
+  if (!(await hasCol('accounts', 'relief'))) {
     await pool.query('ALTER TABLE accounts ADD COLUMN relief DECIMAL(5,2) NOT NULL DEFAULT 5');
+  }
+  if (!(await hasCol('accounts', 'status'))) {
+    await pool.query("ALTER TABLE accounts ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'active'");
+  }
+  if (!(await hasCol('accounts', 'expires_at'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN expires_at DATETIME NULL');
+  }
+  if (!(await hasCol('accounts', 'key_code'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN key_code VARCHAR(32) NULL');
+  }
+  if (!(await hasCol('accounts', 'device_limit'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN device_limit INT NOT NULL DEFAULT 3');
+  }
+  if (!(await hasCol('accounts', 'current_server'))) {
+    await pool.query("ALTER TABLE accounts ADD COLUMN current_server VARCHAR(50) NOT NULL DEFAULT ''");
+  }
+  if (!(await hasCol('accounts', 'allow_sync_server'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN allow_sync_server TINYINT NOT NULL DEFAULT 0');
+  }
+  if (!(await hasCol('app_settings', 'key_help_md'))) {
+    await pool.query('ALTER TABLE app_settings ADD COLUMN key_help_md MEDIUMTEXT NULL');
+    await pool.query('UPDATE app_settings SET key_help_md = ? WHERE id = 1 AND (key_help_md IS NULL OR key_help_md = ?)', [DEFAULT_KEY_HELP_MD, '']);
+  }
+  if (!(await hasCol('app_settings', 'token_help_md'))) {
+    await pool.query('ALTER TABLE app_settings ADD COLUMN token_help_md MEDIUMTEXT NULL');
+    await pool.query('UPDATE app_settings SET token_help_md = ? WHERE id = 1 AND (token_help_md IS NULL OR token_help_md = ?)', [DEFAULT_TOKEN_HELP_MD, '']);
+  }
+  if (!(await hasCol('app_settings', 'key_required_at'))) {
+    await pool.query(`ALTER TABLE app_settings ADD COLUMN key_required_at VARCHAR(19) NOT NULL DEFAULT '${DEFAULT_KEY_REQUIRED_AT}'`);
+  }
+
+  if (!(await hasCol('price_history', 'account_id'))) {
+    await pool.query('ALTER TABLE price_history ADD COLUMN account_id INT NOT NULL DEFAULT 0 FIRST');
+    await pool.query(`UPDATE price_history SET account_id = ${legacyAccount}`);
+  }
+  await tryQuery('ALTER TABLE price_history DROP KEY idx_history_scope');
+  await pool.query('ALTER TABLE price_history ADD KEY idx_history_scope (account_id, server_id, city_id, created_at)');
+
+  if (!(await hasCol('prices', 'account_id'))) {
+    await tryQuery('ALTER TABLE prices DROP KEY uk_prices_scope');
+    await pool.query('ALTER TABLE prices ADD COLUMN account_id INT NOT NULL DEFAULT 0 FIRST');
+    await pool.query(`UPDATE prices SET account_id = ${legacyAccount}`);
+    await pool.query('ALTER TABLE prices ADD UNIQUE KEY uk_prices_scope (account_id, server_id, city_id, commodity_id)');
+    await tryQuery('ALTER TABLE prices DROP KEY idx_prices_lookup');
+    await pool.query('ALTER TABLE prices ADD KEY idx_prices_lookup (account_id, server_id, city_id, commodity_id)');
+  }
+
+  if (!(await hasCol('city_taxes', 'account_id'))) {
+    await pool.query('ALTER TABLE city_taxes DROP PRIMARY KEY, ADD COLUMN account_id INT NOT NULL DEFAULT 0 FIRST, ADD PRIMARY KEY (account_id, server_id, city_id)');
+    await pool.query(`UPDATE city_taxes SET account_id = ${legacyAccount}`);
+  }
+
+  if (!(await hasCol('sync_settings', 'account_id'))) {
+    let legacy = null;
+    try {
+      const [rows] = await pool.query('SELECT * FROM sync_settings WHERE id = 1');
+      legacy = rows[0] || null;
+    } catch { legacy = null; }
+    await pool.query('RENAME TABLE sync_settings TO sync_settings_legacy');
+    await pool.query(`CREATE TABLE sync_settings (
+      account_id INT PRIMARY KEY,
+      enabled TINYINT NOT NULL DEFAULT 0,
+      cron_expr VARCHAR(64) NOT NULL DEFAULT '0 */2 * * *',
+      server_name VARCHAR(50) NOT NULL DEFAULT '',
+      server_override VARCHAR(50) NOT NULL DEFAULT '',
+      operator VARCHAR(20) NOT NULL DEFAULT '定时同步',
+      last_run_at DATETIME NULL,
+      last_status VARCHAR(16) NULL,
+      last_message VARCHAR(500) NULL,
+      CONSTRAINT fk_sync_settings_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    if (legacy && Number(legacy.token_account_id) > 0) {
+      const [ownerRows] = await pool.query('SELECT id FROM accounts WHERE id = ?', [Number(legacy.token_account_id)]);
+      if (ownerRows[0]) {
+        await pool.query(`INSERT IGNORE INTO sync_settings
+          (account_id, enabled, cron_expr, server_name, operator, last_run_at, last_status, last_message)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [ownerRows[0].id, legacy.enabled ? 1 : 0, legacy.cron_expr || '0 */2 * * *',
+          legacy.server_name || '', legacy.operator || '定时同步',
+          legacy.last_run_at || null, legacy.last_status || null, legacy.last_message || null]);
+      }
+    }
+    await pool.query('DROP TABLE sync_settings_legacy');
+  }
+  if (!(await hasCol('sync_settings', 'server_override'))) {
+    await pool.query("ALTER TABLE sync_settings ADD COLUMN server_override VARCHAR(50) NOT NULL DEFAULT ''");
+  }
+
+  if (!(await hasCol('sync_log', 'account_id'))) {
+    await pool.query('ALTER TABLE sync_log ADD COLUMN account_id INT NULL AFTER id');
+    await pool.query('ALTER TABLE sync_log ADD KEY idx_sync_log_account (account_id, id)');
   }
 }
 
@@ -459,13 +787,17 @@ async function seed() {
   await trimHistory();
   if (IS_MYSQL) {
     await rawRun(
-      'INSERT IGNORE INTO sync_settings (id, enabled, cron_expr, server_name, operator) VALUES (1, 0, ?, ?, ?)',
-      ['0 */2 * * *', '', '自动同步']
+      `INSERT IGNORE INTO app_settings
+         (id, registration_enabled, announcement, key_help_md, token_help_md, key_required_at, default_device_limit, updated_at)
+       VALUES (1, 1, ?, ?, ?, ?, 3, ?)`,
+      ['', DEFAULT_KEY_HELP_MD, DEFAULT_TOKEN_HELP_MD, DEFAULT_KEY_REQUIRED_AT, nowText()]
     );
   } else {
     await rawRun(
-      'INSERT OR IGNORE INTO sync_settings (id, enabled, cron_expr, server_name, operator) VALUES (1, 0, ?, ?, ?)',
-      ['0 */2 * * *', '', '自动同步']
+      `INSERT OR IGNORE INTO app_settings
+         (id, registration_enabled, announcement, key_help_md, token_help_md, key_required_at, default_device_limit, updated_at)
+       VALUES (1, 1, ?, ?, ?, ?, 3, ?)`,
+      ['', DEFAULT_KEY_HELP_MD, DEFAULT_TOKEN_HELP_MD, DEFAULT_KEY_REQUIRED_AT, nowText()]
     );
   }
 }
@@ -562,33 +894,115 @@ async function findDictId(type, name) {
   return r.length ? r[0].id : null;
 }
 
-async function getCityTax(serverId, cityId) {
+async function getCityTax(accountId, serverId, cityId) {
   if (serverId == null || cityId == null) return null;
-  const r = await rawQuery('SELECT tax FROM city_taxes WHERE server_id = ? AND city_id = ?', [serverId, cityId]);
+  const r = await rawQuery(
+    'SELECT tax FROM city_taxes WHERE account_id = ? AND server_id = ? AND city_id = ?',
+    [Number(accountId) || 0, serverId, cityId]
+  );
   return r.length ? Number(r[0].tax) : null;
 }
 
-async function getCityTaxMap(serverId) {
+async function getCityTaxMap(accountId, serverId) {
   if (serverId == null) return new Map();
-  const rows = await rawQuery('SELECT city_id AS cityId, tax FROM city_taxes WHERE server_id = ?', [serverId]);
+  const rows = await rawQuery(
+    'SELECT city_id AS cityId, tax FROM city_taxes WHERE account_id = ? AND server_id = ?',
+    [Number(accountId) || 0, serverId]
+  );
   return new Map(rows.map(r => [Number(r.cityId), Number(r.tax)]));
 }
 
 /** 记录/更新城池税率（游戏同步写入，0.1~0.9） */
-async function setCityTax(serverId, cityId, tax) {
+async function setCityTax(accountId, serverId, cityId, tax) {
   const value = Number(tax);
   if (!Number.isFinite(value) || value <= 0 || value > 1) return;
+  const acc = Number(accountId) || 0;
   const t = nowText();
-  const existing = await rawQuery('SELECT tax FROM city_taxes WHERE server_id = ? AND city_id = ?', [serverId, cityId]);
+  const existing = await rawQuery(
+    'SELECT tax FROM city_taxes WHERE account_id = ? AND server_id = ? AND city_id = ?',
+    [acc, serverId, cityId]
+  );
   if (existing.length) {
-    await rawRun('UPDATE city_taxes SET tax = ?, updated_at = ? WHERE server_id = ? AND city_id = ?', [value, t, serverId, cityId]);
+    await rawRun(
+      'UPDATE city_taxes SET tax = ?, updated_at = ? WHERE account_id = ? AND server_id = ? AND city_id = ?',
+      [value, t, acc, serverId, cityId]
+    );
   } else {
     try {
-      await rawRun('INSERT INTO city_taxes (server_id, city_id, tax, updated_at) VALUES (?, ?, ?, ?)', [serverId, cityId, value, t]);
+      await rawRun(
+        'INSERT INTO city_taxes (account_id, server_id, city_id, tax, updated_at) VALUES (?, ?, ?, ?, ?)',
+        [acc, serverId, cityId, value, t]
+      );
     } catch {
-      await rawRun('UPDATE city_taxes SET tax = ?, updated_at = ? WHERE server_id = ? AND city_id = ?', [value, t, serverId, cityId]);
+      await rawRun(
+        'UPDATE city_taxes SET tax = ?, updated_at = ? WHERE account_id = ? AND server_id = ? AND city_id = ?',
+        [value, t, acc, serverId, cityId]
+      );
     }
   }
+}
+
+function normalizeKeyRequiredAt(value) {
+  const s = String(value || '').trim().replace('T', ' ');
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
+  if (!m) return null;
+  const hh = m[4] || '00';
+  const mi = m[5] || '00';
+  const ss = m[6] || '00';
+  if (Number(hh) > 23 || Number(mi) > 59 || Number(ss) > 59) return null;
+  return `${m[1]}-${m[2]}-${m[3]} ${hh}:${mi}:${ss}`;
+}
+
+function keyRequiredAtNow(value) {
+  const at = normalizeKeyRequiredAt(value) || DEFAULT_KEY_REQUIRED_AT;
+  return at <= nowText();
+}
+
+/** 全站设置（注册开关 / 公告 / 卡密帮助 / 默认设备数） */
+async function getAppSettings() {
+  let row = await get('SELECT * FROM app_settings WHERE id = 1');
+  if (!row) {
+    await run(
+      `INSERT INTO app_settings
+         (id, registration_enabled, announcement, key_help_md, token_help_md, key_required_at, default_device_limit, updated_at)
+       VALUES (1, 1, ?, ?, ?, ?, 3, ?)`,
+      ['', DEFAULT_KEY_HELP_MD, DEFAULT_TOKEN_HELP_MD, DEFAULT_KEY_REQUIRED_AT, nowText()]
+    );
+    row = await get('SELECT * FROM app_settings WHERE id = 1');
+  }
+  const keyRequiredAt = normalizeKeyRequiredAt(row.key_required_at) || DEFAULT_KEY_REQUIRED_AT;
+  return {
+    registrationEnabled: !!Number(row.registration_enabled),
+    announcement: row.announcement || '',
+    keyHelpMd: row.key_help_md || '',
+    tokenHelpMd: row.token_help_md || '',
+    keyRequiredAt,
+    keyRequired: keyRequiredAtNow(keyRequiredAt),
+    defaultDeviceLimit: Math.max(1, Math.min(Number(row.default_device_limit) || 3, 20)),
+  };
+}
+
+async function setCurrentServer(accountId, name) {
+  await run(
+    'UPDATE accounts SET current_server = ?, updated_at = ? WHERE id = ?',
+    [name || '', nowText(), accountId]
+  );
+}
+
+/** 全站首个账号注册时接管旧版共享数据（account_id = 0） */
+async function claimLegacyData(accountId) {
+  const total = await get('SELECT COUNT(*) AS n FROM accounts');
+  if (Number(total.n) !== 1) return false;
+  const legacyPrices = await get('SELECT COUNT(*) AS n FROM prices WHERE account_id = 0');
+  const legacyHistory = await get('SELECT COUNT(*) AS n FROM price_history WHERE account_id = 0');
+  if (!Number(legacyPrices.n) && !Number(legacyHistory.n)) return false;
+  await tx(async conn => {
+    await conn.run('UPDATE prices SET account_id = ? WHERE account_id = 0', [accountId]);
+    await conn.run('UPDATE price_history SET account_id = ? WHERE account_id = 0', [accountId]);
+    await conn.run('UPDATE city_taxes SET account_id = ? WHERE account_id = 0', [accountId]);
+    await conn.run('UPDATE sync_log SET account_id = ? WHERE account_id IS NULL OR account_id = 0', [accountId]);
+  });
+  return true;
 }
 
 async function createDictItem(type, name, burden = null) {
@@ -625,6 +1039,9 @@ module.exports = {
   DB_FILE,
   DATA_DIR,
   HISTORY_LIMIT,
+  DEFAULT_KEY_REQUIRED_AT,
+  normalizeKeyRequiredAt,
+  keyRequiredAtNow,
   ready: init,
   init,
   close,
@@ -633,12 +1050,16 @@ module.exports = {
   run,
   tx,
   nowText,
+  formatTime,
   upsertServer,
   findServerId,
   findDictId,
   getCityTax,
   getCityTaxMap,
   setCityTax,
+  getAppSettings,
+  setCurrentServer,
+  claimLegacyData,
   createDictItem,
   COMMODITY_LIST: COMMODITY_SEED.map(c => c.name),
   CITY_LIST,

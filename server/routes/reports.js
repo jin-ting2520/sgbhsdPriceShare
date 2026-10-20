@@ -1,13 +1,16 @@
 'use strict';
 
-/** 报表：涨跌幅榜 / 城池间套利建议（毛利） / 更新热度 */
+/** 报表：涨跌幅榜 / 更新热度 */
 
 const express = require('express');
 const { query, get, findServerId, getCityTaxMap, nowText } = require('../db');
+const { requireAccount } = require('../auth');
 const { clampRelief, displayBuy, displaySell } = require('../tax');
 const { ok, fail, asyncHandler, cleanName, isBlank } = require('../util');
 
 const router = express.Router();
+
+router.use(requireAccount);
 
 const bjDate = offsetDays => {
   const ms = Date.now() + 8 * 3600000 + (offsetDays || 0) * 86400000;
@@ -15,6 +18,13 @@ const bjDate = offsetDays => {
 };
 
 const round2 = v => Math.round(v * 100) / 100;
+
+const serverOf = (req, raw) => cleanName(raw, 50) || cleanName(req.account.currentServer, 50);
+
+const reliefOf = (req, raw) => {
+  if (raw == null || raw === '') return clampRelief(req.account.relief);
+  return clampRelief(raw);
+};
 
 async function requireServer(res, name) {
   if (isBlank(name)) {
@@ -31,13 +41,14 @@ async function requireServer(res, name) {
 
 /** GET /api/reports/movers?server=&days=7&limit=20&relief=5 —— 涨跌幅榜（基于 price_history） */
 router.get('/movers', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 365);
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
-  const relief = clampRelief(req.query.relief);
+  const relief = reliefOf(req, req.query.relief);
   const serverId = await requireServer(res, server);
   if (!serverId) return undefined;
-  const taxMap = await getCityTaxMap(serverId);
+  const accountId = req.account.id;
+  const taxMap = await getCityTaxMap(accountId, serverId);
 
   const cutoff = bjDate(-days);
   const rows = await query(
@@ -47,15 +58,15 @@ router.get('/movers', asyncHandler(async (req, res) => {
        FROM price_history h
        JOIN dict_items c ON c.id = h.city_id
        JOIN dict_items d ON d.id = h.commodity_id
-      WHERE h.server_id = ?
+      WHERE h.account_id = ? AND h.server_id = ?
       ORDER BY h.id`,
-    [serverId]
+    [accountId, serverId]
   );
 
   const current = await query(
     `SELECT city_id AS cityId, commodity_id AS commodityId, buy_price AS buy, sell_price AS sell, updated_at AS updatedAt
-       FROM prices WHERE server_id = ?`,
-    [serverId]
+       FROM prices WHERE account_id = ? AND server_id = ?`,
+    [accountId, serverId]
   );
   const currentMap = new Map(current.map(r => [`${r.cityId}|${r.commodityId}`, r]));
 
@@ -119,97 +130,15 @@ router.get('/movers', asyncHandler(async (req, res) => {
   });
 }));
 
-/** GET /api/reports/arbitrage?server=&load=200&relief=5 —— 城池间套利建议（毛利 = 单位价差 × 可载数量） */
-router.get('/arbitrage', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
-  const serverId = await requireServer(res, server);
-  if (!serverId) return undefined;
-
-  const load = Math.min(Math.max(Number(req.query.load) || 200, 1), 100000);
-  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
-  const relief = clampRelief(req.query.relief);
-  const onlyPositive = req.query.all !== '1';
-  const taxMap = await getCityTaxMap(serverId);
-
-  const rows = await query(
-    `SELECT p.city_id AS cityId, c.name AS city, p.commodity_id AS commodityId, d.name AS commodity,
-            d.burden, p.buy_price AS buy, p.sell_price AS sell, p.updated_at AS updatedAt
-       FROM prices p
-       JOIN dict_items c ON c.id = p.city_id AND c.status = 1
-       JOIN dict_items d ON d.id = p.commodity_id AND d.status = 1
-      WHERE p.server_id = ?`,
-    [serverId]
-  );
-
-  const byCommodity = new Map();
-  for (const r of rows) {
-    let g = byCommodity.get(r.commodityId);
-    if (!g) {
-      g = { commodity: r.commodity, burden: r.burden == null ? null : Number(r.burden), buys: [], sells: [] };
-      byCommodity.set(r.commodityId, g);
-    }
-    if (r.buy != null) {
-      const tax = taxMap.get(Number(r.cityId)) ?? null;
-      g.buys.push({ city: r.city, price: displayBuy(r.buy, tax, relief), updatedAt: r.updatedAt });
-    }
-    if (r.sell != null) {
-      const tax = taxMap.get(Number(r.cityId)) ?? null;
-      g.sells.push({ city: r.city, price: displaySell(r.sell, tax, relief), updatedAt: r.updatedAt });
-    }
-  }
-
-  const items = [];
-  for (const [commodityId, g] of byCommodity) {
-    if (!g.buys.length || !g.sells.length) continue;
-    g.buys.sort((a, b) => a.price - b.price || a.city.localeCompare(b.city, 'zh'));
-    g.sells.sort((a, b) => b.price - a.price || a.city.localeCompare(b.city, 'zh'));
-
-    for (const buy of g.buys) {
-      const sell = g.sells.find(s => s.city !== buy.city);
-      if (!sell) continue;
-      const unitProfit = round2(sell.price - buy.price);
-      const burden = g.burden && g.burden > 0 ? g.burden : null;
-      const units = burden ? Math.max(1, Math.floor(load / burden)) : 1;
-      const gross = round2(unitProfit * units);
-      items.push({
-        commodityId,
-        commodity: g.commodity,
-        burden,
-        buyCity: buy.city,
-        buyPrice: round2(buy.price),
-        sellCity: sell.city,
-        sellPrice: round2(sell.price),
-        unitProfit,
-        load,
-        units,
-        gross,
-        perBurden: burden ? round2(unitProfit / burden) : null,
-        buyUpdatedAt: buy.updatedAt,
-        sellUpdatedAt: sell.updatedAt,
-      });
-      break; // 每个商品只推荐「最低买入城 → 该城可卖的最高价城市」一条
-    }
-  }
-
-  const filtered = onlyPositive ? items.filter(i => i.gross > 0) : items;
-  filtered.sort((a, b) => b.gross - a.gross || b.unitProfit - a.unitProfit);
-
-  return ok(res, {
-    server,
-    params: { load, relief, onlyPositive },
-    totalCandidates: items.length,
-    items: filtered.slice(0, limit),
-  });
-}));
-
 /** GET /api/reports/heat?server=&days=30&bucket=day|hour —— 价格更新热度（改价次数 + 同步次数） */
 router.get('/heat', asyncHandler(async (req, res) => {
-  const server = cleanName(req.query.server, 50);
+  const server = serverOf(req, req.query.server);
   const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
   const bucket = req.query.bucket === 'hour' ? 'hour' : 'day';
   const serverId = await requireServer(res, server);
   if (!serverId) return undefined;
 
+  const accountId = req.account.id;
   const cutoff = bucket === 'hour'
     ? `${bjDate(-Math.min(days, 14))} 00:00:00`
     : `${bjDate(-days)} 00:00:00`;
@@ -217,13 +146,13 @@ router.get('/heat', asyncHandler(async (req, res) => {
   const rows = await query(
     `SELECT h.created_at AS createdAt, h.operator
        FROM price_history h
-      WHERE h.server_id = ? AND h.created_at >= ?`,
-    [serverId, cutoff]
+      WHERE h.account_id = ? AND h.server_id = ? AND h.created_at >= ?`,
+    [accountId, serverId, cutoff]
   );
   const syncRows = await query(
     `SELECT started_at AS startedAt, status FROM sync_log
-      WHERE server_name = ? AND started_at >= ?`,
-    [server, cutoff]
+      WHERE account_id = ? AND started_at >= ?`,
+    [accountId, cutoff]
   );
 
   const keyOf = t => (bucket === 'hour' ? `${String(t).slice(0, 13)}:00` : String(t).slice(0, 10));

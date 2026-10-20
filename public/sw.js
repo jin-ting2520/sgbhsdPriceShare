@@ -1,12 +1,13 @@
 /* 三国冰河时代富甲天下跑商价格分享 Service Worker
    策略：静态资源缓存优先（刷新即更新），API 一律走网络。 */
 
-const CACHE = 'sgbhsd-price-v2'
+const CACHE = 'sgbhsd-price-v3'
 
 const PRECACHE = [
   '/',
   '/css/app.css',
-  '/js/app.js',
+  '/bundle/app.js',
+  '/bundle/admin.js',
   '/manifest.webmanifest',
   '/icons/icon.svg',
   '/vendor/vue/vue.esm-browser.prod.js',
@@ -42,13 +43,31 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/api/')) return
   if (url.pathname === '/ws') return
 
-  // 导航请求：缓存优先，后台刷新（保证离线可用 + 上线即更新）
+  // 导航请求：首页缓存优先（离线可用）；其他页面（如 /admin）始终走网络，避免缓存串页
   if (req.mode === 'navigate') {
-    event.respondWith(
-      caches.match('/').then(hit =>
-        hit ||
-        fetch(req).catch(() => caches.match('/'))
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      event.respondWith(
+        caches.match('/').then(hit =>
+          hit ||
+          fetch(req).catch(() => caches.match('/'))
+        )
       )
+    } else {
+      event.respondWith(fetch(req).catch(() => Response.error()))
+    }
+    return
+  }
+
+  // 前端包始终网络优先，保证升级后立即生效；离线时回退缓存
+  if (url.pathname.startsWith('/bundle/')) {
+    event.respondWith(
+      fetch(req).then(res => {
+        if (res && res.status === 200) {
+          const copy = res.clone()
+          caches.open(CACHE).then(cache => cache.put(req, copy))
+        }
+        return res
+      }).catch(() => caches.match(req))
     )
     return
   }
