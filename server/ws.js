@@ -64,13 +64,15 @@ function attach(server) {
   return wss;
 }
 
-/** 广播：accountId 提供时仅发给该账号的在线设备 */
-function broadcast(type, payload, { except, accountId } = {}) {
+/** 广播：accountId / accountIds 提供时仅发给指定账号的在线设备 */
+function broadcast(type, payload, { except, accountId, accountIds } = {}) {
   if (!wss) return;
   const text = JSON.stringify({ type, ...payload, time: Date.now() });
+  const allowed = Array.isArray(accountIds) ? new Set(accountIds.map(Number)) : null;
   for (const ws of wss.clients) {
     if (ws === except) continue;
     if (accountId != null && Number(ws.accountId) !== Number(accountId)) continue;
+    if (allowed && !allowed.has(Number(ws.accountId))) continue;
     if (ws.readyState !== ws.OPEN) continue;
     try { ws.send(text); } catch { /* ignore */ }
   }

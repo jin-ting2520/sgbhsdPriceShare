@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const { get, run, query, nowText, ready, setCurrentServer } = require('./db');
 const { syncPrices } = require('./game/sync');
 const { broadcast } = require('./ws');
+const { notifyMasterPriceChange } = require('./master');
 const { invalidateDict } = require('./dict-cache');
 
 const tasks = new Map(); // cronExpr -> { task, accountIds: number[] }
@@ -195,6 +196,11 @@ async function runNow(accountId, trigger = 'manual') {
     await logFinish(log.id, status, result, result.failed.length ? `失败城池：${result.failed.map(f => f.city).join('、')}` : null, result.server);
     await markSettings(id, status, `同步 ${result.queried}/${result.cities} 城，保存 ${result.saved} 条`);
     broadcast('sync.finished', { trigger, server: result.server, result }, { accountId: id });
+    if (result.queried > 0) {
+      await notifyMasterPriceChange(id, {
+        server: result.server, city: '', operator: s.operator || '定时同步', tax: null, items: [],
+      });
+    }
     return result;
   } catch (err) {
     await logFinish(log.id, 'failed', null, err.message);

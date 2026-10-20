@@ -215,6 +215,11 @@ createApp({
     const allowSyncServer = ref(false)
     const accountExpiresAt = ref(null)
     const accountHasKey = ref(true)
+    const masterAccountId = ref(null)
+    const masterAccountName = ref('')
+    const isMaster = ref(false)
+    const viewMasterPrices = ref(false)
+    const masterSaving = ref(false)
     const expiryLoaded = ref(false)
     const keyRequired = ref(false)
     const keyRequiredAt = ref('2026-10-22 00:00:00')
@@ -230,6 +235,41 @@ createApp({
       accountExpiresAt.value = (data && data.expiresAt) || null
       accountHasKey.value = !!(data && data.hasKey)
       expiryLoaded.value = true
+    }
+
+    const applyMasterMeta = data => {
+      masterAccountId.value = (data && data.masterAccountId) || null
+      masterAccountName.value = (data && data.masterAccountName) || ''
+      isMaster.value = !!(data && data.isMaster)
+      viewMasterPrices.value = !!(data && data.viewMasterPrices)
+    }
+
+    const onViewMasterChange = async enabled => {
+      if (queried.value && rows.value.some(isDirty)) {
+        try {
+          await ElMessageBox.confirm(
+            '切换主账号价格共享会重新加载当前价格，未保存的修改将丢失。是否继续？',
+            '有未保存修改',
+            { type: 'warning', confirmButtonText: '继续切换', cancelButtonText: '取消' }
+          )
+        } catch (e) {
+          viewMasterPrices.value = !enabled
+          return
+        }
+      }
+      const prev = !enabled
+      masterSaving.value = true
+      try {
+        await api('/api/auth/master-prices', { method: 'PUT', body: { enabled } })
+        viewMasterPrices.value = enabled
+        ElMessage.success(enabled ? `已开启查看主账号「${masterAccountName.value}」的价格` : '已关闭主账号价格共享')
+        if (queried.value) await doFetch(false)
+      } catch (e) {
+        viewMasterPrices.value = prev
+        ElMessage.error(e.message)
+      } finally {
+        masterSaving.value = false
+      }
     }
 
     const loadPublicConfig = async () => {
@@ -316,7 +356,7 @@ createApp({
 
     /* 未查询时也用全部商品铺满列表（其他列显示 -） */
     const buildRowsFromDict = () => rows.value = commodities.value.map(c => ({
-      commodityId: c.id, commodity: c.name, burden: c.burden,
+      commodityId: c.id, commodity: c.name, burden: c.burden, source: null,
       buy: '', sell: '', updatedAt: null, operator: null, _base: { buy: null, sell: null }, _baseUpdatedAt: null,
     }))
 
@@ -370,6 +410,7 @@ createApp({
         accountServer.value = data.currentServer || ''
         allowSyncServer.value = !!data.allowSyncServer
         applyExpiry(data)
+        applyMasterMeta(data)
         if (!form.server && accountServer.value) form.server = accountServer.value
         taxRelief.value = clampRelief(data.relief)
         savedRelief.value = taxRelief.value
@@ -453,6 +494,7 @@ createApp({
       allowSyncServer.value = false
       accountExpiresAt.value = null
       accountHasKey.value = true
+      applyMasterMeta(null)
       expiryLoaded.value = false
       nicknameInput.value = ''
       passwordInput.value = ''
@@ -474,6 +516,7 @@ createApp({
       allowSyncServer.value = false
       accountExpiresAt.value = null
       accountHasKey.value = true
+      applyMasterMeta(null)
       expiryLoaded.value = false
       authMode.value = 'login'
       renewVisible.value = false
@@ -495,9 +538,11 @@ createApp({
         const q = new URLSearchParams({ server: form.server.trim(), city: form.city, relief: String(taxRelief.value) })
         if (form.commodity) q.set('commodity', form.commodity)
         const res = await api(`/api/prices?${q.toString()}`)
+        applyMasterMeta(res)
         currentTax.value = res.tax == null ? null : Number(res.tax)
         rows.value = res.items.map(r => ({
           ...r,
+          source: r.source || null,
           buy: r.buy == null ? '' : String(r.buy),
           sell: r.sell == null ? '' : String(r.sell),
           _base: { buy: r.buy, sell: r.sell },
@@ -608,6 +653,8 @@ createApp({
       return { filled }
     })
 
+    const sharedCount = computed(() => rows.value.filter(r => r.source === 'master').length)
+
     /* ---------- 实时协作 WebSocket ---------- */
     const wsConnected = ref(false)
     const wsClients = ref(0)
@@ -665,6 +712,7 @@ createApp({
         doFetch(false)
         return
       }
+      let sourceRefresh = false
       for (const item of payload.items) {
         const row = rows.value.find(r => Number(r.commodityId) === Number(item.commodityId))
         if (!row) continue
@@ -676,6 +724,8 @@ createApp({
           }
           continue
         }
+        if (row.source === 'master' || (buy == null && sell == null)) sourceRefresh = true
+        row.source = (buy == null && sell == null) ? null : 'own'
         row.buy = buy == null ? '' : String(buy)
         row.sell = sell == null ? '' : String(sell)
         row.updatedAt = item.updatedAt
@@ -684,6 +734,7 @@ createApp({
         row._baseUpdatedAt = item.updatedAt
         delete row._remoteConflict
       }
+      if (sourceRefresh && !rows.value.some(isDirty)) doFetch(false)
     }
 
     const handleWsMessage = msg => {
@@ -692,12 +743,53 @@ createApp({
         return
       }
       if (msg.type === 'price.updated') {
+        if (msg.shared) {
+          const sameServer = queried.value && msg.server === form.server.trim()
+          const sameScope = sameServer && (!msg.city || msg.city === form.city)
+          if (sameScope) {
+            if (rows.value.some(isDirty)) {
+              ElMessage.warning('主账号价格已更新，你本地有未保存修改；保存时会提示冲突')
+            } else {
+              doFetch(false)
+            }
+          } else if (sameServer) {
+            loadServers().catch(() => {})
+          }
+          if (msg.operator && msg.operator !== nickname.value) {
+            const name = msg.items && msg.items.length
+              ? msg.items.map(i => i.commodity).slice(0, 3).join('、') + (msg.items.length > 3 ? ' 等' : '')
+              : '价格'
+            ElMessage.info(`主账号${msg.masterAccountName ? `「${msg.masterAccountName}」` : ''}更新了 ${msg.server}${msg.city ? ` · ${msg.city}` : ''} 的${name}`)
+          }
+          return
+        }
         applyRemoteItems(msg)
         if (msg.operator && msg.operator !== nickname.value) {
           const name = msg.items && msg.items.length
             ? msg.items.map(i => i.commodity).slice(0, 3).join('、') + (msg.items.length > 3 ? ' 等' : '')
             : '价格'
           ElMessage.info(`${msg.operator} 更新了 ${msg.server} · ${msg.city} 的${name}`)
+        }
+        return
+      }
+      if (msg.type === 'master.changed') {
+        masterAccountId.value = msg.masterAccountId || null
+        masterAccountName.value = msg.masterAccountName || ''
+        isMaster.value = !!msg.masterAccountName && msg.masterAccountName === nickname.value
+        viewMasterPrices.value = false
+        if (queried.value) {
+          if (rows.value.some(isDirty)) ElMessage.warning('主账号已变更，你本地有未保存修改；保存时会提示冲突')
+          else doFetch(false)
+        }
+        ElMessage.info(msg.masterAccountName ? `主账号已变更为「${msg.masterAccountName}」` : '主账号已取消')
+        return
+      }
+      if (msg.type === 'master.preference') {
+        if (masterSaving.value) return
+        viewMasterPrices.value = !!msg.enabled
+        if (queried.value) {
+          if (rows.value.some(isDirty)) ElMessage.warning('主账号价格共享设置已更新，你本地有未保存修改')
+          else doFetch(false)
         }
         return
       }
@@ -859,11 +951,13 @@ createApp({
     /* ---------- 更新日志 ---------- */
     const historyVisible = ref(false)
     const historyList = ref([])
+    const historySource = ref(null)
 
     const loadHistory = async () => {
       try {
         const res = await api(`/api/prices/history?server=${encodeURIComponent(form.server.trim())}&city=${encodeURIComponent(form.city)}&limit=100&relief=${taxRelief.value}`)
         historyList.value = res.items
+        historySource.value = res.source || null
       } catch (e) { ElMessage.error(e.message) }
     }
     const openHistory = () => {
@@ -1236,6 +1330,7 @@ createApp({
         accountServer.value = me.currentServer || accountServer.value
         allowSyncServer.value = !!me.allowSyncServer
         applyExpiry(me)
+        applyMasterMeta(me)
       } catch (e) { /* 忽略 */ }
       await resolveSyncServer()
     }
@@ -1499,6 +1594,7 @@ createApp({
           accountServer.value = me.currentServer || ''
           allowSyncServer.value = !!me.allowSyncServer
           applyExpiry(me)
+          applyMasterMeta(me)
           if (!form.server && accountServer.value) form.server = accountServer.value
           taxRelief.value = clampRelief(me.relief)
           savedRelief.value = taxRelief.value
@@ -1537,10 +1633,11 @@ createApp({
       nickname, nicknameInput, passwordInput, keyInput, entering, entered, enterSite, switchAccount,
       authMode, setAuthMode, authHint, renewVisible, renewKey, renewMessage, openRenew, submitRenew,
       accountServer, allowSyncServer, deviceName,
+      masterAccountId, masterAccountName, isMaster, viewMasterPrices, masterSaving, onViewMasterChange,
       keyRequired, keyRequiredAtText, keyPlaceholder, keyHelpHtml, tokenHelpHtml,
       expiryText, expiryTooltip, expiryTagType,
       // 基础
-      isMobile, form, cities, commodities, serverList, rows, queried, loading,
+      isMobile, form, cities, commodities, serverList, rows, queried, loading, sharedCount,
       // 赋税减免
       taxRelief, currentTax, onReliefChange,
       // 实时协作
@@ -1557,7 +1654,7 @@ createApp({
       devicesVisible, devicesLoading, devices, deviceLimit,
       openDevices, loadDevices, kickDevice, kickOtherDevices,
       // 日志 / 趋势 / 比价
-      historyVisible, historyList, openHistory, loadHistory,
+      historyVisible, historyList, historySource, openHistory, loadHistory,
       trendVisible, trendCommodity, trendDays, trendLoading, trendData, trendPoints,
       trendChart, openTrend, loadTrend,
       trendView, trendDragging, zoomTrend, resetTrendView, onTrendWheel,

@@ -8,7 +8,7 @@ const crypto = require('node:crypto');
 const express = require('express');
 const { ok, fail, asyncHandler, cleanName, isBlank } = require('../util');
 const { query, get, run, tx, nowText, formatTime, parseTime, normalizeKeyRequiredAt } = require('../db');
-const { createBatch, KEY_TYPES, KEY_TYPE_NAMES, KEY_STATUS_NAMES, normalizeCode } = require('../keys');
+const { createBatch, KEY_TYPES, KEY_TYPE_NAMES, KEY_STATUS_NAMES, normalizeCode, expiresAtFor } = require('../keys');
 const { renderMarkdown, MAX_MARKDOWN } = require('../markdown');
 const { hashPassword } = require('../auth');
 const rateLimit = require('../ratelimit');
@@ -209,6 +209,60 @@ router.get('/batches', asyncHandler(async (req, res) => {
   })));
 }));
 
+/** 直接把未使用卡密绑定到账号；卡密只能消耗一次，到期时间从账号当前有效期顺延 */
+router.post('/keys/:id/bind', asyncHandler(async (req, res) => {
+  const keyId = Number(req.params.id);
+  if (!Number.isInteger(keyId) || keyId <= 0) return fail(res, 400, '卡密 id 不正确');
+  const body = req.body || {};
+  const accountId = Number(body.accountId);
+  const accountName = cleanName(body.accountName);
+  if (!Number.isInteger(accountId) && !accountName) {
+    return fail(res, 400, '请选择要绑定的账号');
+  }
+
+  const bad = (status, message) => Object.assign(new Error(message), { status });
+  try {
+    const bound = await tx(async conn => {
+      const key = await conn.get('SELECT * FROM invite_keys WHERE id = ?', [keyId]);
+      if (!key) throw bad(404, '卡密不存在');
+      if (key.status === 'revoked') throw bad(400, '卡密已作废');
+      if (key.status !== 'unused') throw bad(400, '卡密已被使用，不能重复绑定');
+      if (!KEY_TYPES[key.type]) throw bad(400, '卡密类型无效');
+
+      const account = accountId > 0
+        ? await conn.get('SELECT * FROM accounts WHERE id = ?', [accountId])
+        : await conn.get('SELECT * FROM accounts WHERE name = ?', [accountName]);
+      if (!account) throw bad(404, '账号不存在');
+      if (account.expires_at == null) throw bad(400, '账号当前为永久有效期，无需绑定卡密');
+
+      const currentMs = parseTime(account.expires_at);
+      const base = Number.isFinite(currentMs) && currentMs > Date.now() ? currentMs : Date.now();
+      const expiresAt = expiresAtFor(key.type, base);
+      const info = await conn.run(
+        "UPDATE invite_keys SET status = 'used', used_at = ?, account_id = ? WHERE id = ? AND status = 'unused'",
+        [nowText(), account.id, key.id]
+      );
+      if (!info.affectedRows) throw bad(400, '卡密刚刚已被使用，请刷新重试');
+      await conn.run(
+        'UPDATE accounts SET expires_at = ?, key_code = ?, updated_at = ? WHERE id = ?',
+        [expiresAt, key.code, nowText(), account.id]
+      );
+      return {
+        keyId: key.id,
+        keyCode: key.code,
+        keyType: KEY_TYPE_NAMES[key.type] || key.type,
+        accountId: account.id,
+        accountName: account.name,
+        expiresAt,
+      };
+    });
+    return ok(res, bound);
+  } catch (err) {
+    if (err.status) return fail(res, err.status, err.message);
+    throw err;
+  }
+}));
+
 /* ------------------------------ 账号 ------------------------------ */
 
 router.get('/accounts', asyncHandler(async (req, res) => {
@@ -223,10 +277,12 @@ router.get('/accounts', asyncHandler(async (req, res) => {
   if (status === 'expired') { where.push('a.expires_at IS NOT NULL AND a.expires_at < ?'); params.push(nowText()); }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const totalRow = await get(`SELECT COUNT(*) AS n FROM accounts a ${whereSql}`, params);
+  const masterRow = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
+  const masterId = Number(masterRow && masterRow.id) || null;
   const rows = await query(
     `SELECT a.id, a.name, a.status, a.expires_at AS expiresAt, a.key_code AS keyCode,
             a.device_limit AS deviceLimit, a.current_server AS currentServer,
-            a.allow_sync_server AS allowSyncServer,
+            a.allow_sync_server AS allowSyncServer, a.view_master_prices AS viewMasterPrices,
             a.created_at AS createdAt, a.updated_at AS updatedAt, a.relief,
             (SELECT COUNT(*) FROM sessions s WHERE s.account_id = a.id) AS sessions,
             (SELECT COUNT(*) FROM prices p WHERE p.account_id = a.id) AS prices,
@@ -251,6 +307,8 @@ router.get('/accounts', asyncHandler(async (req, res) => {
       deviceLimit: Number(r.deviceLimit) || 3,
       currentServer: r.currentServer || '',
       allowSyncServer: !!Number(r.allowSyncServer),
+      isMaster: Number(r.id) === masterId,
+      viewMasterPrices: !!Number(r.viewMasterPrices),
       sessions: Number(r.sessions) || 0,
       prices: Number(r.prices) || 0,
       lastSeenAt: r.lastSeenAt || null,
@@ -278,62 +336,78 @@ router.post('/accounts/:id/status', asyncHandler(async (req, res) => {
   return ok(res, { id, status });
 }));
 
-/** 调整到期：{ expiresAt } 直接覆盖（null=永久）| { extendDays } 顺延 | { keyCode } 换绑未使用卡密 */
+/** 调整到期：{ expiresAt } 直接覆盖（null=永久）| { extendDays } 顺延 | { keyCode } 绑定未使用卡密 */
 router.post('/accounts/:id/expires', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   const account = await loadAccount(id);
   if (!account) return fail(res, 404, '账号不存在');
   const body = req.body || {};
-  let expiresAt = account.expires_at || null;
-  let keyCode = account.key_code || null;
+  const keyCode = account.key_code || null;
 
   if ('expiresAt' in body) {
-    if (body.expiresAt == null || body.expiresAt === '') {
-      expiresAt = null;
-    } else {
+    let expiresAt = null;
+    if (body.expiresAt != null && body.expiresAt !== '') {
       const parsed = String(body.expiresAt).trim().replace('T', ' ').slice(0, 19);
       if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(parsed)) {
         return fail(res, 400, 'expiresAt 格式应为 YYYY-MM-DD HH:MM:SS 或留空（永久）');
       }
       expiresAt = parsed;
     }
-  } else if (body.extendDays != null) {
-    const days = Number(body.extendDays);
-    if (!Number.isFinite(days) || days <= 0 || days > 3650) return fail(res, 400, 'extendDays 应为 1~3650');
-    const baseText = expiresAt && expiresAt > nowText() ? expiresAt : nowText();
-    const parsedBase = parseTime(baseText);
-    const base = Number.isFinite(parsedBase) ? parsedBase : Date.now();
-    expiresAt = formatTime(base + days * 86400000);
-  } else if (body.keyCode) {
-    const code = normalizeCode(body.keyCode);
-    const used = await tx(async conn => {
-      const row = await conn.get('SELECT * FROM invite_keys WHERE code = ?', [code]);
-      if (!row) return { error: '卡密不存在' };
-      if (row.status === 'revoked') return { error: '卡密已作废' };
-      if (row.status === 'used' && row.account_id !== id) return { error: '卡密已被其他账号使用' };
-      const info = await conn.run(
-        "UPDATE invite_keys SET status = 'used', used_at = ?, account_id = ? WHERE id = ? AND (status = 'unused' OR account_id = ?)",
-        [nowText(), id, row.id, id]
-      );
-      if (!info.affectedRows) return { error: '卡密状态已变化，请刷新重试' };
-      const spec = KEY_TYPES[row.type];
-      const newExpiry = spec && spec.days != null
-        ? formatTime(Date.now() + spec.days * 86400000)
-        : null;
-      return { code: row.code, type: row.type, expiresAt: newExpiry };
-    });
-    if (used.error) return fail(res, 400, used.error);
-    keyCode = used.code;
-    expiresAt = used.expiresAt;
-  } else {
-    return fail(res, 400, '请提供 expiresAt / extendDays / keyCode 之一');
+    await run(
+      'UPDATE accounts SET expires_at = ?, key_code = ?, updated_at = ? WHERE id = ?',
+      [expiresAt, keyCode, nowText(), id]
+    );
+    return ok(res, { id, expiresAt, keyCode });
   }
 
-  await run(
-    'UPDATE accounts SET expires_at = ?, key_code = ?, updated_at = ? WHERE id = ?',
-    [expiresAt, keyCode, nowText(), id]
-  );
-  return ok(res, { id, expiresAt, keyCode });
+  if (body.extendDays != null) {
+    const days = Number(body.extendDays);
+    if (!Number.isFinite(days) || days <= 0 || days > 3650) return fail(res, 400, 'extendDays 应为 1~3650');
+    const parsedBase = parseTime(account.expires_at);
+    const base = Number.isFinite(parsedBase) && parsedBase > Date.now() ? parsedBase : Date.now();
+    const expiresAt = formatTime(base + days * 86400000);
+    await run(
+      'UPDATE accounts SET expires_at = ?, key_code = ?, updated_at = ? WHERE id = ?',
+      [expiresAt, keyCode, nowText(), id]
+    );
+    return ok(res, { id, expiresAt, keyCode });
+  }
+
+  if (body.keyCode) {
+    const code = normalizeCode(body.keyCode);
+    const bad = (status, message) => Object.assign(new Error(message), { status });
+    try {
+      const bound = await tx(async conn => {
+        const key = await conn.get('SELECT * FROM invite_keys WHERE code = ?', [code]);
+        if (!key) throw bad(404, '卡密不存在');
+        if (key.status === 'revoked') throw bad(400, '卡密已作废');
+        if (key.status !== 'unused') throw bad(400, '卡密已被使用，不能重复绑定');
+        if (!KEY_TYPES[key.type]) throw bad(400, '卡密类型无效');
+        const current = await conn.get('SELECT expires_at FROM accounts WHERE id = ?', [id]);
+        if (!current) throw bad(404, '账号不存在');
+        if (current.expires_at == null) throw bad(400, '账号当前为永久有效期，无需绑定卡密');
+        const currentMs = parseTime(current.expires_at);
+        const base = Number.isFinite(currentMs) && currentMs > Date.now() ? currentMs : Date.now();
+        const expiresAt = expiresAtFor(key.type, base);
+        const info = await conn.run(
+          "UPDATE invite_keys SET status = 'used', used_at = ?, account_id = ? WHERE id = ? AND status = 'unused'",
+          [nowText(), id, key.id]
+        );
+        if (!info.affectedRows) throw bad(400, '卡密刚刚已被使用，请刷新重试');
+        await conn.run(
+          'UPDATE accounts SET expires_at = ?, key_code = ?, updated_at = ? WHERE id = ?',
+          [expiresAt, key.code, nowText(), id]
+        );
+        return { id, expiresAt, keyCode: key.code };
+      });
+      return ok(res, bound);
+    } catch (err) {
+      if (err.status) return fail(res, err.status, err.message);
+      throw err;
+    }
+  }
+
+  return fail(res, 400, '请提供 expiresAt / extendDays / keyCode 之一');
 }));
 
 router.post('/accounts/:id/device-limit', asyncHandler(async (req, res) => {
@@ -358,6 +432,37 @@ router.post('/accounts/:id/sync-server', asyncHandler(async (req, res) => {
     [allowed ? 1 : 0, nowText(), id]
   );
   return ok(res, { id, allowSyncServer: allowed });
+}));
+
+/** 设置/取消全局主账号；切换时清空所有账号的查看偏好 */
+router.post('/accounts/:id/master', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const master = req.body && req.body.master;
+  if (typeof master !== 'boolean') return fail(res, 400, 'master 必须为布尔值');
+  const account = await loadAccount(id);
+  if (!account) return fail(res, 404, '账号不存在');
+
+  const row = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
+  const currentId = Number(row && row.id) || null;
+  if (!master && currentId !== id) return fail(res, 400, '该账号不是当前主账号');
+
+  await tx(async conn => {
+    await conn.run(
+      'UPDATE app_settings SET master_account_id = ?, updated_at = ? WHERE id = 1',
+      [master ? id : null, nowText()]
+    );
+    await conn.run('UPDATE accounts SET view_master_prices = 0');
+  });
+  ws.broadcast('master.changed', {
+    masterAccountId: master ? id : null,
+    masterAccountName: master ? account.name : '',
+  });
+  return ok(res, {
+    id,
+    isMaster: master,
+    masterAccountId: master ? id : null,
+    masterAccountName: master ? account.name : '',
+  });
 }));
 
 router.post('/accounts/:id/password', asyncHandler(async (req, res) => {
@@ -387,6 +492,8 @@ router.delete('/accounts/:id', asyncHandler(async (req, res) => {
   if (String(req.query.confirm || '') !== account.name) {
     return fail(res, 400, `删除账号将清空其全部价格数据，请携带 confirm=${account.name} 以确认`);
   }
+  const masterRow = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
+  const wasMaster = Number(masterRow && masterRow.id) === id;
   await tx(async conn => {
     await conn.run('DELETE FROM sessions WHERE account_id = ?', [id]);
     await conn.run('DELETE FROM price_history WHERE account_id = ?', [id]);
@@ -395,8 +502,13 @@ router.delete('/accounts/:id', asyncHandler(async (req, res) => {
     await conn.run('DELETE FROM sync_settings WHERE account_id = ?', [id]);
     await conn.run('DELETE FROM sync_log WHERE account_id = ?', [id]);
     await conn.run('UPDATE invite_keys SET account_id = NULL WHERE account_id = ?', [id]);
+    if (wasMaster) {
+      await conn.run('UPDATE app_settings SET master_account_id = NULL, updated_at = ? WHERE id = 1', [nowText()]);
+      await conn.run('UPDATE accounts SET view_master_prices = 0');
+    }
     await conn.run('DELETE FROM accounts WHERE id = ?', [id]);
   });
+  if (wasMaster) ws.broadcast('master.changed', { masterAccountId: null, masterAccountName: '' });
   return ok(res, { id, deleted: true });
 }));
 

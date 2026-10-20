@@ -39,14 +39,15 @@
 | 模块 | 说明 |
 | --- | --- |
 | 注册与试用 | 后台配置卡密启用时间（默认 `2026-10-22`）。启用前新账号可不填卡密直接注册，到期位置显示「试用中」；启用后新注册必须填写卡密。卡密一次性使用，1 天 / 30 天 / 永久，从使用时刻起算 |
-| 卡密续期 | 已注册账号卡密到期或试用结束后，在登录页输入新卡密即可续期；后台也可直接修改到期时间或用未使用卡密续期 |
+| 卡密续期 | 已注册账号卡密到期或试用结束后，在登录页输入新卡密即可续期；后台可在「卡密」页直接把未使用卡密绑定到账号，也可从「账号」页用卡密续期。每张卡密只能消耗一次 |
 | 密码登录 | 已注册账号直接「昵称 + 密码」登录；到期或试用结束返回 40301，封禁返回 40302，后台关闭注册返回 40303 |
 | 帮助配置 | 后台可用 Markdown 配置「卡密获取提示」和「token 获取教程」，支持链接、图片、列表等；服务端清洗危险 HTML，公开配置接口无需登录 |
-| 数据隔离 | 价格、历史、税率、定时同步配置、游戏 token、当前区服均按账号隔离，未登录不可访问业务接口 |
+| 数据隔离 | 价格、历史、税率、定时同步配置、游戏 token、当前区服默认按账号隔离；启用主账号共享后仅只读回退缺失商品，未登录不可访问业务接口 |
 | 设备管理 | 每账号默认 3 台设备；超限登录返回设备列表，可踢出单个或全部其他设备；后台可调整单账号上限并强制下线 |
 | 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
 | 查询与字典 | 区服必填、城池必选、商品可选；城池 / 商品字典**只读**，由管理员在后台统一维护 |
 | 实时协作 | WebSocket 推送同账号其他设备的改价，正在查看的城池立即刷新；本地未保存修改时标记冲突 |
+| 主账号价格共享 | 管理员可指定全局唯一主账号；其他账号可开关「主账号价」，本人已录入的商品整行优先，缺失商品回退展示主账号价格并标记来源；主账号保存/导入/游戏同步后实时通知查看者。历史、趋势、跨城比价、CSV 导出同样支持回退，报表不混入共享数据 |
 | 并发保护 | 保存携带 `baseUpdatedAt`，被其他设备抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
 | 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，默认自动识别 token 所属区服并逐城抓取 175 城价格；管理员可逐账号开启 `server` 覆盖权限 |
 | 赋税换算 | 各城税率自动同步；账号可设「我的赋税减免」（默认 5%），价格按个人减免实时换算 |
@@ -54,7 +55,7 @@
 | 报表 | 涨跌幅榜、改价与同步热度图 |
 | 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天 |
 | 导入导出 | Excel 导入（模板下载、预览、merge 模式；未知商品需管理员先维护）、CSV 导出 |
-| 管理后台 | 概览、卡密批量生成（单批最多 500）/导出/作废、账号续期/改设备上限/重置密码/踢下线/封禁/删除、区服参数授权、字典与区服维护、卡密启用时间、注册开关与公告、卡密提示与 token 教程 Markdown 配置、同步日志 |
+| 管理后台 | 概览、卡密批量生成（单批最多 500）/导出/直接绑定账号/作废、账号续期/改设备上限/重置密码/踢下线/封禁/删除、区服参数授权、字典与区服维护、卡密启用时间、注册开关与公告、卡密提示与 token 教程 Markdown 配置、同步日志 |
 | 运维 | 健康检查 `/api/health`、Docker 健康依赖、MySQL 备份/恢复脚本、PWA 离线缓存 |
 
 ## 三、快速开始
@@ -87,7 +88,7 @@ npm install --registry=https://registry.npmmirror.com   # 国内网络建议
 npm run build:ui   # 可选：生成混淆产物；不做则回退源码
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 51 项后端/账号/设备/游戏/报表测试
+npm test           # 57 项后端/账号/设备/游戏/报表/主账号测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -104,7 +105,8 @@ ADMIN_PASSWORD='your-strong-password' npm start
 ## 四、账号、卡密与设备规则
 
 - 登录与注册已分栏：登录只需昵称 + 密码，不显示卡密输入；注册才显示卡密与卡密帮助；卡密到期/试用结束可在登录页点「卡密续期」或登录后按提示续期。
-- 卡密格式 `XXXX-XXXX-XXXX-XXXX`，字符集去掉易混淆字符（无 0/O/1/I）；生成时记录批次、备注与类型。
+- 卡密格式 `XXXX-XXXX-XXXX-XXXX`，字符集去掉易混淆字符（无 0/O/1/I）；生成时记录批次、备注与类型。卡密严格一次性使用：注册、用户续期、后台绑定/续期都通过条件更新原子占用，同一张卡密不能重复注册或重复绑定。
+- 后台「卡密」页可对未使用卡密点「绑定」，输入账号昵称后直接把卡密绑到该账号；有效期从账号当前到期时间（已过期则从现在）顺延，永久卡密直接设为永久。
 - `day` = 使用后 1 天，`month` = 使用后 30 天，`forever` = 无到期时间；到期后登录返回 40301，在线会话立即失效，数据保留。
 - 后台「卡密启用时间」默认 `2026-10-22 00:00:00`。启用前新账号可不填卡密注册，账号无卡密、到期时间为启用时间，界面显示「试用中」；启用后新注册必须填卡密，已有试用账号也需补卡密才能登录。
 - 修改启用时间会同步所有无卡密试用账号的到期时间；试用账号在启用前也可提前输入卡密转为正式账号。
@@ -139,6 +141,7 @@ sgbhsdPriceShare/
 │   ├── cache.js            # Redis 字典缓存（失败自动退化）
 │   ├── dict-cache.js       # 字典缓存失效 + 广播
 │   ├── ws.js               # WebSocket 认证、按账号广播
+│   ├── master.js           # 全局主账号、共享开关与查看者广播
 │   ├── scheduler.js        # 按账号 cron 定时同步与运行日志
 │   ├── util.js             # 统一响应/校验
 │   ├── auth.js             # 密码（scrypt）、设备会话、账号状态
@@ -178,7 +181,7 @@ sgbhsdPriceShare/
 │   ├── manifest.webmanifest
 │   └── icons/icon.svg
 ├── scripts/build-ui.js     # esbuild 打包 + javascript-obfuscator 混淆
-├── test/                   # api / auth / game / reports 共 51 项
+├── test/                   # api / auth / game / reports / master 共 57 项
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -208,8 +211,9 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | GET | `/api/public/config` | 公开配置：卡密是否启用、启用时间、注册开关、公告、卡密提示与 token 教程的已清洗 HTML |
 | POST | `/api/auth/login` | `{name,password,key?,mode?,deviceId,deviceName,kick?}`；`mode=login` 只登录已有账号（未知账号 `40401`），`mode=register` 只注册新账号（已有昵称 `40012`）；不传 `mode` 保留自动识别；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；超设备上限返回 `40910` |
 | POST | `/api/auth/logout` | 注销当前会话 |
-| GET | `/api/auth/me` | 当前账号、到期时间、游戏 token（仅本人）、赋税减免、当前区服、`allowSyncServer` |
+| GET | `/api/auth/me` | 当前账号、到期时间、游戏 token（仅本人）、赋税减免、当前区服、`allowSyncServer`、主账号名称与查看开关 |
 | PUT | `/api/auth/relief` | 更新赋税减免（0~100） |
+| PUT | `/api/auth/master-prices` | 传 `{enabled:boolean}` 开启/关闭查看主账号价格；主账号自身不可开启 |
 | PUT | `/api/auth/token` | 更新本人游戏 token |
 | GET | `/api/auth/sessions` | 当前账号在线设备列表 |
 | DELETE | `/api/auth/sessions/:id` | 踢出指定设备 |
@@ -217,16 +221,17 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | POST | `/api/admin/login` | 管理后台登录（`X-Admin-Token` 有效期 12 小时，重启失效） |
 | GET | `/api/admin/overview` | 概览统计 |
 | GET/POST | `/api/admin/keys`、`/keys/export`、`/keys/revoke`、`/batches` | 卡密生成/列表/导出/作废/批次 |
-| GET/POST | `/api/admin/accounts`、`/:id/status`、`/:id/expires`、`/:id/device-limit`、`/:id/password`、`/:id/kick`、`/:id/sync-server`、`DELETE /:id` | 账号管理；`/sync-server` 传 `{allow:boolean}` 控制区服参数权限 |
+| POST | `/api/admin/keys/:id/bind` | 传 `{accountId}` 或 `{accountName}`，把未使用卡密直接绑定到账号；卡密只能消耗一次，有效期从账号当前到期时间顺延 |
+| GET/POST | `/api/admin/accounts`、`/:id/status`、`/:id/expires`、`/:id/device-limit`、`/:id/password`、`/:id/kick`、`/:id/sync-server`、`/:id/master`、`DELETE /:id` | 账号管理；`/expires` 支持 `expiresAt` / `extendDays` / `keyCode`，卡密绑定从当前到期时间顺延且只能使用一次；`/sync-server` 传 `{allow:boolean}` 控制区服参数权限；`/master` 传 `{master:boolean}` 设置/取消全局主账号并重置查看开关 |
 | GET/POST/PUT/DELETE | `/api/admin/dict`、`/api/admin/servers` | 字典 / 区服维护（删除被引用项返回 40901/40902，`?force=1` 强制） |
 | GET/PUT | `/api/admin/settings` | 注册开关、公告、默认设备上限、`keyRequiredAt`、`keyHelpMd`、`tokenHelpMd`；GET/PUT 返回渲染后的 HTML |
 | POST | `/api/admin/markdown/preview` | `{text}` 预览 Markdown（服务端清洗后返回 HTML） |
 | GET/DELETE | `/api/admin/sync-logs` | 全部账号同步日志 |
 | GET | `/api/dict?type=city\|commodity` | 下拉数据源（登录可读） |
 | GET | `/api/servers` | 区服列表 |
-| GET | `/api/prices?server&city&commodity?&relief=5` | 查询价格（按个人减免换算为游戏显示价） |
-| POST | `/api/prices` | 保存价格；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903 |
-| GET | `/api/prices/history`、`/trend`、`/matrix`、`/export` | 历史 / 趋势 / 跨城比价 / CSV 导出 |
+| GET | `/api/prices?server&city&commodity?&relief=5` | 查询价格（按个人减免换算为游戏显示价）；返回 `masterAccountName`、`sharedCount`，每条价格带 `source: own/master` |
+| POST | `/api/prices` | 保存价格；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903；主账号保存后通知共享查看者 |
+| GET | `/api/prices/history`、`/trend`、`/matrix`、`/export` | 历史 / 趋势 / 跨城比价 / CSV 导出；启用共享时按整行回退并在响应或来源列标记主账号 |
 | POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选；未知商品需管理员先维护） |
 | GET | `/api/game/meta` | 同步支持城池清单 |
 | POST | `/api/game/token-info` | 识别 token 所属区服（仅展示，不保存 token；不接收区服参数） |
@@ -243,7 +248,8 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 连接地址 `/ws?token=<session>&device=<deviceId>`，校验失败关闭码 4401（未认证）/ 4403（账号不可用）。服务端只向同账号在线设备广播：
 
 - `hello`（账号昵称、在线设备数）
-- `price.updated` `{server,city,operator,items[]}`（`items` 为空表示需刷新）
+- `price.updated` `{server,city,operator,items[]}`（`items` 为空表示需刷新；主账号共享更新额外带 `shared:true`）
+- `master.changed`（主账号设置变更）、`master.preference` `{enabled}`（本账号共享开关变更）
 - `dict.changed`、`server.deleted`、`settings.updated`
 - `sync.finished`、`sync.failed`
 
@@ -326,7 +332,7 @@ docker compose exec app npm run db:migrate -- --force # 目标库已有数据时
 
 ## 十二、测试与 CI
 
-- `npm test`：51 项，覆盖账号/卡密/试用启用/续期/到期/封禁、设备上限与踢出、签名与重放、数据隔离、字典只读、价格并发、导入导出、游戏协议解析、税率、报表、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
+- `npm test`：57 项，覆盖账号/卡密一次性占用/后台绑定/试用启用/续期/到期/封禁、设备上限与踢出、签名与重放、数据隔离、主账号设置与共享开关、整行回退、历史/趋势/比价/导出、税率回退、字典只读、价格并发、导入导出、游戏协议解析、报表、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务（SQLite 默认使用临时库），验证卡密注册、HMAC 签名请求、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

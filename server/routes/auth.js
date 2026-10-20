@@ -12,6 +12,8 @@ const {
 const { get, run, tx, nowText, parseTime, getAppSettings, claimLegacyData, normalizeKeyRequiredAt } = require('../db');
 const { clampRelief } = require('../tax');
 const { validateKey, useKey, expiresAtFor, KEY_TYPE_NAMES } = require('../keys');
+const { masterMeta } = require('../master');
+const { broadcast } = require('../ws');
 const rateLimit = require('../ratelimit');
 
 const router = express.Router();
@@ -25,7 +27,8 @@ function readCredentials(body) {
   return { name, password };
 }
 
-function publicAccount(row, created, session, extra = {}) {
+async function publicAccount(row, created, session, extra = {}) {
+  const meta = await masterMeta(row);
   return {
     name: row.name,
     session,
@@ -39,6 +42,10 @@ function publicAccount(row, created, session, extra = {}) {
     hasKey: !!row.key_code,
     trial: !row.key_code,
     keyType: row.key_code ? (extra.keyType || null) : null,
+    masterAccountId: meta.masterAccountId,
+    masterAccountName: meta.masterAccountName,
+    isMaster: meta.isMaster,
+    viewMasterPrices: meta.viewMasterPrices,
     ...extra,
   };
 }
@@ -103,27 +110,35 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
       }
     }
 
+    if (keyCode && existing.expires_at == null) {
+      return fail(res, 400, '账号已永久有效，无需再使用卡密', 40011);
+    }
+
     let renewed = null;
     if (keyCode) {
-      renewed = await tx(async conn => {
-        const valid = await validateKey(conn, keyCode);
-        if (valid.error) return { error: valid.error };
-        const expiresAt = expiresAtFor(valid.row.type, renewBaseMs(existing.expires_at));
-        const usedKey = await useKey(conn, valid.row.id, existing.id);
-        if (!usedKey) return { error: '卡密刚刚已被使用，请联系管理员' };
-        await conn.run(
-          'UPDATE accounts SET key_code = ?, expires_at = ?, updated_at = ? WHERE id = ?',
-          [valid.row.code, expiresAt, nowText(), existing.id]
-        );
-        return { expiresAt, code: valid.row.code, keyType: valid.row.type };
-      });
-      if (renewed.error) return fail(res, 400, renewed.error, 40011);
+      try {
+        renewed = await tx(async conn => {
+          const valid = await validateKey(conn, keyCode);
+          if (valid.error) throw Object.assign(new Error(valid.error), { status: 400 });
+          const expiresAt = expiresAtFor(valid.row.type, renewBaseMs(existing.expires_at));
+          const usedKey = await useKey(conn, valid.row.id, existing.id);
+          if (!usedKey) throw Object.assign(new Error('卡密刚刚已被使用，请联系管理员'), { status: 400 });
+          await conn.run(
+            'UPDATE accounts SET key_code = ?, expires_at = ?, updated_at = ? WHERE id = ?',
+            [valid.row.code, expiresAt, nowText(), existing.id]
+          );
+          return { expiresAt, code: valid.row.code, keyType: valid.row.type };
+        });
+      } catch (err) {
+        if (err.status) return fail(res, err.status, err.message, 40011);
+        throw err;
+      }
       existing.key_code = renewed.code;
       existing.expires_at = renewed.expiresAt;
     }
 
     const session = await createSession(existing.id, { deviceId, deviceName, ip: req.ip });
-    return ok(res, publicAccount(existing, false, session, renewed ? {
+    return ok(res, await publicAccount(existing, false, session, renewed ? {
       renewed: true,
       keyType: KEY_TYPE_NAMES[renewed.keyType] || renewed.keyType,
     } : {}));
@@ -138,35 +153,40 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
 
   const passwordHash = await hashPassword(password);
   const t = nowText();
-  const created = await tx(async conn => {
-    const dup = await conn.get('SELECT id FROM accounts WHERE name = ?', [name]);
-    if (dup) return { error: '该昵称刚刚被注册，请直接登录' };
-    let code = '';
-    let keyType = null;
-    let keyId = 0;
-    let expiresAt = normalizeKeyRequiredAt(settings.keyRequiredAt);
-    if (keyCode) {
-      const valid = await validateKey(conn, keyCode);
-      if (valid.error) return { error: valid.error };
-      code = valid.row.code;
-      keyType = valid.row.type;
-      keyId = valid.row.id;
-      expiresAt = expiresAtFor(valid.row.type);
-    }
-    const info = await conn.run(
-      `INSERT INTO accounts (name, password_hash, relief, status, expires_at, key_code, device_limit, created_at, updated_at)
-       VALUES (?, ?, 5, 'active', ?, ?, ?, ?, ?)`,
-      [name, passwordHash, expiresAt, code || null, settings.defaultDeviceLimit, t, t]
-    );
-    if (keyCode) {
-      const used = await useKey(conn, keyId, info.insertId);
-      if (!used) return { error: '卡密刚刚已被使用，请联系管理员' };
-    }
-    const row = await conn.get('SELECT * FROM accounts WHERE id = ?', [info.insertId]);
-    return { row, keyType };
-  });
-
-  if (created.error) return fail(res, 400, created.error, 40011);
+  let created;
+  try {
+    created = await tx(async conn => {
+      const dup = await conn.get('SELECT id FROM accounts WHERE name = ?', [name]);
+      if (dup) throw Object.assign(new Error('该昵称刚刚被注册，请直接登录'), { status: 400 });
+      let code = '';
+      let keyType = null;
+      let keyId = 0;
+      let expiresAt = normalizeKeyRequiredAt(settings.keyRequiredAt);
+      if (keyCode) {
+        const valid = await validateKey(conn, keyCode);
+        if (valid.error) throw Object.assign(new Error(valid.error), { status: 400 });
+        code = valid.row.code;
+        keyType = valid.row.type;
+        keyId = valid.row.id;
+        expiresAt = expiresAtFor(valid.row.type);
+      }
+      const info = await conn.run(
+        `INSERT INTO accounts (name, password_hash, relief, status, expires_at, key_code, device_limit, created_at, updated_at)
+         VALUES (?, ?, 5, 'active', ?, ?, ?, ?, ?)`,
+        [name, passwordHash, expiresAt, code || null, settings.defaultDeviceLimit, t, t]
+      );
+      if (keyCode) {
+        const used = await useKey(conn, keyId, info.insertId);
+        if (!used) throw Object.assign(new Error('卡密刚刚已被使用，请联系管理员'), { status: 400 });
+      }
+      const row = await conn.get('SELECT * FROM accounts WHERE id = ?', [info.insertId]);
+      return { row, keyType };
+    });
+  } catch (err) {
+    if (err.status) return fail(res, err.status, err.message, 40011);
+    if (isUniqueConstraintError(err)) return fail(res, 400, '该昵称刚刚被注册，请直接登录', 40011);
+    throw err;
+  }
 
   try {
     await claimLegacyData(created.row.id);
@@ -175,7 +195,7 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
   }
 
   const session = await createSession(created.row.id, { deviceId, deviceName, ip: req.ip });
-  return ok(res, publicAccount(created.row, true, session, {
+  return ok(res, await publicAccount(created.row, true, session, {
     keyType: created.keyType ? (KEY_TYPE_NAMES[created.keyType] || created.keyType) : null,
   }));
 }));
@@ -189,9 +209,10 @@ router.post('/logout', requireAccount, asyncHandler(async (req, res) => {
 /** GET /api/auth/me 当前账号信息 */
 router.get('/me', requireAccount, asyncHandler(async (req, res) => {
   const row = await get(
-    'SELECT name, token, relief, created_at AS createdAt, current_server AS currentServer, allow_sync_server AS allowSyncServer, status, expires_at AS expiresAt, device_limit AS deviceLimit, key_code AS keyCode FROM accounts WHERE id = ?',
+    'SELECT name, token, relief, created_at AS createdAt, current_server AS currentServer, allow_sync_server AS allowSyncServer, status, expires_at AS expiresAt, device_limit AS deviceLimit, key_code AS keyCode, view_master_prices AS viewMasterPrices FROM accounts WHERE id = ?',
     [req.account.id]
   );
+  const meta = await masterMeta({ id: req.account.id, viewMasterPrices: row.viewMasterPrices });
   return ok(res, {
     name: row.name,
     token: row.token || '',
@@ -203,6 +224,10 @@ router.get('/me', requireAccount, asyncHandler(async (req, res) => {
     expiresAt: row.expiresAt || null,
     deviceLimit: Math.max(1, Number(row.deviceLimit) || 3),
     hasKey: !!row.keyCode,
+    masterAccountId: meta.masterAccountId,
+    masterAccountName: meta.masterAccountName,
+    isMaster: meta.isMaster,
+    viewMasterPrices: meta.viewMasterPrices,
   });
 }));
 
@@ -215,6 +240,21 @@ router.put('/relief', requireAccount, asyncHandler(async (req, res) => {
   const relief = clampRelief(raw);
   await run('UPDATE accounts SET relief = ?, updated_at = ? WHERE id = ?', [relief, nowText(), req.account.id]);
   return ok(res, { relief });
+}));
+
+/** PUT /api/auth/master-prices { enabled } 开启/关闭查看主账号价格 */
+router.put('/master-prices', requireAccount, asyncHandler(async (req, res) => {
+  const enabled = req.body && req.body.enabled;
+  if (typeof enabled !== 'boolean') return fail(res, 400, 'enabled 必须为布尔值');
+  const meta = await masterMeta(req.account);
+  if (meta.isMaster) return fail(res, 400, '主账号无需开启价格共享');
+  if (enabled && !meta.master) return fail(res, 400, '管理员尚未指定主账号');
+  await run(
+    'UPDATE accounts SET view_master_prices = ?, updated_at = ? WHERE id = ?',
+    [enabled ? 1 : 0, nowText(), req.account.id]
+  );
+  broadcast('master.preference', { enabled }, { accountId: req.account.id });
+  return ok(res, { enabled });
 }));
 
 /** PUT /api/auth/token { token } 仅更新本账号的游戏登录 token */

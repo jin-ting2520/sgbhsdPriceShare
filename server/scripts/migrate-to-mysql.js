@@ -63,6 +63,7 @@ if (!fs.existsSync(srcFile)) {
       ${pick(accountCols, 'device_limit', 'deviceLimit', '3')},
       ${pick(accountCols, 'current_server', 'currentServer', "''")},
       ${pick(accountCols, 'allow_sync_server', 'allowSyncServer', '0')},
+      ${pick(accountCols, 'view_master_prices', 'viewMasterPrices', '0')},
       ${pick(accountCols, 'created_at', 'createdAt', 'NULL')},
       ${pick(accountCols, 'updated_at', 'updatedAt', 'NULL')}
     FROM accounts ORDER BY id`) : [];
@@ -93,12 +94,13 @@ if (!fs.existsSync(srcFile)) {
     if (existing) { accountIdMap.set(a.id, existing.id); continue; }
     const info = await db.run(
       `INSERT INTO accounts (name, password_hash, token, relief, status, expires_at, key_code,
-                             device_limit, current_server, allow_sync_server, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             device_limit, current_server, allow_sync_server, view_master_prices,
+                             created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [a.name, a.passwordHash, a.token || null, a.relief == null ? 5 : a.relief,
         a.status || 'active', a.expiresAt || null, a.keyCode || null,
         Number(a.deviceLimit) || 3, a.currentServer || '', Number(a.allowSyncServer) ? 1 : 0,
-        a.createdAt || t, a.updatedAt || t]
+        Number(a.viewMasterPrices) ? 1 : 0, a.createdAt || t, a.updatedAt || t]
     );
     accountIdMap.set(a.id, info.insertId);
     inserted.accounts += 1;
@@ -151,13 +153,15 @@ if (!fs.existsSync(srcFile)) {
       const keyRequiredAt = has('app_settings', 'key_required_at')
         ? (row.key_required_at || '2026-10-22 00:00:00')
         : '2026-10-22 00:00:00';
+      const srcMasterId = has('app_settings', 'master_account_id') ? Number(row.master_account_id) : 0;
+      const masterAccountId = srcMasterId ? (accountIdMap.get(srcMasterId) || null) : null;
       await db.run(
         `UPDATE app_settings SET registration_enabled = ?, announcement = ?, key_help_md = ?,
-           token_help_md = ?, key_required_at = ?, default_device_limit = ?, updated_at = ?
+           token_help_md = ?, key_required_at = ?, default_device_limit = ?, master_account_id = ?, updated_at = ?
           WHERE id = 1`,
         [row.registration_enabled == null ? 1 : row.registration_enabled ? 1 : 0,
           row.announcement || '', keyHelpMd, tokenHelpMd, keyRequiredAt,
-          Number(row.default_device_limit) || 3, row.updated_at || t]
+          Number(row.default_device_limit) || 3, masterAccountId, row.updated_at || t]
       );
     }
   }

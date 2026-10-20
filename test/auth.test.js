@@ -103,6 +103,50 @@ test('卡密批量生成 / 列表 / 导出 / 作废', async () => {
   assert.match(r.json.message, /作废/);
 });
 
+test('后台直接绑定卡密：每张只能使用一次，并从当前到期时间顺延', async () => {
+  rateLimit.reset();
+  await registerAccount(base, admin, { name: '后台绑定卡密', type: 'month' });
+  const id = await accountId('后台绑定卡密');
+  const future = db.formatTime(Date.now() + 5 * 86400000);
+  const setExpiry = await admin.post(`/api/admin/accounts/${id}/expires`, { expiresAt: future });
+  assert.equal(setExpiry.status, 200);
+
+  const [code] = await issueKeys(admin, 'day', 1);
+  const listed = await admin.get(`/api/admin/keys?q=${encodeURIComponent(code)}`);
+  const key = listed.json.data.items.find(k => k.code === code);
+  assert.ok(key, '应能在卡密列表中找到刚生成的卡密');
+
+  const bound = await admin.post(`/api/admin/keys/${key.id}/bind`, { accountName: '后台绑定卡密' });
+  assert.equal(bound.status, 200, bound.json && bound.json.message);
+  assert.equal(bound.json.data.keyCode, code);
+  const addedDays = (db.parseTime(bound.json.data.expiresAt) - db.parseTime(future)) / 86400000;
+  assert.ok(addedDays > 0.99 && addedDays < 1.01, `应在原到期时间上加 1 天，实际 ${addedDays}`);
+
+  const used = await db.get('SELECT status, account_id FROM invite_keys WHERE id = ?', [key.id]);
+  assert.equal(used.status, 'used');
+  assert.equal(used.account_id, id);
+
+  const again = await admin.post(`/api/admin/keys/${key.id}/bind`, { accountName: '后台绑定卡密' });
+  assert.equal(again.status, 400);
+  assert.match(again.json.message, /已被使用/);
+  const accountRow = await db.get('SELECT expires_at FROM accounts WHERE id = ?', [id]);
+  assert.equal(accountRow.expires_at, bound.json.data.expiresAt, '重复绑定失败不应改变到期时间');
+
+  const duplicateRegister = await createClient(base).login({
+    name: '重复使用绑定卡密', password: 'pass-1234', key: code,
+  });
+  assert.equal(duplicateRegister.status, 400);
+  assert.match(duplicateRegister.json.message, /使用/);
+  assert.equal(await accountId('重复使用绑定卡密'), undefined, '已使用卡密不能再次注册账号');
+
+  const [code2] = await issueKeys(admin, 'day', 1);
+  const viaAccount = await admin.post(`/api/admin/accounts/${id}/expires`, { keyCode: code2 });
+  assert.equal(viaAccount.status, 200);
+  const viaAccountAgain = await admin.post(`/api/admin/accounts/${id}/expires`, { keyCode: code2 });
+  assert.equal(viaAccountAgain.status, 400);
+  assert.match(viaAccountAgain.json.message, /已被使用/);
+});
+
 /* ------------------------------ 卡密注册 ------------------------------ */
 
 test('卡密启用前可无卡密注册试用，有效卡密正常注册', async () => {

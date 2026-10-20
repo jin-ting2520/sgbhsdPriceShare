@@ -10,6 +10,7 @@ const { setCurrentServer } = require('../db');
 const scheduler = require('../scheduler');
 const rateLimit = require('../ratelimit');
 const { broadcast } = require('../ws');
+const { notifyMasterPriceChange } = require('../master');
 const { invalidateDict } = require('../dict-cache');
 
 const router = express.Router();
@@ -81,6 +82,11 @@ router.post('/sync', asyncHandler(async (req, res) => {
   await scheduler.logFinish(log.id, status, result,
     result.failed.length ? `失败城池：${result.failed.map(f => f.city).join('、')}` : null, result.server);
   broadcast('sync.finished', { trigger: 'manual', server: result.server, result }, { accountId: req.account.id });
+  if (result.queried > 0) {
+    await notifyMasterPriceChange(req.account.id, {
+      server: result.server, city: '', operator, tax: null, items: [],
+    });
+  }
   return ok(res, result);
 }));
 

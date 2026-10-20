@@ -140,10 +140,12 @@
             <el-table-column label="批次" prop="batchId" width="170" show-overflow-tooltip></el-table-column>
             <el-table-column label="生成时间" prop="createdAt" width="150"></el-table-column>
             <el-table-column label="使用时间" prop="usedAt" width="150"></el-table-column>
-            <el-table-column label="操作" width="80" align="center">
+            <el-table-column label="操作" width="130" align="center">
               <template #default="s">
-                <el-button v-if="s.row.status === 'unused'" link type="danger" size="small"
-                  @click="revokeKey(s.row)">作废</el-button>
+                <template v-if="s.row.status === 'unused'">
+                  <el-button link type="primary" size="small" @click="bindKey(s.row)">绑定</el-button>
+                  <el-button link type="danger" size="small" @click="revokeKey(s.row)">作废</el-button>
+                </template>
               </template>
             </el-table-column>
           </el-table>
@@ -194,6 +196,13 @@
             <el-table-column label="到期时间" width="150">
               <template #default="s">{{ s.row.expiresAt || '永久' }}</template>
             </el-table-column>
+            <el-table-column label="主账号" width="90" align="center">
+              <template #default="s">
+                <el-tag v-if="s.row.isMaster" size="small" type="warning">主账号</el-tag>
+                <el-tag v-else-if="s.row.viewMasterPrices" size="small" type="success" effect="plain">共享</el-tag>
+                <span v-else class="muted">-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="卡密" prop="keyCode" width="190" show-overflow-tooltip></el-table-column>
             <el-table-column label="设备" width="90" align="center">
               <template #default="s">{{ s.row.sessions }}/{{ s.row.deviceLimit }}</template>
@@ -221,6 +230,8 @@
                       <el-dropdown-item command="device">调整设备上限</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.allowSyncServer" command="allow-server">允许传区服参数</el-dropdown-item>
                       <el-dropdown-item v-else command="deny-server">禁止传区服参数</el-dropdown-item>
+                      <el-dropdown-item v-if="!s.row.isMaster" command="set-master" divided>设为主账号</el-dropdown-item>
+                      <el-dropdown-item v-else command="clear-master" divided>取消主账号</el-dropdown-item>
                       <el-dropdown-item command="password">重置密码</el-dropdown-item>
                       <el-dropdown-item command="kick">踢下线</el-dropdown-item>
                       <el-dropdown-item command="ban" v-if="s.row.status !== 'banned'">封禁</el-dropdown-item>
@@ -312,7 +323,7 @@
             </el-form-item>
             <el-form-item label="卡密获取提示">
               <el-input v-model="appSettings.keyHelpMd" type="textarea" :rows="7" maxlength="20000" show-word-limit
-                placeholder="支持 Markdown，显示在登录页卡密输入框下方"></el-input>
+                placeholder="支持 Markdown，显示在注册页卡密输入框下方"></el-input>
               <div class="toolbar settings-preview-bar">
                 <el-button size="small" :loading="previewing.key" @click="previewHelp('key')">预览</el-button>
                 <span class="muted">支持标题、列表、链接、图片，危险 HTML 会被过滤</span>

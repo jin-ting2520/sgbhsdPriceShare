@@ -9,6 +9,7 @@ const {
 } = require('../db');
 const cache = require('../cache');
 const { broadcast } = require('../ws');
+const { masterMeta, notifyMasterPriceChange } = require('../master');
 const { requireAccount } = require('../auth');
 const { clampRelief, displayBuy, displaySell, rawBuy, rawSell } = require('../tax');
 const { ok, fail, asyncHandler, cleanName, isBlank, parsePrice } = require('../util');
@@ -40,6 +41,24 @@ const operatorOf = (req, body) => {
   return name || cleanName(req.account.name, 20) || '匿名';
 };
 
+const fallbackIdOf = meta => (meta.viewMasterPrices && meta.master ? Number(meta.master.id) : null);
+
+async function readTax(accountId, masterId, serverId, cityId) {
+  const own = await getCityTax(accountId, serverId, cityId);
+  if (own != null || !masterId) return own;
+  return getCityTax(masterId, serverId, cityId);
+}
+
+async function readTaxMap(accountId, masterId, serverId) {
+  const own = await getCityTaxMap(accountId, serverId);
+  if (!masterId) return own;
+  const shared = await getCityTaxMap(masterId, serverId);
+  for (const [cityId, tax] of shared) {
+    if (!own.has(cityId)) own.set(cityId, tax);
+  }
+  return own;
+}
+
 /** GET /api/prices?server=&city=&commodity= —— 查询价格（商品列固定展示全部商品） */
 router.get('/', asyncHandler(async (req, res) => {
   const server = serverOf(req, req.query.server);
@@ -62,11 +81,14 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
+  const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
   const relief = reliefOf(req.query, 'relief', req.account.relief);
-  const tax = await getCityTax(accountId, serverId, cityId);
+  const tax = await readTax(accountId, fallbackId, serverId, cityId);
   let priceMap = {};
+  let sharedMap = {};
   if (serverId && cityId) {
     const rows = await query(
       `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell,
@@ -75,10 +97,24 @@ router.get('/', asyncHandler(async (req, res) => {
       [accountId, serverId, cityId]
     );
     priceMap = Object.fromEntries(rows.map(r => [r.commodityId, r]));
+    if (fallbackId) {
+      const shared = await query(
+        `SELECT commodity_id AS commodityId, buy_price AS buy, sell_price AS sell,
+                operator, updated_at AS updatedAt
+           FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ?`,
+        [fallbackId, serverId, cityId]
+      );
+      sharedMap = Object.fromEntries(shared.map(r => [r.commodityId, r]));
+    }
   }
 
+  let sharedCount = 0;
   const items = commodities.map(c => {
-    const p = priceMap[c.id];
+    const own = priceMap[c.id];
+    const shared = !own && fallbackId ? sharedMap[c.id] : null;
+    const p = own || shared;
+    const source = own ? 'own' : (shared ? 'master' : null);
+    if (source === 'master') sharedCount += 1;
     return {
       commodityId: c.id,
       commodity: c.name,
@@ -87,6 +123,7 @@ router.get('/', asyncHandler(async (req, res) => {
       sell: p ? displaySell(p.sell, tax, relief) : null,
       updatedAt: p ? p.updatedAt : null,
       operator: p ? p.operator : null,
+      source,
     };
   });
 
@@ -95,6 +132,11 @@ router.get('/', asyncHandler(async (req, res) => {
     city,
     tax,
     relief,
+    masterAccountId: meta.masterAccountId,
+    masterAccountName: meta.masterAccountName,
+    isMaster: meta.isMaster,
+    viewMasterPrices: meta.viewMasterPrices,
+    sharedCount,
     serverRegistered: !!serverId,
     cityRegistered: !!cityId,
     items,
@@ -123,13 +165,14 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
   const serverId = await upsertServer(server);
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
 
   const operator = operatorOf(req, req.body);
   const relief = reliefOf(req.body, 'relief', req.account.relief);
-  const tax = await getCityTax(accountId, serverId, cityId);
+  const tax = await readTax(accountId, fallbackIdOf(meta), serverId, cityId);
 
   const ops = [];
   for (const raw of items) {
@@ -249,6 +292,7 @@ router.post('/', asyncHandler(async (req, res) => {
   if (changed.length) {
     await cache.invalidate('dict:');
     broadcast('price.updated', { server, city, operator, tax, items: changed }, { accountId });
+    await notifyMasterPriceChange(accountId, { server, city, operator, tax, items: changed });
   }
 
   return ok(res, summary);
@@ -261,31 +305,51 @@ router.get('/history', asyncHandler(async (req, res) => {
   if (isBlank(server) || isBlank(city)) return ok(res, { total: 0, items: [] });
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
+  const fallbackId = fallbackIdOf(meta);
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
   if (!serverId || !cityId) return ok(res, { total: 0, items: [] });
 
   const relief = reliefOf(req.query, 'relief', req.account.relief);
-  const tax = await getCityTax(accountId, serverId, cityId);
-  const rows = await query(
-    `SELECT h.id, h.field, h.old_value AS oldValue, h.new_value AS newValue, h.created_at AS createdAt,
-            h.operator, s.name AS server, c.name AS city, d.name AS commodity
+  const tax = await readTax(accountId, fallbackId, serverId, cityId);
+  const historySql = `SELECT h.id, h.field, h.old_value AS oldValue, h.new_value AS newValue,
+            h.created_at AS createdAt, h.operator, s.name AS server, c.name AS city, d.name AS commodity
        FROM price_history h
        JOIN servers s    ON s.id = h.server_id
        JOIN dict_items c ON c.id = h.city_id
        JOIN dict_items d ON d.id = h.commodity_id
       WHERE h.account_id = ? AND h.server_id = ? AND h.city_id = ?
-      ORDER BY h.id DESC LIMIT ?`,
-    [accountId, serverId, cityId, limit]
-  );
+      ORDER BY h.id DESC LIMIT ?`;
+  let source = null;
+  let rows = await query(historySql, [accountId, serverId, cityId, limit]);
+  if (rows.length) {
+    source = 'own';
+  } else if (fallbackId) {
+    const ownPrice = await get(
+      'SELECT 1 AS hit FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ? LIMIT 1',
+      [accountId, serverId, cityId]
+    );
+    if (!ownPrice) {
+      rows = await query(historySql, [fallbackId, serverId, cityId, limit]);
+      if (rows.length) source = 'master';
+    }
+  }
 
   const items = rows.map(r => {
     const adjust = r.field === 'buy_price' ? displayBuy : displaySell;
     return { ...r, oldValue: adjust(r.oldValue, tax, relief), newValue: adjust(r.newValue, tax, relief) };
   });
 
-  return ok(res, { total: items.length, tax, relief, items });
+  return ok(res, {
+    total: items.length,
+    tax,
+    relief,
+    source,
+    masterAccountName: meta.masterAccountName,
+    items,
+  });
 }));
 
 /** GET /api/prices/trend?server=&city=&commodity=&days= —— 价格趋势（逐次变更时点 + 前向填充） */
@@ -300,28 +364,39 @@ router.get('/trend', asyncHandler(async (req, res) => {
   }
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
+  const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
   const relief = reliefOf(req.query, 'relief', req.account.relief);
-  const tax = await getCityTax(accountId, serverId, cityId);
-
-  let rows = [];
-  if (serverId && cityId) {
-    rows = await query(
-      `SELECT h.field, h.new_value AS value, h.created_at AS createdAt
+  const historySql = `SELECT h.field, h.new_value AS value, h.created_at AS createdAt
          FROM price_history h
         WHERE h.account_id = ? AND h.server_id = ? AND h.city_id = ? AND h.commodity_id = ? AND h.new_value IS NOT NULL
-        ORDER BY h.id`,
-      [accountId, serverId, cityId, commodityRow.id]
-    );
-    rows = rows.map(r => ({
-      ...r,
-      value: r.field === 'buy_price' ? displayBuy(r.value, tax, relief) : displaySell(r.value, tax, relief),
-    }));
+        ORDER BY h.id`;
+  const currentSql = 'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?';
+
+  let rows = [];
+  let current = null;
+  let source = null;
+  if (serverId && cityId) {
+    rows = await query(historySql, [accountId, serverId, cityId, commodityRow.id]);
+    current = await get(currentSql, [accountId, serverId, cityId, commodityRow.id]);
+    if (rows.length || current) {
+      source = 'own';
+    } else if (fallbackId) {
+      rows = await query(historySql, [fallbackId, serverId, cityId, commodityRow.id]);
+      current = await get(currentSql, [fallbackId, serverId, cityId, commodityRow.id]);
+      if (rows.length || current) source = 'master';
+    }
   }
+  const tax = await readTax(accountId, fallbackId, serverId, cityId);
+  rows = rows.map(r => ({
+    ...r,
+    value: r.field === 'buy_price' ? displayBuy(r.value, tax, relief) : displaySell(r.value, tax, relief),
+  }));
 
   // 近 N 天（created_at 为北京时间 'YYYY-MM-DD HH:MM:SS'）
   const cutoff = new Date(Date.now() + 8 * 3600000 - days * 86400000).toISOString().slice(0, 10);
@@ -339,9 +414,6 @@ router.get('/trend', asyncHandler(async (req, res) => {
     byTime.get(t)[key] = r.value;
   }
 
-  const current = (serverId && cityId)
-    ? await get('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE account_id = ? AND server_id = ? AND city_id = ? AND commodity_id = ?', [accountId, serverId, cityId, commodityRow.id])
-    : null;
   if (current) {
     current.buy = displayBuy(current.buy, tax, relief);
     current.sell = displaySell(current.sell, tax, relief);
@@ -384,7 +456,8 @@ router.get('/trend', asyncHandler(async (req, res) => {
   };
 
   return ok(res, {
-    server, city, commodity, burden: commodityRow.burden, days, tax, relief, points, summary,
+    server, city, commodity, burden: commodityRow.burden, days, tax, relief, source,
+    masterAccountName: meta.masterAccountName, points, summary,
   });
 }));
 
@@ -395,16 +468,19 @@ router.get('/matrix', asyncHandler(async (req, res) => {
   if (isBlank(server) || isBlank(commodity)) return fail(res, 400, '请提供区服和商品');
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
+  const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
   const relief = reliefOf(req.query, 'relief', req.account.relief);
-  const taxMap = await getCityTaxMap(accountId, serverId);
+  const taxMap = await readTaxMap(accountId, fallbackId, serverId);
 
   const rows = await query(
     `SELECT c.id AS cityId, c.name AS city, c.sort_order AS sortOrder,
-            p.buy_price AS buy, p.sell_price AS sell, p.operator, p.updated_at AS updatedAt
+            p.id AS priceId, p.buy_price AS buy, p.sell_price AS sell,
+            p.operator, p.updated_at AS updatedAt
        FROM dict_items c
        LEFT JOIN prices p
               ON p.city_id = c.id AND p.commodity_id = ? AND p.server_id = ? AND p.account_id = ?
@@ -412,18 +488,34 @@ router.get('/matrix', asyncHandler(async (req, res) => {
       ORDER BY (p.buy_price IS NULL), p.buy_price, c.sort_order, c.id`,
     [commodityRow.id, serverId || -1, accountId]
   );
+  const sharedMap = new Map();
+  if (fallbackId) {
+    const sharedRows = await query(
+      `SELECT city_id AS cityId, buy_price AS buy, sell_price AS sell, operator, updated_at AS updatedAt
+         FROM prices WHERE account_id = ? AND server_id = ? AND commodity_id = ?`,
+      [fallbackId, serverId || -1, commodityRow.id]
+    );
+    for (const row of sharedRows) sharedMap.set(Number(row.cityId), row);
+  }
 
+  let sharedCount = 0;
   const items = rows.map(r => {
+    const own = r.priceId != null;
+    const shared = !own ? sharedMap.get(Number(r.cityId)) : null;
+    const p = own ? r : shared;
+    const source = own ? 'own' : (shared ? 'master' : null);
+    if (source === 'master') sharedCount += 1;
     const tax = taxMap.get(Number(r.cityId)) ?? null;
     return {
       cityId: r.cityId,
       city: r.city,
       sortOrder: r.sortOrder,
       tax,
-      buy: displayBuy(r.buy, tax, relief),
-      sell: displaySell(r.sell, tax, relief),
-      updatedAt: r.updatedAt,
-      operator: r.operator,
+      buy: p ? displayBuy(p.buy, tax, relief) : null,
+      sell: p ? displaySell(p.sell, tax, relief) : null,
+      updatedAt: p ? p.updatedAt : null,
+      operator: p ? p.operator : null,
+      source,
     };
   });
   items.sort((a, b) => {
@@ -449,7 +541,16 @@ router.get('/matrix', asyncHandler(async (req, res) => {
     bestSellCity: sells.length ? priced.find(i => i.sell === Math.max(...sells)).city : null,
   };
 
-  return ok(res, { server, commodity, burden: commodityRow.burden, relief, items, summary });
+  return ok(res, {
+    server, commodity, burden: commodityRow.burden, relief,
+    masterAccountId: meta.masterAccountId,
+    masterAccountName: meta.masterAccountName,
+    isMaster: meta.isMaster,
+    viewMasterPrices: meta.viewMasterPrices,
+    sharedCount,
+    items,
+    summary,
+  });
 }));
 
 /** GET /api/prices/export?server=&city= —— CSV 导出（带 BOM，Excel 友好） */
@@ -459,30 +560,36 @@ router.get('/export', asyncHandler(async (req, res) => {
   if (isBlank(server) || isBlank(city)) return fail(res, 400, '请先选择区服和城池');
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
+  const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
   const relief = reliefOf(req.query, 'relief', req.account.relief);
-  const tax = await getCityTax(accountId, serverId, cityId);
+  const tax = await readTax(accountId, fallbackId, serverId, cityId);
   let rows = [];
+  let sharedRows = [];
   if (serverId && cityId) {
-    rows = await query(
-      `SELECT d.name AS commodity, d.burden, p.buy_price AS buy, p.sell_price AS sell,
+    const selectSql = `SELECT d.name AS commodity, d.burden, p.buy_price AS buy, p.sell_price AS sell,
               p.operator, p.updated_at AS updatedAt
          FROM prices p JOIN dict_items d ON d.id = p.commodity_id
-        WHERE p.account_id = ? AND p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`,
-      [accountId, serverId, cityId]
-    );
-    rows = rows.map(r => ({
-      ...r,
-      buy: displayBuy(r.buy, tax, relief),
-      sell: displaySell(r.sell, tax, relief),
-    }));
+        WHERE p.account_id = ? AND p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`;
+    rows = await query(selectSql, [accountId, serverId, cityId]);
+    if (fallbackId) sharedRows = await query(selectSql, [fallbackId, serverId, cityId]);
+    const adjust = row => ({
+      ...row,
+      buy: displayBuy(row.buy, tax, relief),
+      sell: displaySell(row.sell, tax, relief),
+    });
+    rows = rows.map(adjust);
+    sharedRows = sharedRows.map(adjust);
   }
   const all = await query(
     `SELECT name, burden FROM dict_items WHERE type = 'commodity' AND status = 1 ORDER BY sort_order, id`
   );
   const full = all.map(c => {
-    const hit = rows.find(r => r.commodity === c.name);
+    const own = rows.find(r => r.commodity === c.name);
+    const shared = !own ? sharedRows.find(r => r.commodity === c.name) : null;
+    const hit = own || shared;
     return {
       commodity: c.name,
       burden: c.burden,
@@ -490,14 +597,15 @@ router.get('/export', asyncHandler(async (req, res) => {
       sell: hit ? hit.sell : null,
       updatedAt: hit ? hit.updatedAt : null,
       operator: hit ? hit.operator : null,
+      source: own ? '本人' : (shared ? '主账号' : ''),
     };
   });
 
-  const lines = ['区服,城池,商品,负重,买价,卖价,更新时间,更新人'];
+  const lines = ['区服,城池,商品,负重,买价,卖价,更新时间,更新人,来源'];
   for (const r of full) {
     lines.push([
       server, city, r.commodity, r.burden ?? '', r.buy ?? '', r.sell ?? '',
-      r.updatedAt ?? '', r.operator ?? '',
+      r.updatedAt ?? '', r.operator ?? '', r.source,
     ].map(csvCell).join(','));
   }
   const csv = '\uFEFF' + lines.join('\r\n');
@@ -521,12 +629,13 @@ router.post('/import', asyncHandler(async (req, res) => {
   if (!rowsIn && text.trim() === '') return fail(res, 400, '请提供要导入的数据');
 
   const accountId = req.account.id;
+  const meta = await masterMeta(req.account);
   const serverId = await upsertServer(server);
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
   const operator = operatorOf(req, req.body);
   const relief = reliefOf(req.body, 'relief', req.account.relief);
-  const tax = await getCityTax(accountId, serverId, cityId);
+  const tax = await readTax(accountId, fallbackIdOf(meta), serverId, cityId);
 
   const errors = [];
   const parsed = [];
@@ -638,6 +747,7 @@ router.post('/import', asyncHandler(async (req, res) => {
   if (created || updated) {
     await cache.invalidate('dict:');
     broadcast('price.updated', { server, city, operator, tax, items: [] }, { accountId });
+    await notifyMasterPriceChange(accountId, { server, city, operator, tax, items: [] });
   }
 
   return ok(res, { total: parsed.length, created, updated });

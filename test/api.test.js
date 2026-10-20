@@ -225,7 +225,7 @@ test('导出：CSV 含表头与 BOM', async () => {
   assert.equal(r.status, 200);
   assert.deepEqual([...r.buf.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'UTF-8 BOM');
   const header = r.text.replace(/^\uFEFF/, '').split('\r\n')[0];
-  assert.equal(header, '区服,城池,商品,负重,买价,卖价,更新时间,更新人');
+  assert.equal(header, '区服,城池,商品,负重,买价,卖价,更新时间,更新人,来源');
 });
 
 /* ------------------------------ 导入 ------------------------------ */

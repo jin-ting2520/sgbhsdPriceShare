@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   device_limit  INTEGER NOT NULL DEFAULT 3,
   current_server TEXT   NOT NULL DEFAULT '',
   allow_sync_server INTEGER NOT NULL DEFAULT 0,
+  view_master_prices INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -213,6 +214,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
   token_help_md        TEXT    NOT NULL DEFAULT '',
   key_required_at      TEXT    NOT NULL DEFAULT '2026-10-22 00:00:00',
   default_device_limit INTEGER NOT NULL DEFAULT 3,
+  master_account_id    INTEGER,
   updated_at           TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -325,6 +327,7 @@ const MYSQL_SCHEMA = [
     device_limit INT NOT NULL DEFAULT 3,
     current_server VARCHAR(50) NOT NULL DEFAULT '',
     allow_sync_server TINYINT NOT NULL DEFAULT 0,
+    view_master_prices TINYINT NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE KEY uk_accounts_name (name),
@@ -365,6 +368,7 @@ const MYSQL_SCHEMA = [
     token_help_md MEDIUMTEXT NULL,
     key_required_at VARCHAR(19) NOT NULL DEFAULT '2026-10-22 00:00:00',
     default_device_limit INT NOT NULL DEFAULT 3,
+    master_account_id INT NULL,
     updated_at DATETIME NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS sync_settings (
@@ -553,6 +557,7 @@ function migrateSqlite() {
   if (!hasCol('accounts', 'device_limit')) sqlite.exec('ALTER TABLE accounts ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 3');
   if (!hasCol('accounts', 'current_server')) sqlite.exec("ALTER TABLE accounts ADD COLUMN current_server TEXT NOT NULL DEFAULT ''");
   if (!hasCol('accounts', 'allow_sync_server')) sqlite.exec('ALTER TABLE accounts ADD COLUMN allow_sync_server INTEGER NOT NULL DEFAULT 0');
+  if (!hasCol('accounts', 'view_master_prices')) sqlite.exec('ALTER TABLE accounts ADD COLUMN view_master_prices INTEGER NOT NULL DEFAULT 0');
 
   if (!hasCol('app_settings', 'key_help_md')) {
     sqlite.exec("ALTER TABLE app_settings ADD COLUMN key_help_md TEXT NOT NULL DEFAULT ''");
@@ -565,6 +570,7 @@ function migrateSqlite() {
   if (!hasCol('app_settings', 'key_required_at')) {
     sqlite.exec(`ALTER TABLE app_settings ADD COLUMN key_required_at TEXT NOT NULL DEFAULT '${DEFAULT_KEY_REQUIRED_AT}'`);
   }
+  if (!hasCol('app_settings', 'master_account_id')) sqlite.exec('ALTER TABLE app_settings ADD COLUMN master_account_id INTEGER');
 
   if (!hasCol('price_history', 'account_id')) {
     sqlite.exec('ALTER TABLE price_history ADD COLUMN account_id INTEGER NOT NULL DEFAULT 0');
@@ -700,6 +706,9 @@ async function migrateMysql() {
   if (!(await hasCol('accounts', 'allow_sync_server'))) {
     await pool.query('ALTER TABLE accounts ADD COLUMN allow_sync_server TINYINT NOT NULL DEFAULT 0');
   }
+  if (!(await hasCol('accounts', 'view_master_prices'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN view_master_prices TINYINT NOT NULL DEFAULT 0');
+  }
   if (!(await hasCol('app_settings', 'key_help_md'))) {
     await pool.query('ALTER TABLE app_settings ADD COLUMN key_help_md MEDIUMTEXT NULL');
     await pool.query('UPDATE app_settings SET key_help_md = ? WHERE id = 1 AND (key_help_md IS NULL OR key_help_md = ?)', [DEFAULT_KEY_HELP_MD, '']);
@@ -710,6 +719,9 @@ async function migrateMysql() {
   }
   if (!(await hasCol('app_settings', 'key_required_at'))) {
     await pool.query(`ALTER TABLE app_settings ADD COLUMN key_required_at VARCHAR(19) NOT NULL DEFAULT '${DEFAULT_KEY_REQUIRED_AT}'`);
+  }
+  if (!(await hasCol('app_settings', 'master_account_id'))) {
+    await pool.query('ALTER TABLE app_settings ADD COLUMN master_account_id INT NULL');
   }
 
   if (!(await hasCol('price_history', 'account_id'))) {
@@ -1011,6 +1023,7 @@ async function getAppSettings() {
     keyRequiredAt,
     keyRequired: keyRequiredAtNow(keyRequiredAt),
     defaultDeviceLimit: Math.max(1, Math.min(Number(row.default_device_limit) || 3, 20)),
+    masterAccountId: Number(row.master_account_id) || null,
   };
 }
 

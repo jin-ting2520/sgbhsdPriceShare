@@ -85,6 +85,14 @@
       </div>
     </div>
     <div class="spacer"></div>
+    <el-tooltip v-if="masterAccountName && !isMaster" :content="`查看主账号「${masterAccountName}」维护的价格；本人已录入的商品始终优先`">
+      <span class="master-switch">
+        <span class="master-switch__label">主账号价</span>
+        <el-switch v-model="viewMasterPrices" size="small" :loading="masterSaving"
+          @change="onViewMasterChange"></el-switch>
+      </span>
+    </el-tooltip>
+    <el-tag v-else-if="isMaster" size="small" type="warning" effect="plain" class="master-badge">主账号</el-tag>
     <span class="tag" v-if="accountServer" title="最近一次保存/同步使用的区服">当前区服 {{ accountServer }}</span>
     <el-tooltip :content="expiryTooltip">
       <el-tag size="small" class="expiry-tag" :type="expiryTagType">{{ expiryText }}</el-tag>
@@ -191,6 +199,7 @@
       <div class="statusbar" style="margin-bottom:12px">
         <span>商品 <b>{{ rows.length }}</b> 项</span>
         <span>已填写 <b class="ok">{{ stats.filled }}</b> 项</span>
+        <span v-if="viewMasterPrices">主账号共享 <b class="ok">{{ sharedCount }}</b> 项</span>
         <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
         <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
       </div>
@@ -213,6 +222,8 @@
               <span class="name">
                 {{ scope.row.commodity }}
                 <span class="burden-tag" v-if="scope.row.burden != null">负重{{ scope.row.burden }}</span>
+                <el-tag v-if="scope.row.source === 'master'" size="small" type="warning" effect="plain"
+                  style="margin-left:6px">主账号</el-tag>
                 <span v-if="isDirty(scope.row)" class="dirty-dot">*</span>
                 <el-tag v-if="scope.row._remoteConflict" size="small" type="warning" effect="plain"
                   style="margin-left:6px">已被他人更新</el-tag>
@@ -266,6 +277,8 @@
             <span class="name">
               {{ row.commodity }}
               <span class="burden-tag" v-if="row.burden != null">负重{{ row.burden }}</span>
+              <el-tag v-if="row.source === 'master'" size="small" type="warning" effect="plain"
+                style="margin-left:6px">主账号</el-tag>
               <span v-if="isDirty(row)" class="dirty-dot">*</span>
               <el-tag v-if="row._remoteConflict" size="small" type="warning" effect="plain"
                 style="margin-left:6px">已被他人更新</el-tag>
@@ -431,6 +444,7 @@
     <template v-else>
       <div class="confirm-summary">
         当前范围：<b>{{ form.server }}</b> · <b>{{ form.city }}</b>（最近 {{ historyList.length }} 条）
+        <el-tag v-if="historySource === 'master'" size="small" type="warning" effect="plain">主账号数据</el-tag>
         <el-button link type="primary" size="small" @click="loadHistory">刷新</el-button>
       </div>
       <el-table :data="historyList" size="small" max-height="50vh">
@@ -473,6 +487,7 @@
       <div class="confirm-summary">
         {{ form.server }} · {{ form.city }} · <b>{{ trendCommodity || '请选择商品' }}</b>
         <span v-if="trendData.burden != null">（负重 {{ trendData.burden }}）</span>
+        <el-tag v-if="trendData.source === 'master'" size="small" type="warning" effect="plain">主账号数据</el-tag>
       </div>
 
       <!-- 汇总 -->
@@ -558,6 +573,9 @@
         {{ matrixData.server }} · <b>{{ matrixData.commodity }}</b>
         <span v-if="matrixData.burden != null">（负重 {{ matrixData.burden }}）</span>
         <span v-if="matrixSellTarget">，卖出城：<b>{{ matrixSellTarget.city }}</b>（卖价 {{ matrixSellTarget.sell }}）</span>
+        <el-tag v-if="matrixData.sharedCount" size="small" type="warning" effect="plain">
+          主账号 {{ matrixData.sharedCount }} 城
+        </el-tag>
       </div>
       <div class="statusbar" style="margin:12px 0" v-if="matrixData.summary">
         <span>有价城池 <b>{{ matrixData.summary.pricedCount }}/{{ matrixData.summary.cityCount }}</b></span>
@@ -567,7 +585,12 @@
       </div>
       <el-table :data="matrixRows" size="small" max-height="46vh" border stripe
         :default-sort="{ prop: 'buy', order: 'ascending' }">
-<el-table-column label="城池" prop="city" min-width="90" fixed></el-table-column>
+<el-table-column label="城池" prop="city" min-width="110" fixed>
+          <template #default="s">
+            {{ s.row.city }}
+            <el-tag v-if="s.row.source === 'master'" size="small" type="warning" effect="plain">主</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="买价" prop="buy" width="90" align="right" sortable>
           <template #default="s">
             <b :class="s.row.buy != null && s.row.buy === matrixData.summary.minBuy ? 'best-cell' : ''">

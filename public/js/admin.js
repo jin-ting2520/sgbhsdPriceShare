@@ -156,6 +156,25 @@ createApp({
       } catch { ElMessage.warning('复制失败，请手动选择文本复制') }
     }
 
+    const bindKey = async row => {
+      try {
+        const accountName = await ask(
+          `卡密：${row.code}\n类型：${row.typeName}\n\n输入要绑定的账号昵称。绑定后立即消耗卡密，有效期从账号当前到期时间（已过期则从现在）顺延。`,
+          '绑定卡密',
+          { inputPlaceholder: '账号昵称' }
+        )
+        if (!accountName) return
+        const data = await api(`/api/admin/keys/${row.id}/bind`, {
+          method: 'POST',
+          body: { accountName },
+        })
+        ElMessage.success(data.expiresAt
+          ? `已绑定到「${data.accountName}」，到期 ${data.expiresAt}`
+          : `已绑定到「${data.accountName}」，永久有效`)
+        await Promise.all([loadKeys(keys.page), loadBatches(), loadOverview(), loadAccounts(accounts.page)])
+      } catch (e) { if (!isCancel(e)) ElMessage.error(e.message) }
+    }
+
     const revokeKey = async row => {
       try {
         await confirm(`确定作废卡密 ${row.code}？作废后不可使用。`, '作废卡密')
@@ -202,7 +221,7 @@ createApp({
           await api(`/api/admin/accounts/${row.id}/expires`, { method: 'POST', body: { extendDays: Number(days) } })
           ElMessage.success(`已续期 ${days} 天`)
         } else if (cmd === 'renew') {
-          const code = await ask('输入未使用的卡密（按卡密类型重置到期时间）', '使用卡密续期', {
+          const code = await ask('输入未使用的卡密（每张卡密只能使用一次，有效期从当前到期时间顺延）', '使用卡密续期', {
             inputPlaceholder: 'XXXX-XXXX-XXXX-XXXX',
           })
           const data = await api(`/api/admin/accounts/${row.id}/expires`, { method: 'POST', body: { keyCode: code } })
@@ -229,6 +248,17 @@ createApp({
           )
           await api(`/api/admin/accounts/${row.id}/sync-server`, { method: 'POST', body: { allow } })
           ElMessage.success(allow ? '已允许传区服参数' : '已禁止传区服参数')
+        } else if (cmd === 'set-master' || cmd === 'clear-master') {
+          const master = cmd === 'set-master'
+          await confirm(
+            master
+              ? `设「${row.name}」为主账号？其他账号开启共享后，将只读展示该账号缺失的商品价格；所有账号的共享开关会先重置为关闭。`
+              : `取消「${row.name}」的主账号身份？所有账号的共享开关会重置为关闭。`,
+            '主账号价格共享',
+            { type: master ? 'warning' : 'warning' }
+          )
+          await api(`/api/admin/accounts/${row.id}/master`, { method: 'POST', body: { master } })
+          ElMessage.success(master ? '已设为主账号' : '已取消主账号')
         } else if (cmd === 'password') {
           const pwd = await ask(`为「${row.name}」设置新密码（4~64 位），保存后该账号全部设备将下线`, '重置密码', {
             inputType: 'password', inputPattern: /^.{4,64}$/, inputErrorMessage: '密码长度应为 4~64 位',
@@ -446,7 +476,7 @@ createApp({
       token, password, loggingIn, login, logout,
       tab, onTabChange, loading, overview, loadOverview,
       keys, keyFilter, keyForm, createdCodes, createdBatch, batches,
-      loadKeys, loadBatches, createKeys, exportKeys, copyCodes, revokeKey, revokeBatch,
+      loadKeys, loadBatches, createKeys, exportKeys, copyCodes, bindKey, revokeKey, revokeBatch,
       accounts, accountFilter, loadAccounts, accountAction,
       dictType, dictItems, newDictName, newDictBurden, loadDict, addDict, renameDict, setBurden, deleteDict,
       servers, newServer, loadServers, addServer, renameServer, deleteServer,
