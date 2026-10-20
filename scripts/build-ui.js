@@ -109,7 +109,7 @@ async function ensureBuild({ force = false, quiet = false } = {}) {
   if (!deps) {
     const reason = '缺少构建依赖（npm i -D esbuild javascript-obfuscator）';
     if (!quiet) console.warn(`[build] ${reason}，将直接使用源码版本`);
-    return { built: false, files: [], reason };
+    return { built: false, files: [], reason, missingDeps: true };
   }
   const files = await buildWith(deps);
   if (!quiet) console.log(`[build] 已生成加固产物: ${files.join(', ')}`);
@@ -121,7 +121,7 @@ if (require.main === module) {
   const quiet = process.argv.includes('--quiet');
   ensureBuild({ force, quiet })
     .then(result => {
-      if (!result.built && result.reason !== 'up-to-date') process.exitCode = 1;
+      if (!result.built && !result.missingDeps && result.reason !== 'up-to-date') process.exitCode = 1;
     })
     .catch(err => {
       console.error('[build] 构建失败:', err.message);

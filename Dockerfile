@@ -6,9 +6,8 @@
 # 单容器直接运行时自动退化为 SQLite（数据保存在 /app/data）。
 FROM node:24-alpine
 
-# 生产环境
-ENV NODE_ENV=production \
-    PORT=3000 \
+# 构建阶段需要 devDependencies（esbuild / javascript-obfuscator），完成后再设为 production
+ENV PORT=3000 \
     TZ=Asia/Shanghai
 
 WORKDIR /app
@@ -18,12 +17,14 @@ RUN apk add --no-cache su-exec
 
 # 仅先复制依赖描述文件，利用镜像缓存
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 # 应用代码（.dockerignore 已排除 node_modules / data 等）
 COPY . .
 # 构建混淆前端产物后裁掉开发依赖
 RUN npm run build:ui -- --force && npm prune --omit=dev && npm cache clean --force && chmod +x docker-entrypoint.sh
+
+ENV NODE_ENV=production
 
 # 数据/备份目录（SQLite 兜底与迁移源；挂载卷场景由入口脚本再次确保权限）
 RUN mkdir -p /app/data /app/backup && chown -R node:node /app/data /app/backup
