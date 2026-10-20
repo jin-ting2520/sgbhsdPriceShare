@@ -212,6 +212,10 @@ createApp({
     const renewMessage = ref('')
     const accountToken = ref('')
     const accountServer = ref('')
+    const serverVisible = ref(false)
+    const serverInput = ref('')
+    const serverSaving = ref(false)
+    const serverRequired = ref(false)
     const allowSyncServer = ref(false)
     const accountExpiresAt = ref(null)
     const accountHasKey = ref(true)
@@ -239,6 +243,7 @@ createApp({
     }
 
     const applyMasterMeta = data => {
+      if (data && data.currentServer !== undefined) accountServer.value = data.currentServer || ''
       masterAccountId.value = (data && data.masterAccountId) || null
       masterAccountName.value = (data && data.masterAccountName) || ''
       isMaster.value = !!(data && data.isMaster)
@@ -438,6 +443,7 @@ createApp({
         } catch (e) {
           ElMessage.error('数据加载失败，请刷新重试')
         }
+        if (!accountServer.value) openServerPicker(true)
       } catch (e) {
         if (e.code === 40910) {
           const sessions = (e.data && e.data.sessions) || []
@@ -497,6 +503,9 @@ createApp({
       nickname.value = ''
       accountToken.value = ''
       accountServer.value = ''
+      serverVisible.value = false
+      serverRequired.value = false
+      serverInput.value = ''
       allowSyncServer.value = false
       accountExpiresAt.value = null
       accountHasKey.value = true
@@ -519,6 +528,8 @@ createApp({
       sessionOk.value = false
       nickname.value = ''
       accountToken.value = ''
+      serverVisible.value = false
+      serverRequired.value = false
       allowSyncServer.value = false
       accountExpiresAt.value = null
       accountHasKey.value = true
@@ -605,6 +616,43 @@ createApp({
     const isDirty = row => {
       const b = row._base || { buy: null, sell: null }
       return numOrNull(row.buy) !== b.buy || numOrNull(row.sell) !== b.sell
+    }
+
+    const openServerPicker = (required = false) => {
+      serverRequired.value = !!required
+      serverInput.value = accountServer.value || form.server.trim()
+      serverVisible.value = true
+    }
+
+    const saveServer = async () => {
+      const server = serverInput.value.trim()
+      if (!server) { ElMessage.warning('请输入当前所在区服'); return }
+      if (server.length > 50) { ElMessage.warning('区服名称不能超过 50 个字符'); return }
+      if (queried.value && rows.value.some(isDirty)) {
+        try {
+          await ElMessageBox.confirm(
+            '切换当前区服会重新加载价格，未保存的修改将丢失。是否继续？',
+            '有未保存修改',
+            { type: 'warning', confirmButtonText: '继续切换', cancelButtonText: '取消' }
+          )
+        } catch { return }
+      }
+      serverSaving.value = true
+      try {
+        const data = await api('/api/auth/server', { method: 'PUT', body: { server } })
+        accountServer.value = data.currentServer || server
+        applyMasterMeta(data)
+        form.server = accountServer.value
+        serverRequired.value = false
+        serverVisible.value = false
+        ElMessage.success(`当前区服已设为 ${accountServer.value}`)
+        await loadServers()
+        if (queried.value && form.city) await doFetch(false)
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        serverSaving.value = false
+      }
     }
 
     const rowClass = row => (queried.value && (isDirty(row.row) || row.row._remoteConflict) ? 'row-dirty' : '')
@@ -779,6 +827,7 @@ createApp({
         return
       }
       if (msg.type === 'master.changed') {
+        if (msg.server && msg.server !== accountServer.value) return
         masterAccountId.value = msg.masterAccountId || null
         masterAccountName.value = msg.masterAccountName || ''
         isMaster.value = !!msg.masterAccountName && msg.masterAccountName === nickname.value
@@ -1258,6 +1307,8 @@ createApp({
         })
         ElMessage.success(`导入完成：新增 ${res.created} 条，更新 ${res.updated} 条`)
         importVisible.value = false
+        accountServer.value = form.server.trim()
+        await refreshMasterMeta()
         await loadDict()
         if (queried.value) await doFetch(false)
       } catch (e) {
@@ -1369,6 +1420,7 @@ createApp({
         if (result.newCities && result.newCities.length) await loadDict()
         await loadServers()
         if (form.server.trim() === result.server && queried.value) await doFetch(false)
+        else await refreshMasterMeta()
       } catch (e) {
         ElMessage.error(e.message)
       } finally {
@@ -1626,6 +1678,7 @@ createApp({
         } catch (e) {
           ElMessage.error('数据加载失败，请刷新重试')
         }
+        if (!accountServer.value) openServerPicker(true)
       }
     })
 
@@ -1639,7 +1692,8 @@ createApp({
       // 账号入口
       nickname, nicknameInput, passwordInput, keyInput, entering, entered, enterSite, switchAccount,
       authMode, setAuthMode, authHint, renewVisible, renewKey, renewMessage, openRenew, submitRenew,
-      accountServer, allowSyncServer, deviceName,
+      accountServer, serverVisible, serverInput, serverSaving, serverRequired,
+      openServerPicker, saveServer, allowSyncServer, deviceName,
       masterAccountId, masterAccountName, isMaster, masterPricesAllowed, viewMasterPrices, masterSaving, onViewMasterChange,
       keyRequired, keyRequiredAtText, keyPlaceholder, keyHelpHtml, tokenHelpHtml,
       expiryText, expiryTooltip, expiryTagType,

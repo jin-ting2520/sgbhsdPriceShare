@@ -93,7 +93,11 @@
       </span>
     </el-tooltip>
     <el-tag v-else-if="isMaster" size="small" type="warning" effect="plain" class="master-badge">主账号</el-tag>
-    <span class="tag" v-if="accountServer" title="最近一次保存/同步使用的区服">当前区服 {{ accountServer }}</span>
+    <el-tooltip content="点击切换当前所在区服">
+      <el-tag size="small" effect="plain" style="cursor:pointer" @click="openServerPicker()">
+        {{ accountServer ? `当前区服 ${accountServer}` : '选择当前区服' }}
+      </el-tag>
+    </el-tooltip>
     <el-tooltip :content="expiryTooltip">
       <el-tag size="small" class="expiry-tag" :type="expiryTagType">{{ expiryText }}</el-tag>
     </el-tooltip>
@@ -873,6 +877,21 @@
   </el-dialog>
 
   </template>
+
+  <el-dialog v-model="serverVisible" title="选择当前所在区服" width="420px" append-to-body
+    :close-on-click-modal="!serverRequired" :close-on-press-escape="!serverRequired" :show-close="!serverRequired">
+    <p style="margin:0 0 12px;color:var(--ink-2);line-height:1.7">
+      {{ serverRequired ? '请先填写你当前所在的区服。普通账号只会关联本区服的主账号价格。' : '切换后，当前区服的主账号价与保存记录会按新区服生效。' }}
+    </p>
+    <el-autocomplete v-model="serverInput" :fetch-suggestions="searchServers"
+      placeholder="输入区服编号，如 1336" clearable style="width:100%"
+      @keyup.enter="saveServer"></el-autocomplete>
+    <template #footer>
+      <el-button v-if="serverRequired" @click="switchAccount">退出登录</el-button>
+      <el-button v-else @click="serverVisible = false">取 消</el-button>
+      <el-button type="primary" :loading="serverSaving" @click="saveServer">保存并进入</el-button>
+    </template>
+  </el-dialog>
 </div>
 
 <script src="/vendor/xlsx/xlsx.full.min.js"></script>

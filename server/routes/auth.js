@@ -9,7 +9,10 @@ const {
   getAccountByName, setAccountToken, createSession, countSessions,
   listSessions, removeSession, removeOtherSessions, removeAllSessions,
 } = require('../auth');
-const { get, run, tx, nowText, parseTime, getAppSettings, claimLegacyData, normalizeKeyRequiredAt } = require('../db');
+const {
+  get, run, tx, nowText, parseTime, getAppSettings, claimLegacyData, normalizeKeyRequiredAt,
+  upsertServer, setCurrentServer,
+} = require('../db');
 const { clampRelief } = require('../tax');
 const { validateKey, useKey, expiresAtFor, KEY_TYPE_NAMES } = require('../keys');
 const { masterMeta } = require('../master');
@@ -155,8 +158,6 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
     created = await tx(async conn => {
       const dup = await conn.get('SELECT id FROM accounts WHERE name = ?', [name]);
       if (dup) throw Object.assign(new Error('该昵称刚刚被注册，请直接登录'), { status: 400 });
-      const masterRow = await conn.get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
-      const viewMasterPrices = Number(masterRow && masterRow.id) ? 1 : 0;
       let code = '';
       let keyType = null;
       let keyId = 0;
@@ -172,8 +173,8 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
       const info = await conn.run(
         `INSERT INTO accounts (name, password_hash, relief, status, expires_at, key_code, device_limit,
                                view_master_prices, created_at, updated_at)
-         VALUES (?, ?, 5, 'active', ?, ?, ?, ?, ?, ?)`,
-        [name, passwordHash, expiresAt, code || null, settings.defaultDeviceLimit, viewMasterPrices, t, t]
+         VALUES (?, ?, 5, 'active', ?, ?, ?, 1, ?, ?)`,
+        [name, passwordHash, expiresAt, code || null, settings.defaultDeviceLimit, t, t]
       );
       if (keyCode) {
         const used = await useKey(conn, keyId, info.insertId);
@@ -214,6 +215,7 @@ router.get('/me', requireAccount, asyncHandler(async (req, res) => {
   );
   const meta = await masterMeta({
     id: req.account.id,
+    currentServer: row.currentServer,
     viewMasterPrices: row.viewMasterPrices,
     masterPricesAllowed: row.masterPricesAllowed,
   });
@@ -228,6 +230,28 @@ router.get('/me', requireAccount, asyncHandler(async (req, res) => {
     expiresAt: row.expiresAt || null,
     deviceLimit: Math.max(1, Number(row.deviceLimit) || 3),
     hasKey: !!row.keyCode,
+    masterAccountId: meta.masterAccountId,
+    masterAccountName: meta.masterAccountName,
+    isMaster: meta.isMaster,
+    masterPricesAllowed: meta.masterPricesAllowed,
+    viewMasterPrices: meta.viewMasterPrices,
+  });
+}));
+
+/** PUT /api/auth/server { server } 设置当前所在区服 */
+router.put('/server', requireAccount, asyncHandler(async (req, res) => {
+  const server = cleanName(req.body && req.body.server, 50);
+  if (!server) return fail(res, 400, '请输入当前所在区服');
+  await upsertServer(server);
+  await setCurrentServer(req.account.id, server);
+  const meta = await masterMeta({
+    id: req.account.id,
+    currentServer: server,
+    viewMasterPrices: req.account.viewMasterPrices,
+    masterPricesAllowed: req.account.masterPricesAllowed,
+  });
+  return ok(res, {
+    currentServer: server,
     masterAccountId: meta.masterAccountId,
     masterAccountName: meta.masterAccountName,
     isMaster: meta.isMaster,
@@ -252,9 +276,10 @@ router.put('/master-prices', requireAccount, asyncHandler(async (req, res) => {
   const enabled = req.body && req.body.enabled;
   if (typeof enabled !== 'boolean') return fail(res, 400, 'enabled 必须为布尔值');
   const meta = await masterMeta(req.account);
+  if (!meta.server) return fail(res, 400, '请先选择当前所在区服');
   if (meta.isMaster) return fail(res, 400, '主账号无需开启价格共享');
   if (!meta.masterPricesAllowed) return fail(res, 403, '管理员已关闭该账号的主账号价格共享');
-  if (enabled && !meta.master) return fail(res, 400, '管理员尚未指定主账号');
+  if (enabled && !meta.master) return fail(res, 400, '当前区服尚未指定主账号');
   await run(
     'UPDATE accounts SET view_master_prices = ?, updated_at = ? WHERE id = ?',
     [enabled ? 1 : 0, nowText(), req.account.id]

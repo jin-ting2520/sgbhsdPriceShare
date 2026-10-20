@@ -81,7 +81,7 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
@@ -166,7 +166,7 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const serverId = await upsertServer(server);
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
@@ -306,7 +306,7 @@ router.get('/history', asyncHandler(async (req, res) => {
   if (isBlank(server) || isBlank(city)) return ok(res, { total: 0, items: [] });
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const fallbackId = fallbackIdOf(meta);
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const serverId = await findServerId(server);
@@ -365,7 +365,7 @@ router.get('/trend', asyncHandler(async (req, res) => {
   }
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
@@ -469,7 +469,7 @@ router.get('/matrix', asyncHandler(async (req, res) => {
   if (isBlank(server) || isBlank(commodity)) return fail(res, 400, '请提供区服和商品');
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
@@ -562,7 +562,7 @@ router.get('/export', asyncHandler(async (req, res) => {
   if (isBlank(server) || isBlank(city)) return fail(res, 400, '请先选择区服和城池');
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const fallbackId = fallbackIdOf(meta);
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
@@ -631,7 +631,7 @@ router.post('/import', asyncHandler(async (req, res) => {
   if (!rowsIn && text.trim() === '') return fail(res, 400, '请提供要导入的数据');
 
   const accountId = req.account.id;
-  const meta = await masterMeta(req.account);
+  const meta = await masterMeta(req.account, server);
   const serverId = await upsertServer(server);
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);

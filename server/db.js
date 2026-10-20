@@ -181,6 +181,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS server_masters (
+  server_id  INTEGER PRIMARY KEY REFERENCES servers(id)  ON DELETE CASCADE,
+  account_id INTEGER NOT NULL    REFERENCES accounts(id) ON DELETE CASCADE,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_server_masters_account ON server_masters(account_id);
+
 CREATE TABLE IF NOT EXISTS sessions (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   token        TEXT    NOT NULL UNIQUE,
@@ -334,6 +342,15 @@ const MYSQL_SCHEMA = [
     updated_at DATETIME NOT NULL,
     UNIQUE KEY uk_accounts_name (name),
     UNIQUE KEY uk_accounts_session (session_token)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS server_masters (
+    server_id INT PRIMARY KEY,
+    account_id INT NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    KEY idx_server_masters_account (account_id),
+    CONSTRAINT fk_server_masters_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    CONSTRAINT fk_server_masters_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS sessions (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -656,6 +673,23 @@ function migrateSqlite() {
 
   if (!hasCol('sync_log', 'account_id')) sqlite.exec('ALTER TABLE sync_log ADD COLUMN account_id INTEGER');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_sync_log_account ON sync_log(account_id, id DESC)');
+
+  const legacyMaster = hasTable('server_masters')
+    ? sqlite.prepare(`SELECT a.id AS accountId, a.current_server AS serverName
+        FROM app_settings st JOIN accounts a ON a.id = st.master_account_id
+       WHERE st.id = 1 AND st.master_account_id IS NOT NULL`).get()
+    : null;
+  if (legacyMaster && legacyMaster.serverName) {
+    const server = sqlite.prepare('SELECT id FROM servers WHERE name = ?').get(legacyMaster.serverName);
+    if (server) {
+      const t = nowText();
+      sqlite.prepare(`INSERT OR IGNORE INTO server_masters (server_id, account_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?)`).run(server.id, legacyMaster.accountId, t, t);
+    }
+  }
+  if (hasCol('app_settings', 'master_account_id')) {
+    sqlite.prepare('UPDATE app_settings SET master_account_id = NULL WHERE id = 1').run();
+  }
 }
 
 /** 存量 MySQL 库补列/改表（老版本升级） */
@@ -812,6 +846,25 @@ async function migrateMysql() {
   if (!(await hasCol('sync_log', 'account_id'))) {
     await pool.query('ALTER TABLE sync_log ADD COLUMN account_id INT NULL AFTER id');
     await pool.query('ALTER TABLE sync_log ADD KEY idx_sync_log_account (account_id, id)');
+  }
+
+  const [legacyMasters] = await pool.query(
+    `SELECT a.id AS accountId, a.current_server AS serverName
+       FROM app_settings st JOIN accounts a ON a.id = st.master_account_id
+      WHERE st.id = 1 AND st.master_account_id IS NOT NULL`
+  );
+  if (legacyMasters[0] && legacyMasters[0].serverName) {
+    const [servers] = await pool.query('SELECT id FROM servers WHERE name = ?', [legacyMasters[0].serverName]);
+    if (servers[0]) {
+      await pool.query(
+        `INSERT IGNORE INTO server_masters (server_id, account_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        [servers[0].id, legacyMasters[0].accountId, nowText(), nowText()]
+      );
+    }
+  }
+  if (await hasCol('app_settings', 'master_account_id')) {
+    await pool.query('UPDATE app_settings SET master_account_id = NULL WHERE id = 1');
   }
 }
 
@@ -1029,7 +1082,6 @@ async function getAppSettings() {
     keyRequiredAt,
     keyRequired: keyRequiredAtNow(keyRequiredAt),
     defaultDeviceLimit: Math.max(1, Math.min(Number(row.default_device_limit) || 3, 20)),
-    masterAccountId: Number(row.master_account_id) || null,
   };
 }
 

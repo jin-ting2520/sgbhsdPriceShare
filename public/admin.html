@@ -76,7 +76,7 @@
             <div class="stat-card">区服数<b>{{ overview.servers }}</b></div>
             <div class="stat-card">同步成功<b>{{ overview.syncOk }}/{{ overview.syncTotal }}</b></div>
           </div>
-          <p class="muted">管理登录有效期 {{ overview.adminTtlHours || 12 }} 小时；数据按账号隔离，管理端可查看与维护全部账号。</p>
+          <p class="muted">管理登录有效期 {{ overview.adminTtlHours % 24 === 0 ? overview.adminTtlHours / 24 + ' 天' : overview.adminTtlHours + ' 小时' }}；数据按账号隔离，管理端可查看与维护全部账号。</p>
           <el-button size="small" @click="loadOverview">刷新</el-button>
         </el-tab-pane>
 
@@ -198,7 +198,9 @@
             </el-table-column>
             <el-table-column label="主账号" width="90" align="center">
               <template #default="s">
-                <el-tag v-if="s.row.isMaster" size="small" type="warning">主账号</el-tag>
+                <el-tooltip v-if="s.row.isMaster" :content="`主账号区服：${(s.row.masterServers || []).join('、')}`">
+                  <el-tag size="small" type="warning">主账号</el-tag>
+                </el-tooltip>
                 <el-tag v-else-if="!s.row.masterPricesAllowed" size="small" type="info">禁共享</el-tag>
                 <el-tag v-else-if="s.row.viewMasterPrices" size="small" type="success" effect="plain">共享</el-tag>
                 <span v-else class="muted">-</span>
@@ -233,8 +235,6 @@
                       <el-dropdown-item v-else command="deny-server">禁止传区服参数</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.isMaster && !s.row.masterPricesAllowed" command="allow-master-prices">开启主账号价格共享</el-dropdown-item>
                       <el-dropdown-item v-else-if="!s.row.isMaster" command="deny-master-prices">关闭主账号价格共享</el-dropdown-item>
-                      <el-dropdown-item v-if="!s.row.isMaster" command="set-master" divided>设为主账号</el-dropdown-item>
-                      <el-dropdown-item v-else command="clear-master" divided>取消主账号</el-dropdown-item>
                       <el-dropdown-item command="password">重置密码</el-dropdown-item>
                       <el-dropdown-item command="kick">踢下线</el-dropdown-item>
                       <el-dropdown-item command="ban" v-if="s.row.status !== 'banned'">封禁</el-dropdown-item>
@@ -293,6 +293,16 @@
           <el-table :data="servers" size="small" border stripe max-height="56vh" v-loading="loading.servers">
             <el-table-column label="ID" prop="id" width="70" align="center"></el-table-column>
             <el-table-column label="区服" prop="name" min-width="130"></el-table-column>
+            <el-table-column label="主账号" width="190" align="center">
+              <template #default="s">
+                <el-select :model-value="s.row.masterAccountId" size="small" filterable clearable
+                  :placeholder="s.row.masterCandidates.length ? '未设置' : '暂无本区服账号'"
+                  :disabled="serverMasterSaving === s.row.id || (!s.row.masterCandidates.length && !s.row.masterAccountId)"
+                  @change="v => setServerMaster(s.row, v)">
+                  <el-option v-for="a in s.row.masterCandidates" :key="a.id" :label="a.name" :value="a.id"></el-option>
+                </el-select>
+              </template>
+            </el-table-column>
             <el-table-column label="价格条数" prop="prices" width="100" align="center"></el-table-column>
             <el-table-column label="绑定定时账号" prop="boundAccounts" width="120" align="center"></el-table-column>
             <el-table-column label="创建时间" prop="createdAt" width="160"></el-table-column>

@@ -1,8 +1,9 @@
 'use strict';
 
 /** 管理后台 API：卡密 / 账号 / 字典 / 区服 / 全局设置 / 同步日志
- *  鉴权：POST /login 校验 ADMIN_PASSWORD（环境变量），发放内存 token（12h），
- *  其余接口要求 X-Admin-Token 头。ADMIN_PASSWORD 未配置时禁用整个后台。 */
+ *  鉴权：POST /login 校验 ADMIN_PASSWORD（环境变量），发放内存 token，
+ *  有效期默认 7 天，可用 ADMIN_TOKEN_HOURS 调整；其余接口要求 X-Admin-Token 头。
+ *  ADMIN_PASSWORD 未配置时禁用整个后台。 */
 
 const crypto = require('node:crypto');
 const express = require('express');
@@ -16,7 +17,9 @@ const ws = require('../ws');
 const { invalidateDict } = require('../dict-cache');
 
 const router = express.Router();
-const TTL_MS = 12 * 60 * 60 * 1000;
+const TTL_DEFAULT_HOURS = 7 * 24;
+const TTL_HOURS = Math.min(365 * 24, Math.max(1, Number(process.env.ADMIN_TOKEN_HOURS) || TTL_DEFAULT_HOURS));
+const TTL_MS = TTL_HOURS * 60 * 60 * 1000;
 const tokens = new Map(); // token -> expiresAt
 
 const CLEAN_TIMER = setInterval(() => {
@@ -276,8 +279,16 @@ router.get('/accounts', asyncHandler(async (req, res) => {
   if (status === 'expired') { where.push('a.expires_at IS NOT NULL AND a.expires_at < ?'); params.push(nowText()); }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const totalRow = await get(`SELECT COUNT(*) AS n FROM accounts a ${whereSql}`, params);
-  const masterRow = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
-  const masterId = Number(masterRow && masterRow.id) || null;
+  const masterRows = await query(
+    `SELECT sm.account_id AS accountId, s.name AS server
+       FROM server_masters sm JOIN servers s ON s.id = sm.server_id`
+  );
+  const masterServers = new Map();
+  for (const row of masterRows) {
+    const accountId = Number(row.accountId);
+    if (!masterServers.has(accountId)) masterServers.set(accountId, []);
+    masterServers.get(accountId).push(row.server);
+  }
   const rows = await query(
     `SELECT a.id, a.name, a.status, a.expires_at AS expiresAt, a.key_code AS keyCode,
             a.device_limit AS deviceLimit, a.current_server AS currentServer,
@@ -296,26 +307,30 @@ router.get('/accounts', asyncHandler(async (req, res) => {
     total: Number(totalRow.n) || 0,
     page,
     pageSize,
-    items: rows.map(r => ({
-      id: r.id,
-      name: r.name,
-      status: r.status,
-      expiresAt: r.expiresAt || null,
-      expired: !!r.expiresAt && r.expiresAt < now,
-      keyCode: r.keyCode || '',
-      keyType: KEY_TYPE_NAMES[r.keyType] || (r.keyType ? r.keyType : ''),
-      deviceLimit: Number(r.deviceLimit) || 3,
-      currentServer: r.currentServer || '',
-      allowSyncServer: !!Number(r.allowSyncServer),
-      isMaster: Number(r.id) === masterId,
-      masterPricesAllowed: !!Number(r.masterPricesAllowed),
-      viewMasterPrices: !!Number(r.viewMasterPrices),
-      sessions: Number(r.sessions) || 0,
-      prices: Number(r.prices) || 0,
-      lastSeenAt: r.lastSeenAt || null,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-    })),
+    items: rows.map(r => {
+      const servers = masterServers.get(Number(r.id)) || [];
+      return {
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        expiresAt: r.expiresAt || null,
+        expired: !!r.expiresAt && r.expiresAt < now,
+        keyCode: r.keyCode || '',
+        keyType: KEY_TYPE_NAMES[r.keyType] || (r.keyType ? r.keyType : ''),
+        deviceLimit: Number(r.deviceLimit) || 3,
+        currentServer: r.currentServer || '',
+        allowSyncServer: !!Number(r.allowSyncServer),
+        isMaster: servers.length > 0,
+        masterServers: servers,
+        masterPricesAllowed: !!Number(r.masterPricesAllowed),
+        viewMasterPrices: !!Number(r.viewMasterPrices),
+        sessions: Number(r.sessions) || 0,
+        prices: Number(r.prices) || 0,
+        lastSeenAt: r.lastSeenAt || null,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+    }),
   });
 }));
 
@@ -434,45 +449,6 @@ router.post('/accounts/:id/sync-server', asyncHandler(async (req, res) => {
   return ok(res, { id, allowSyncServer: allowed });
 }));
 
-/** 设置/取消全局主账号；设置时允许共享的普通账号默认开启，取消时清空查看偏好 */
-router.post('/accounts/:id/master', asyncHandler(async (req, res) => {
-  const id = Number(req.params.id);
-  const master = req.body && req.body.master;
-  if (typeof master !== 'boolean') return fail(res, 400, 'master 必须为布尔值');
-  const account = await loadAccount(id);
-  if (!account) return fail(res, 404, '账号不存在');
-
-  const row = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
-  const currentId = Number(row && row.id) || null;
-  if (!master && currentId !== id) return fail(res, 400, '该账号不是当前主账号');
-
-  await tx(async conn => {
-    await conn.run(
-      'UPDATE app_settings SET master_account_id = ?, updated_at = ? WHERE id = 1',
-      [master ? id : null, nowText()]
-    );
-    if (master) {
-      await conn.run(
-        `UPDATE accounts SET view_master_prices =
-           CASE WHEN allow_master_prices = 1 AND id <> ? THEN 1 ELSE 0 END`,
-        [id]
-      );
-    } else {
-      await conn.run('UPDATE accounts SET view_master_prices = 0');
-    }
-  });
-  ws.broadcast('master.changed', {
-    masterAccountId: master ? id : null,
-    masterAccountName: master ? account.name : '',
-  });
-  return ok(res, {
-    id,
-    isMaster: master,
-    masterAccountId: master ? id : null,
-    masterAccountName: master ? account.name : '',
-  });
-}));
-
 /** 允许/禁止指定账号查看主账号价格；禁止后用户端隐藏开关 */
 router.post('/accounts/:id/master-prices', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
@@ -481,8 +457,8 @@ router.post('/accounts/:id/master-prices', asyncHandler(async (req, res) => {
   const account = await loadAccount(id);
   if (!account) return fail(res, 404, '账号不存在');
 
-  const row = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
-  if ((Number(row && row.id) || null) === id) return fail(res, 400, '主账号无需设置价格共享');
+  const masterRow = await get('SELECT 1 AS hit FROM server_masters WHERE account_id = ? LIMIT 1', [id]);
+  if (masterRow) return fail(res, 400, '主账号无需设置价格共享');
 
   await run(
     'UPDATE accounts SET allow_master_prices = ?, view_master_prices = ?, updated_at = ? WHERE id = ?',
@@ -519,8 +495,11 @@ router.delete('/accounts/:id', asyncHandler(async (req, res) => {
   if (String(req.query.confirm || '') !== account.name) {
     return fail(res, 400, `删除账号将清空其全部价格数据，请携带 confirm=${account.name} 以确认`);
   }
-  const masterRow = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
-  const wasMaster = Number(masterRow && masterRow.id) === id;
+  const masterRows = await query(
+    `SELECT s.name AS server FROM server_masters sm JOIN servers s ON s.id = sm.server_id
+      WHERE sm.account_id = ?`,
+    [id]
+  );
   await tx(async conn => {
     await conn.run('DELETE FROM sessions WHERE account_id = ?', [id]);
     await conn.run('DELETE FROM price_history WHERE account_id = ?', [id]);
@@ -529,13 +508,19 @@ router.delete('/accounts/:id', asyncHandler(async (req, res) => {
     await conn.run('DELETE FROM sync_settings WHERE account_id = ?', [id]);
     await conn.run('DELETE FROM sync_log WHERE account_id = ?', [id]);
     await conn.run('UPDATE invite_keys SET account_id = NULL WHERE account_id = ?', [id]);
-    if (wasMaster) {
-      await conn.run('UPDATE app_settings SET master_account_id = NULL, updated_at = ? WHERE id = 1', [nowText()]);
-      await conn.run('UPDATE accounts SET view_master_prices = 0');
+    await conn.run('DELETE FROM server_masters WHERE account_id = ?', [id]);
+    for (const row of masterRows) {
+      await conn.run('UPDATE accounts SET view_master_prices = 0 WHERE current_server = ?', [row.server]);
     }
     await conn.run('DELETE FROM accounts WHERE id = ?', [id]);
   });
-  if (wasMaster) ws.broadcast('master.changed', { masterAccountId: null, masterAccountName: '' });
+  for (const row of masterRows) {
+    ws.broadcast('master.changed', {
+      server: row.server,
+      masterAccountId: null,
+      masterAccountName: '',
+    });
+  }
   return ok(res, { id, deleted: true });
 }));
 
@@ -543,17 +528,94 @@ router.delete('/accounts/:id', asyncHandler(async (req, res) => {
 
 router.get('/servers', asyncHandler(async (req, res) => {
   const rows = await query(`SELECT s.id, s.name, s.created_at AS createdAt, s.updated_at AS updatedAt,
+      sm.account_id AS masterAccountId, ma.name AS masterAccountName,
       (SELECT COUNT(*) FROM prices p WHERE p.server_id = s.id) AS prices,
       (SELECT COUNT(*) FROM sync_settings ss WHERE ss.server_name = s.name) AS boundAccounts
-    FROM servers s ORDER BY s.id ASC`);
-  return ok(res, rows.map(r => ({
-    id: r.id,
-    name: r.name,
-    prices: Number(r.prices) || 0,
-    boundAccounts: Number(r.boundAccounts) || 0,
-    createdAt: r.createdAt,
-    updatedAt: r.updatedAt,
-  })));
+    FROM servers s
+    LEFT JOIN server_masters sm ON sm.server_id = s.id
+    LEFT JOIN accounts ma ON ma.id = sm.account_id
+    ORDER BY s.id ASC`);
+  const accountRows = await query(
+    `SELECT id, name, current_server AS currentServer FROM accounts
+      WHERE current_server <> '' ORDER BY name ASC`
+  );
+  const byServer = new Map();
+  for (const account of accountRows) {
+    if (!byServer.has(account.currentServer)) byServer.set(account.currentServer, []);
+    byServer.get(account.currentServer).push({ id: account.id, name: account.name });
+  }
+  return ok(res, rows.map(r => {
+    const masterAccountId = r.masterAccountId == null ? null : Number(r.masterAccountId);
+    const candidates = [...(byServer.get(r.name) || [])];
+    if (masterAccountId && !candidates.some(a => a.id === masterAccountId)) {
+      candidates.unshift({ id: masterAccountId, name: r.masterAccountName || `#${masterAccountId}` });
+    }
+    return {
+      id: r.id,
+      name: r.name,
+      prices: Number(r.prices) || 0,
+      boundAccounts: Number(r.boundAccounts) || 0,
+      masterAccountId,
+      masterAccountName: r.masterAccountName || '',
+      masterCandidates: candidates,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    };
+  }));
+}));
+
+/** 设置/取消区服主账号；主账号必须属于该区服，设置后本区服普通账号默认开启共享 */
+router.post('/servers/:id/master', asyncHandler(async (req, res) => {
+  const serverId = Number(req.params.id);
+  if (!Number.isInteger(serverId) || serverId <= 0) return fail(res, 400, '区服 id 不正确');
+  const server = await get('SELECT * FROM servers WHERE id = ?', [serverId]);
+  if (!server) return fail(res, 404, '区服不存在');
+
+  const raw = req.body && req.body.accountId;
+  const accountId = raw == null || raw === '' ? null : Number(raw);
+  if (accountId != null && (!Number.isInteger(accountId) || accountId <= 0)) {
+    return fail(res, 400, '账号 id 不正确');
+  }
+
+  let account = null;
+  if (accountId != null) {
+    account = await loadAccount(accountId);
+    if (!account) return fail(res, 404, '账号不存在');
+    if (account.current_server !== server.name) {
+      return fail(res, 400, `账号「${account.name}」当前区服不是 ${server.name}，不能设为本区服主账号`);
+    }
+  }
+
+  await tx(async conn => {
+    await conn.run('DELETE FROM server_masters WHERE server_id = ?', [serverId]);
+    if (account) {
+      await conn.run(
+        `INSERT INTO server_masters (server_id, account_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        [serverId, account.id, nowText(), nowText()]
+      );
+      await conn.run(
+        `UPDATE accounts SET view_master_prices =
+           CASE WHEN allow_master_prices = 1 AND id <> ? THEN 1 ELSE 0 END
+         WHERE current_server = ?`,
+        [account.id, server.name]
+      );
+    } else {
+      await conn.run('UPDATE accounts SET view_master_prices = 0 WHERE current_server = ?', [server.name]);
+    }
+  });
+
+  ws.broadcast('master.changed', {
+    server: server.name,
+    masterAccountId: account ? account.id : null,
+    masterAccountName: account ? account.name : '',
+  });
+  return ok(res, {
+    id: serverId,
+    name: server.name,
+    masterAccountId: account ? account.id : null,
+    masterAccountName: account ? account.name : '',
+  });
 }));
 
 router.post('/servers', asyncHandler(async (req, res) => {

@@ -16,7 +16,7 @@ createApp({
     const tab = ref('overview')
 
     const loading = reactive({ overview: false, keys: false, accounts: false, dict: false, servers: false, settings: false, logs: false })
-    const overview = reactive({ accounts: 0, banned: 0, expired: 0, sessions: 0, keysUnused: 0, keysUsed: 0, prices: 0, history: 0, servers: 0, syncOk: 0, syncTotal: 0, adminTtlHours: 12 })
+    const overview = reactive({ accounts: 0, banned: 0, expired: 0, sessions: 0, keysUnused: 0, keysUsed: 0, prices: 0, history: 0, servers: 0, syncOk: 0, syncTotal: 0, adminTtlHours: 168 })
 
     async function api(path, { method = 'GET', body } = {}) {
       const headers = { 'X-Admin-Token': token.value }
@@ -260,17 +260,6 @@ createApp({
           await api(`/api/admin/accounts/${row.id}/master-prices`, { method: 'POST', body: { allowed } })
           ElMessage.success(allowed ? '已开启主账号价格共享' : '已关闭主账号价格共享')
           await afterAccountChange()
-        } else if (cmd === 'set-master' || cmd === 'clear-master') {
-          const master = cmd === 'set-master'
-          await confirm(
-            master
-              ? `设「${row.name}」为主账号？除已禁用共享的账号外，其他普通账号默认开启共享，只读展示该账号缺失的商品价格。`
-              : `取消「${row.name}」的主账号身份？所有账号的共享开关会重置为关闭。`,
-            '主账号价格共享',
-            { type: master ? 'warning' : 'warning' }
-          )
-          await api(`/api/admin/accounts/${row.id}/master`, { method: 'POST', body: { master } })
-          ElMessage.success(master ? '已设为主账号' : '已取消主账号')
         } else if (cmd === 'password') {
           const pwd = await ask(`为「${row.name}」设置新密码（4~64 位），保存后该账号全部设备将下线`, '重置密码', {
             inputType: 'password', inputPattern: /^.{4,64}$/, inputErrorMessage: '密码长度应为 4~64 位',
@@ -361,10 +350,25 @@ createApp({
 
     const servers = ref([])
     const newServer = ref('')
+    const serverMasterSaving = ref(0)
 
     const loadServers = () => run('servers', async () => {
       servers.value = await api('/api/admin/servers')
     })
+
+    const setServerMaster = async (row, accountId) => {
+      serverMasterSaving.value = row.id
+      try {
+        const id = accountId == null || accountId === '' ? null : Number(accountId)
+        await api(`/api/admin/servers/${row.id}/master`, { method: 'POST', body: { accountId: id } })
+        ElMessage.success(id ? '已设置本区服主账号' : '已取消本区服主账号')
+        await Promise.all([loadServers(), loadAccounts(accounts.page)])
+      } catch (e) {
+        ElMessage.error(e.message)
+      } finally {
+        serverMasterSaving.value = 0
+      }
+    }
 
     const addServer = () => run('servers', async () => {
       const name = newServer.value.trim()
@@ -491,7 +495,7 @@ createApp({
       loadKeys, loadBatches, createKeys, exportKeys, copyCodes, bindKey, revokeKey, revokeBatch,
       accounts, accountFilter, loadAccounts, accountAction,
       dictType, dictItems, newDictName, newDictBurden, loadDict, addDict, renameDict, setBurden, deleteDict,
-      servers, newServer, loadServers, addServer, renameServer, deleteServer,
+      servers, newServer, serverMasterSaving, loadServers, addServer, setServerMaster, renameServer, deleteServer,
       appSettings, previewing, loadSettings, saveSettings, previewHelp,
       logs, logAccountId, loadLogs, clearLogs,
     }

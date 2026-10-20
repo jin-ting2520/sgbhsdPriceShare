@@ -70,7 +70,7 @@ if (!fs.existsSync(srcFile)) {
     FROM accounts ORDER BY id`) : [];
 
   const t = db.nowText();
-  const inserted = { dict: 0, servers: 0, accounts: 0, keys: 0, prices: 0, history: 0, cityNodes: 0, cityTaxes: 0, settings: 0, syncLogs: 0 };
+  const inserted = { dict: 0, servers: 0, accounts: 0, serverMasters: 0, keys: 0, prices: 0, history: 0, cityNodes: 0, cityTaxes: 0, settings: 0, syncLogs: 0 };
   const warnings = [];
   const accountIdMap = new Map();
 
@@ -106,6 +106,34 @@ if (!fs.existsSync(srcFile)) {
     );
     accountIdMap.set(a.id, info.insertId);
     inserted.accounts += 1;
+  }
+
+  const sourceServerMasters = new Map();
+  if (hasTable('server_masters')) {
+    for (const row of all(`SELECT s.name AS server, sm.account_id AS accountId
+        FROM server_masters sm JOIN servers s ON s.id = sm.server_id`)) {
+      if (row.server && row.accountId) sourceServerMasters.set(row.server, Number(row.accountId));
+    }
+  }
+  if (hasTable('app_settings') && has('app_settings', 'master_account_id')) {
+    const legacyMaster = raw.prepare('SELECT master_account_id AS id FROM app_settings WHERE id = 1').get();
+    const srcMasterId = Number(legacyMaster && legacyMaster.id) || 0;
+    const masterAccount = srcMasterId ? accountRows.find(a => Number(a.id) === srcMasterId) : null;
+    if (masterAccount && masterAccount.currentServer && !sourceServerMasters.has(masterAccount.currentServer)) {
+      sourceServerMasters.set(masterAccount.currentServer, srcMasterId);
+    }
+  }
+  for (const [serverName, srcAccountId] of sourceServerMasters) {
+    const accountId = accountIdMap.get(Number(srcAccountId));
+    if (!accountId) continue;
+    const serverId = await db.upsertServer(serverName);
+    const existing = await db.get('SELECT 1 AS hit FROM server_masters WHERE server_id = ?', [serverId]);
+    if (existing) continue;
+    await db.run(
+      'INSERT INTO server_masters (server_id, account_id, created_at, updated_at) VALUES (?, ?, ?, ?)',
+      [serverId, accountId, t, t]
+    );
+    inserted.serverMasters += 1;
   }
 
   const legacyTokenAccountId = (() => {
@@ -155,15 +183,13 @@ if (!fs.existsSync(srcFile)) {
       const keyRequiredAt = has('app_settings', 'key_required_at')
         ? (row.key_required_at || '2026-10-22 00:00:00')
         : '2026-10-22 00:00:00';
-      const srcMasterId = has('app_settings', 'master_account_id') ? Number(row.master_account_id) : 0;
-      const masterAccountId = srcMasterId ? (accountIdMap.get(srcMasterId) || null) : null;
       await db.run(
         `UPDATE app_settings SET registration_enabled = ?, announcement = ?, key_help_md = ?,
-           token_help_md = ?, key_required_at = ?, default_device_limit = ?, master_account_id = ?, updated_at = ?
+           token_help_md = ?, key_required_at = ?, default_device_limit = ?, updated_at = ?
           WHERE id = 1`,
         [row.registration_enabled == null ? 1 : row.registration_enabled ? 1 : 0,
           row.announcement || '', keyHelpMd, tokenHelpMd, keyRequiredAt,
-          Number(row.default_device_limit) || 3, masterAccountId, row.updated_at || t]
+          Number(row.default_device_limit) || 3, row.updated_at || t]
       );
     }
   }
