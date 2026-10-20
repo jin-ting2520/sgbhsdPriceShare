@@ -9,7 +9,7 @@ const {
   getAccountByName, setAccountToken, createSession, countSessions,
   listSessions, removeSession, removeOtherSessions, removeAllSessions,
 } = require('../auth');
-const { get, run, tx, nowText, getAppSettings, claimLegacyData, normalizeKeyRequiredAt } = require('../db');
+const { get, run, tx, nowText, parseTime, getAppSettings, claimLegacyData, normalizeKeyRequiredAt } = require('../db');
 const { clampRelief } = require('../tax');
 const { validateKey, useKey, expiresAtFor, KEY_TYPE_NAMES } = require('../keys');
 const rateLimit = require('../ratelimit');
@@ -45,7 +45,7 @@ function publicAccount(row, created, session, extra = {}) {
 
 function renewBaseMs(expiresAt) {
   if (!expiresAt) return Date.now();
-  const ts = Date.parse(String(expiresAt).replace(' ', 'T'));
+  const ts = parseTime(expiresAt);
   return Number.isFinite(ts) && ts > Date.now() ? ts : Date.now();
 }
 

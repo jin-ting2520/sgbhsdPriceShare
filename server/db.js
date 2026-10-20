@@ -76,6 +76,16 @@ function formatTime(ms) {
   }).format(new Date(ms));
 }
 
+/** 解析按北京时间存储的 YYYY-MM-DD[ HH:mm:ss] 文本，避免服务器时区不同导致偏移 */
+function parseTime(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return NaN;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(raw)
+    ? `${raw}T00:00:00`
+    : raw.replace(' ', 'T');
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized) ? normalized : `${normalized}+08:00`);
+}
+
 function nowText() {
   return formatTime(Date.now());
 }
@@ -1051,6 +1061,7 @@ module.exports = {
   tx,
   nowText,
   formatTime,
+  parseTime,
   upsertServer,
   findServerId,
   findDictId,

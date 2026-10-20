@@ -244,7 +244,7 @@ createApp({
       : '卡密（试用期可留空，如 ABCD-EFGH-JKLM-NPQR）'))
     const expirySoon = computed(() => {
       if (!accountHasKey.value || !accountExpiresAt.value) return false
-      const ts = Date.parse(String(accountExpiresAt.value).replace(' ', 'T'))
+      const ts = Date.parse(`${String(accountExpiresAt.value).replace(' ', 'T')}+08:00`)
       return Number.isFinite(ts) && ts > Date.now() && ts - Date.now() < 86400000
     })
     const expiryText = computed(() => {

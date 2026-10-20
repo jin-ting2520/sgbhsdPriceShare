@@ -7,7 +7,7 @@
 const crypto = require('node:crypto');
 const express = require('express');
 const { ok, fail, asyncHandler, cleanName, isBlank } = require('../util');
-const { query, get, run, tx, nowText, formatTime, normalizeKeyRequiredAt } = require('../db');
+const { query, get, run, tx, nowText, formatTime, parseTime, normalizeKeyRequiredAt } = require('../db');
 const { createBatch, KEY_TYPES, KEY_TYPE_NAMES, KEY_STATUS_NAMES, normalizeCode } = require('../keys');
 const { renderMarkdown, MAX_MARKDOWN } = require('../markdown');
 const { hashPassword } = require('../auth');
@@ -301,7 +301,8 @@ router.post('/accounts/:id/expires', asyncHandler(async (req, res) => {
     const days = Number(body.extendDays);
     if (!Number.isFinite(days) || days <= 0 || days > 3650) return fail(res, 400, 'extendDays 应为 1~3650');
     const baseText = expiresAt && expiresAt > nowText() ? expiresAt : nowText();
-    const base = new Date(baseText.replace(' ', 'T')).getTime();
+    const parsedBase = parseTime(baseText);
+    const base = Number.isFinite(parsedBase) ? parsedBase : Date.now();
     expiresAt = formatTime(base + days * 86400000);
   } else if (body.keyCode) {
     const code = normalizeCode(body.keyCode);

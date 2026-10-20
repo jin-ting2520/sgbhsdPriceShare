@@ -198,7 +198,7 @@ test('永久卡密 expiresAt 为空，1 月卡密为 30 天', async () => {
   const month = await registerAccount(base, admin, { name: '月卡号', type: 'month' });
   const meMonth = await month.get('/api/auth/me');
   assert.ok(meMonth.json.data.expiresAt);
-  const days = (new Date(meMonth.json.data.expiresAt.replace(' ', 'T')).getTime() - Date.now()) / 86400000;
+  const days = (db.parseTime(meMonth.json.data.expiresAt) - Date.now()) / 86400000;
   assert.ok(days > 29 && days <= 30, `月卡应约 30 天，实际 ${days}`);
 });
 
