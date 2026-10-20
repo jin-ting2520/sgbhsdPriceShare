@@ -5,7 +5,7 @@
 const express = require('express');
 const { query, get, run, createDictItem, nowText } = require('../db');
 const cache = require('../cache');
-const { broadcast } = require('../ws');
+const { invalidateDict } = require('../dict-cache');
 const {
   ok, fail, asyncHandler, cleanName, isBlank,
   isUniqueConstraintError,
@@ -24,11 +24,6 @@ function parseBurden(v) {
   if (!Number.isFinite(n) || n <= 0) return { value: null, error: '负重必须是大于 0 的数字' };
   if (n > 9999) return { value: null, error: '负重不能超过 9999' };
   return { value: Math.round(n * 100) / 100, error: null };
-}
-
-async function invalidateDict() {
-  await cache.invalidate('dict:');
-  broadcast('dict.changed', {});
 }
 
 /** GET /api/dict?type=city  —— 下拉数据源（可按 keyword 过滤） */

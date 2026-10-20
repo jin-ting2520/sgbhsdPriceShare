@@ -70,7 +70,7 @@ docker compose up -d --build
 npm install
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 37 项后端/账号/游戏/报表测试
+npm test           # 38 项后端/账号/游戏/报表测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -112,6 +112,7 @@ sgbhsdPriceShare/
 │   ├── index.js            # Express 入口（静态托管 + API + WS + 健康检查）
 │   ├── db.js               # 双驱动数据层（MySQL/SQLite）、建表、种子、事务
 │   ├── cache.js            # Redis 字典缓存（失败自动退化）
+│   ├── dict-cache.js       # 字典缓存失效 + 广播（字典/同步共用）
 │   ├── ws.js               # WebSocket 服务端与广播
 │   ├── scheduler.js        # node-cron 定时同步与运行日志
 │   ├── util.js             # 统一响应/校验
@@ -146,8 +147,9 @@ sgbhsdPriceShare/
 │   └── icons/icon.svg
 ├── test/
 │   ├── api.test.js         # 接口测试（17）
-│   ├── game.test.js        # 游戏同步模块（7）
-│   └── reports.test.js     # 报表/定时设置/并发（7）
+│   ├── auth.test.js        # 账号/会话/token 隔离（4）
+│   ├── game.test.js        # 游戏同步模块（9）
+│   └── reports.test.js     # 报表/定时设置/并发（8）
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -208,7 +210,7 @@ sgbhsdPriceShare/
 - 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数与游戏显示一致。切换减免只影响显示，不写库。
 - 手工录入 / Excel 导入填写的是自己看到税后价，服务端按当前减免与该城税率反推原价入库；税率未知的城池按原价处理（不折算）。
 - 每城仅 3 个商品可买入（2104 中 type=2），全部 25 个商品均可卖出（type=0/1）；非可购商品的买入价落库为 NULL。
-- 单次同步全部 42 城约 10 秒，返回 `{queried,saved,created,updated,failed[]}`；赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
+- 单次同步全部 42 城约 10 秒，返回 `{queried,saved,created,updated,newCities[],failed[]}`；字典里缺失的城池同步时自动登记（见 `newCities`）并清缓存广播刷新，赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
 - 定时同步使用「定时」页保存 token 的账号的 token（`sync_settings.token_account_id`），到期换 token 后重新保存即可；旧版单行 token 仅作升级兜底。
 - 命令行：`node server/scripts/game-sync.js <token> [区服] [更新人]`，或 `--settings` 复用定时同步配置。
 
@@ -238,7 +240,7 @@ MySQL 数据位于 Docker 卷 `mysql-data`，Redis 位于 `redis-data`；`./data
 
 ## 九、测试与 CI
 
-- `npm test`：31 项测试，覆盖字典、价格、并发冲突、导入导出、游戏协议解析、报表、定时设置、健康检查（SQLite 临时库）。
+- `npm test`：38 项测试，覆盖账号会话、字典、价格、并发冲突、导入导出、游戏协议解析、税率换算、报表、定时设置、健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务，验证健康检查、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

@@ -456,6 +456,7 @@ createApp({
       if (msg.type === 'sync.finished' && msg.result) {
         const r = msg.result
         ElMessage.success(`游戏同步完成：${r.queried}/${r.cities} 城，写入 ${r.saved} 条${r.failed && r.failed.length ? `，失败 ${r.failed.length} 城` : ''}`)
+        if (r.newCities && r.newCities.length) loadDict().catch(() => {})
         loadServers().catch(() => {})
         if (queried.value && msg.result.server === form.server.trim()) {
           if (rows.value.some(isDirty)) ElMessage.warning('同步已更新当前城池，你本地有未保存修改；保存时会提示冲突')
@@ -1093,6 +1094,7 @@ createApp({
         syncResult.value = result
         if (result.saved > 0) ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
         else ElMessage.warning(`同步完成，但没有写入价格（${result.queried}/${result.cities} 城）`)
+        if (result.newCities && result.newCities.length) await loadDict()
         await loadServers()
         if (form.server.trim() === result.server && queried.value) await doFetch(false)
       } catch (e) {

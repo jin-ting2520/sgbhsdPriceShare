@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const { get, run, query, nowText, ready } = require('./db');
 const { syncPrices } = require('./game/sync');
 const { broadcast } = require('./ws');
+const { invalidateDict } = require('./dict-cache');
 
 let task = null;
 let running = false;
@@ -147,6 +148,7 @@ async function runNow(trigger = 'manual') {
       server: s.server,
       operator: s.operator || '自动同步',
     });
+    if (result.newCities.length) await invalidateDict();
     const status = result.failed.length ? 'partial' : 'success';
     await logFinish(log.id, status, result, result.failed.length ? `失败城池：${result.failed.map(f => f.city).join('、')}` : null);
     await markSettings(status, `同步 ${result.queried}/${result.cities} 城，保存 ${result.saved} 条`);

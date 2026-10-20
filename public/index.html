@@ -708,6 +708,9 @@
     </el-form>
     <el-alert v-if="syncResult" type="success" :closable="false" show-icon
       :title="`同步完成：查询 ${syncResult.queried}/${syncResult.cities} 城，写入 ${syncResult.saved} 条（新增 ${syncResult.created}，更新 ${syncResult.updated}）`">
+      <div v-if="syncResult.newCities && syncResult.newCities.length" class="failed-list">
+        新登记城池：{{ syncResult.newCities.join('、') }}
+      </div>
       <div v-if="syncResult.failed && syncResult.failed.length" class="failed-list">
         失败：{{ syncResult.failed.map(f => f.city + '（' + f.error + '）').join('；') }}
       </div>

@@ -8,6 +8,7 @@ const { syncPrices, CITY_MAP } = require('../game/sync');
 const { setAccountToken } = require('../auth');
 const scheduler = require('../scheduler');
 const { broadcast } = require('../ws');
+const { invalidateDict } = require('../dict-cache');
 
 const router = express.Router();
 
@@ -42,6 +43,7 @@ router.post('/sync', asyncHandler(async (req, res) => {
     const status = err.status && err.status >= 400 && err.status < 500 ? err.status : 502;
     return fail(res, status, err.message || '同步失败');
   }
+  if (result.newCities.length) await invalidateDict();
   const status = result.failed.length ? 'partial' : 'success';
   await scheduler.logFinish(log.id, status, result,
     result.failed.length ? `失败城池：${result.failed.map(f => f.city).join('、')}` : null);

@@ -56,14 +56,15 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
-/** 游戏内城池名 → 字典 id（缺失时自动登记，游戏数据可信） */
+/** 游戏内城池名 → { id, created }（缺失时自动登记，游戏数据可信） */
 async function ensureCityId(name) {
-  let id = await findDictId('city', name);
-  if (id) return id;
+  const existing = await findDictId('city', name);
+  if (existing) return { id: existing, created: false };
   try {
     await createDictItem('city', name);
   } catch { /* 并发冲突忽略 */ }
-  return findDictId('city', name);
+  const id = await findDictId('city', name);
+  return { id, created: !!id };
 }
 
 /** 2104 响应 → { 商品名: {buy, sell} }（税前原价，元） */
@@ -101,6 +102,12 @@ async function syncPrices(opts) {
   if (!token) throw Object.assign(new Error('请提供登录 token'), { status: 400 });
   if (!serverName) throw Object.assign(new Error('请提供区服名称'), { status: 400 });
 
+  if (onlyCities) {
+    const unknown = [...onlyCities].filter(name => !CITY_MAP.some(c => c.name === name));
+    if (unknown.length) {
+      throw Object.assign(new Error(`同步映射中没有这些城池：${unknown.join('、')}`), { status: 400 });
+    }
+  }
   const cities = CITY_MAP.filter(c => !onlyCities || onlyCities.has(c.name));
   if (!cities.length) throw Object.assign(new Error('没有匹配的城池'), { status: 400 });
   if (cities.length > CITIES_PER_SYNC_LIMIT) {
@@ -123,6 +130,7 @@ async function syncPrices(opts) {
     saved: 0,
     created: 0,
     updated: 0,
+    newCities: [],
     failed: [],
     syncedAt: nowText(),
   };
@@ -155,11 +163,12 @@ async function syncPrices(opts) {
 
       const rows = parseProducts(item.res.products);
 
-      const cityId = await ensureCityId(city.name);
+      const { id: cityId, created: cityCreated } = await ensureCityId(city.name);
       if (!cityId) {
         result.failed.push({ city: city.name, error: '城池不在字典中' });
         continue;
       }
+      if (cityCreated) result.newCities.push(city.name);
 
       await setCityTax(serverId, cityId, item.res.tax);
 
@@ -234,4 +243,4 @@ async function syncPrices(opts) {
   return result;
 }
 
-module.exports = { syncPrices, parseProducts, productName, gamePrice, CITY_MAP };
+module.exports = { syncPrices, parseProducts, productName, gamePrice, ensureCityId, CITY_MAP };

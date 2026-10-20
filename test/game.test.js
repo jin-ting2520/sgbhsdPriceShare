@@ -13,7 +13,7 @@ for (const suffix of ['', '-wal', '-shm']) {
   try { fs.unlinkSync(process.env.PRICE_DB + suffix); } catch { /* ignore */ }
 }
 const app = require('../server');
-const { productName, gamePrice, parseProducts, CITY_MAP } = require('../server/game/sync');
+const { productName, gamePrice, parseProducts, ensureCityId, CITY_MAP } = require('../server/game/sync');
 const { displayBuy, displaySell, rawBuy, rawSell, clampRelief } = require('../server/tax');
 
 let server;
@@ -120,6 +120,13 @@ test('POST /api/game/sync 参数校验', async () => {
   });
   assert.equal(noServer.status, 400);
   assert.match(noServer.json.message, /区服/);
+
+  const unknownCity = await api('/api/game/sync', {
+    method: 'POST',
+    body: { token: 'x'.repeat(80), server: 'S1', cities: ['不存在城'] },
+  });
+  assert.equal(unknownCity.status, 400);
+  assert.match(unknownCity.json.message, /不存在城/);
 });
 
 test('城池税率：每次同步按最新税率覆盖', async () => {
@@ -134,4 +141,16 @@ test('城池税率：每次同步按最新税率覆盖', async () => {
   assert.equal(await db.getCityTax(serverRow.id, cityId), 0.2);
   await db.setCityTax(serverRow.id, cityId, null);
   assert.equal(await db.getCityTax(serverRow.id, cityId), 0.2);
+});
+
+test('同步自动登记字典：缺失城池新建，已存在不重复', async () => {
+  const db = require('../server/db');
+  const first = await ensureCityId('测试新城');
+  assert.ok(first.id);
+  assert.equal(first.created, true);
+  const second = await ensureCityId('测试新城');
+  assert.equal(second.id, first.id);
+  assert.equal(second.created, false);
+  const rows = await db.query("SELECT id FROM dict_items WHERE type = 'city' AND name = ?", ['测试新城']);
+  assert.equal(rows.length, 1);
 });
