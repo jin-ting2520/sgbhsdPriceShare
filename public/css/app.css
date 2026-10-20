@@ -44,6 +44,9 @@ body {
 .search-card .el-form-item { margin-bottom: 4px; }
 .search-actions { display: flex; gap: 10px; }
 .search-actions .el-button { flex: 1; }
+.relief-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12.5px; color: var(--ink-2); flex-wrap: wrap; }
+.relief-row .relief-label { border-bottom: 1px dashed var(--line, #c9ccd4); cursor: help; }
+.relief-tax { color: var(--ink-3, #8a8f9c); }
 .req-star::before { content: "*"; color: #f56c6c; margin-right: 4px; }
 
 /* ---------------- 表格卡片 ---------------- */

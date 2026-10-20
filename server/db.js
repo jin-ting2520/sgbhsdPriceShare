@@ -45,14 +45,6 @@ const COMMODITY_SEED = [
   { name: '金银器', burden: 27 },
 ];
 
-/** 富甲天下基础参数（mono setting） */
-const MONOPOLY_DEFAULTS = {
-  energyCost: 1,      // 每次跨城消耗体力
-  energyLimit: 10,    // 体力上限
-  energyCDHours: 4,   // 每点体力恢复小时数
-  baseLoad: 0,
-};
-
 /* ------------------------------ 连接 ------------------------------ */
 
 let pool = null;
@@ -133,6 +125,14 @@ CREATE TABLE IF NOT EXISTS price_history (
 CREATE INDEX IF NOT EXISTS idx_history_scope ON price_history(server_id, city_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_history_time ON price_history(created_at);
 
+CREATE TABLE IF NOT EXISTS city_taxes (
+  server_id  INTEGER NOT NULL,
+  city_id    INTEGER NOT NULL,
+  tax        REAL    NOT NULL,
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  PRIMARY KEY (server_id, city_id)
+);
+
 CREATE TABLE IF NOT EXISTS city_nodes (
   city_name TEXT PRIMARY KEY,
   cfg_name  TEXT,
@@ -143,25 +143,27 @@ CREATE TABLE IF NOT EXISTS city_nodes (
   updated_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS route_energy (
-  from_city TEXT NOT NULL,
-  to_city   TEXT NOT NULL,
-  energy    INTEGER NOT NULL,
-  source    TEXT NOT NULL DEFAULT 'game',
-  updated_at TEXT,
-  PRIMARY KEY (from_city, to_city)
+CREATE TABLE IF NOT EXISTS accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT    NOT NULL COLLATE NOCASE UNIQUE,
+  password_hash TEXT    NOT NULL,
+  token         TEXT,
+  session_token TEXT    UNIQUE,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS sync_settings (
-  id           INTEGER PRIMARY KEY CHECK (id = 1),
-  enabled      INTEGER NOT NULL DEFAULT 0,
-  cron_expr    TEXT    NOT NULL DEFAULT '0 */2 * * *',
-  token        TEXT,
-  server_name  TEXT    NOT NULL DEFAULT '',
-  operator     TEXT    NOT NULL DEFAULT '自动同步',
-  last_run_at  TEXT,
-  last_status  TEXT,
-  last_message TEXT
+  id               INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled          INTEGER NOT NULL DEFAULT 0,
+  cron_expr        TEXT    NOT NULL DEFAULT '0 */2 * * *',
+  token            TEXT,
+  token_account_id INTEGER,
+  server_name      TEXT    NOT NULL DEFAULT '',
+  operator         TEXT    NOT NULL DEFAULT '自动同步',
+  last_run_at      TEXT,
+  last_status      TEXT,
+  last_message     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sync_log (
@@ -225,6 +227,15 @@ const MYSQL_SCHEMA = [
     KEY idx_history_scope (server_id, city_id, created_at),
     KEY idx_history_time (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS city_taxes (
+    server_id INT NOT NULL,
+    city_id INT NOT NULL,
+    tax DECIMAL(4,2) NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (server_id, city_id),
+    CONSTRAINT fk_city_taxes_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    CONSTRAINT fk_city_taxes_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS city_nodes (
     city_name VARCHAR(20) PRIMARY KEY,
     cfg_name VARCHAR(20) NULL,
@@ -234,19 +245,23 @@ const MYSQL_SCHEMA = [
     grid_y INT NULL,
     updated_at DATETIME NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-  `CREATE TABLE IF NOT EXISTS route_energy (
-    from_city VARCHAR(20) NOT NULL,
-    to_city VARCHAR(20) NOT NULL,
-    energy INT NOT NULL,
-    source VARCHAR(8) NOT NULL DEFAULT 'game',
-    updated_at DATETIME NULL,
-    PRIMARY KEY (from_city, to_city)
+  `CREATE TABLE IF NOT EXISTS accounts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(20) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    token TEXT NULL,
+    session_token VARCHAR(128) NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uk_accounts_name (name),
+    UNIQUE KEY uk_accounts_session (session_token)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS sync_settings (
     id TINYINT PRIMARY KEY,
     enabled TINYINT NOT NULL DEFAULT 0,
     cron_expr VARCHAR(64) NOT NULL DEFAULT '0 */2 * * *',
     token TEXT NULL,
+    token_account_id INT NULL,
     server_name VARCHAR(50) NOT NULL DEFAULT '',
     operator VARCHAR(20) NOT NULL DEFAULT '自动同步',
     last_run_at DATETIME NULL,
@@ -372,6 +387,7 @@ async function doInit() {
     }
     if (lastErr) throw new Error(`无法连接 MySQL：${lastErr.message}`);
     for (const sql of MYSQL_SCHEMA) await pool.query(sql);
+    await migrateMysql();
   } else {
     const { DatabaseSync } = require('node:sqlite');
     fs.mkdirSync(nodePath.dirname(DB_FILE), { recursive: true });
@@ -396,6 +412,18 @@ function migrateSqlite() {
   if (!hasCol('price_history', 'operator')) sqlite.exec('ALTER TABLE price_history ADD COLUMN operator TEXT');
   if (!hasCol('dict_items', 'burden')) sqlite.exec('ALTER TABLE dict_items ADD COLUMN burden REAL');
   if (!hasCol('prices', 'operator')) sqlite.exec('ALTER TABLE prices ADD COLUMN operator TEXT');
+  if (!hasCol('sync_settings', 'token_account_id')) sqlite.exec('ALTER TABLE sync_settings ADD COLUMN token_account_id INTEGER');
+}
+
+/** 存量 MySQL 库补列（老版本升级） */
+async function migrateMysql() {
+  const [cols] = await pool.query(
+    'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+    [MYSQL_CFG.database, 'sync_settings']
+  );
+  if (!cols.some(c => c.name === 'token_account_id')) {
+    await pool.query('ALTER TABLE sync_settings ADD COLUMN token_account_id INT NULL');
+  }
 }
 
 async function seed() {
@@ -523,6 +551,35 @@ async function findDictId(type, name) {
   return r.length ? r[0].id : null;
 }
 
+async function getCityTax(serverId, cityId) {
+  if (serverId == null || cityId == null) return null;
+  const r = await rawQuery('SELECT tax FROM city_taxes WHERE server_id = ? AND city_id = ?', [serverId, cityId]);
+  return r.length ? Number(r[0].tax) : null;
+}
+
+async function getCityTaxMap(serverId) {
+  if (serverId == null) return new Map();
+  const rows = await rawQuery('SELECT city_id AS cityId, tax FROM city_taxes WHERE server_id = ?', [serverId]);
+  return new Map(rows.map(r => [Number(r.cityId), Number(r.tax)]));
+}
+
+/** 记录/更新城池税率（游戏同步写入，0.1~0.9） */
+async function setCityTax(serverId, cityId, tax) {
+  const value = Number(tax);
+  if (!Number.isFinite(value) || value <= 0 || value > 1) return;
+  const t = nowText();
+  const existing = await rawQuery('SELECT tax FROM city_taxes WHERE server_id = ? AND city_id = ?', [serverId, cityId]);
+  if (existing.length) {
+    await rawRun('UPDATE city_taxes SET tax = ?, updated_at = ? WHERE server_id = ? AND city_id = ?', [value, t, serverId, cityId]);
+  } else {
+    try {
+      await rawRun('INSERT INTO city_taxes (server_id, city_id, tax, updated_at) VALUES (?, ?, ?, ?)', [serverId, cityId, value, t]);
+    } catch {
+      await rawRun('UPDATE city_taxes SET tax = ?, updated_at = ? WHERE server_id = ? AND city_id = ?', [value, t, serverId, cityId]);
+    }
+  }
+}
+
 async function createDictItem(type, name, burden = null) {
   const maxSortRow = await rawQuery(
     'SELECT COALESCE(MAX(sort_order), 0) AS m FROM dict_items WHERE type = ?',
@@ -557,7 +614,6 @@ module.exports = {
   DB_FILE,
   DATA_DIR,
   HISTORY_LIMIT,
-  MONOPOLY_DEFAULTS,
   ready: init,
   init,
   close,
@@ -569,6 +625,9 @@ module.exports = {
   upsertServer,
   findServerId,
   findDictId,
+  getCityTax,
+  getCityTaxMap,
+  setCityTax,
   createDictItem,
   COMMODITY_LIST: COMMODITY_SEED.map(c => c.name),
   CITY_LIST,

@@ -4,10 +4,12 @@
 
 const express = require('express');
 const {
-  query, get, run, tx, upsertServer, findServerId, findDictId, createDictItem, nowText,
+  query, get, run, tx, upsertServer, findServerId, findDictId,
+  getCityTax, getCityTaxMap, createDictItem, nowText,
 } = require('../db');
 const cache = require('../cache');
 const { broadcast } = require('../ws');
+const { clampRelief, displayBuy, displaySell, rawBuy, rawSell } = require('../tax');
 const {
   ok, fail, asyncHandler, cleanName, isBlank, parsePrice,
   isUniqueConstraintError,
@@ -16,6 +18,8 @@ const {
 const router = express.Router();
 
 const MAX_ITEMS = 500;
+
+const reliefOf = (obj, key) => clampRelief(obj && obj[key]);
 
 function csvCell(v) {
   const s = v == null ? '' : String(v);
@@ -51,6 +55,8 @@ router.get('/', asyncHandler(async (req, res) => {
 
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
+  const relief = reliefOf(req.query, 'relief');
+  const tax = await getCityTax(serverId, cityId);
   let priceMap = {};
   if (serverId && cityId) {
     const rows = await query(
@@ -68,8 +74,8 @@ router.get('/', asyncHandler(async (req, res) => {
       commodityId: c.id,
       commodity: c.name,
       burden: c.burden,
-      buy: p ? p.buy : null,
-      sell: p ? p.sell : null,
+      buy: p ? displayBuy(p.buy, tax, relief) : null,
+      sell: p ? displaySell(p.sell, tax, relief) : null,
       updatedAt: p ? p.updatedAt : null,
       operator: p ? p.operator : null,
     };
@@ -78,6 +84,8 @@ router.get('/', asyncHandler(async (req, res) => {
   return ok(res, {
     server,
     city,
+    tax,
+    relief,
     serverRegistered: !!serverId,
     cityRegistered: !!cityId,
     items,
@@ -110,6 +118,8 @@ router.post('/', asyncHandler(async (req, res) => {
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
 
   const operator = operatorOf(req.body);
+  const relief = reliefOf(req.body, 'relief');
+  const tax = await getCityTax(serverId, cityId);
 
   const ops = [];
   for (const raw of items) {
@@ -126,8 +136,8 @@ router.post('/', asyncHandler(async (req, res) => {
     ops.push({
       commodityId,
       commodity,
-      buy: buy.value,
-      sell: sell.value,
+      buy: rawBuy(buy.value, tax, relief),
+      sell: rawSell(sell.value, tax, relief),
       baseUpdatedAt: raw && raw.baseUpdatedAt != null ? String(raw.baseUpdatedAt) : null,
     });
   }
@@ -151,8 +161,8 @@ router.post('/', asyncHandler(async (req, res) => {
           commodity: op.commodity,
           baseUpdatedAt: op.baseUpdatedAt,
           updatedAt: cur.updatedAt,
-          buy: cur.buy,
-          sell: cur.sell,
+          buy: displayBuy(cur.buy, tax, relief),
+          sell: displaySell(cur.sell, tax, relief),
           operator: cur.operator,
         });
       }
@@ -227,7 +237,7 @@ router.post('/', asyncHandler(async (req, res) => {
 
   if (changed.length) {
     await cache.invalidate('dict:');
-    broadcast('price.updated', { server, city, operator, items: changed });
+    broadcast('price.updated', { server, city, operator, tax, items: changed });
   }
 
   return ok(res, summary);
@@ -244,6 +254,8 @@ router.get('/history', asyncHandler(async (req, res) => {
   const cityId = await findDictId('city', city);
   if (!serverId || !cityId) return ok(res, { total: 0, items: [] });
 
+  const relief = reliefOf(req.query, 'relief');
+  const tax = await getCityTax(serverId, cityId);
   const rows = await query(
     `SELECT h.id, h.field, h.old_value AS oldValue, h.new_value AS newValue, h.created_at AS createdAt,
             h.operator, s.name AS server, c.name AS city, d.name AS commodity
@@ -256,7 +268,12 @@ router.get('/history', asyncHandler(async (req, res) => {
     [serverId, cityId, limit]
   );
 
-  return ok(res, { total: rows.length, items: rows });
+  const items = rows.map(r => {
+    const adjust = r.field === 'buy_price' ? displayBuy : displaySell;
+    return { ...r, oldValue: adjust(r.oldValue, tax, relief), newValue: adjust(r.newValue, tax, relief) };
+  });
+
+  return ok(res, { total: items.length, tax, relief, items });
 }));
 
 /** GET /api/prices/trend?server=&city=&commodity=&days= —— 价格趋势（逐次变更时点 + 前向填充） */
@@ -275,6 +292,9 @@ router.get('/trend', asyncHandler(async (req, res) => {
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
+  const relief = reliefOf(req.query, 'relief');
+  const tax = await getCityTax(serverId, cityId);
+
   let rows = [];
   if (serverId && cityId) {
     rows = await query(
@@ -284,6 +304,10 @@ router.get('/trend', asyncHandler(async (req, res) => {
         ORDER BY h.id`,
       [serverId, cityId, commodityRow.id]
     );
+    rows = rows.map(r => ({
+      ...r,
+      value: r.field === 'buy_price' ? displayBuy(r.value, tax, relief) : displaySell(r.value, tax, relief),
+    }));
   }
 
   // 近 N 天（created_at 为北京时间 'YYYY-MM-DD HH:MM:SS'）
@@ -305,6 +329,10 @@ router.get('/trend', asyncHandler(async (req, res) => {
   const current = (serverId && cityId)
     ? await get('SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?', [serverId, cityId, commodityRow.id])
     : null;
+  if (current) {
+    current.buy = displayBuy(current.buy, tax, relief);
+    current.sell = displaySell(current.sell, tax, relief);
+  }
   if (current && (current.buy != null || current.sell != null)) {
     const t = nowText();
     const lastT = byTime.size ? [...byTime.keys()].pop() : null;
@@ -343,7 +371,7 @@ router.get('/trend', asyncHandler(async (req, res) => {
   };
 
   return ok(res, {
-    server, city, commodity, burden: commodityRow.burden, days, points, summary,
+    server, city, commodity, burden: commodityRow.burden, days, tax, relief, points, summary,
   });
 }));
 
@@ -357,6 +385,9 @@ router.get('/matrix', asyncHandler(async (req, res) => {
   const commodityRow = await get("SELECT id, name, burden FROM dict_items WHERE type = 'commodity' AND name = ?", [commodity]);
   if (!commodityRow) return fail(res, 400, `商品「${commodity}」不存在`);
 
+  const relief = reliefOf(req.query, 'relief');
+  const taxMap = await getCityTaxMap(serverId);
+
   const rows = await query(
     `SELECT c.id AS cityId, c.name AS city, c.sort_order AS sortOrder,
             p.buy_price AS buy, p.sell_price AS sell, p.operator, p.updated_at AS updatedAt
@@ -368,14 +399,26 @@ router.get('/matrix', asyncHandler(async (req, res) => {
     [commodityRow.id, serverId || -1]
   );
 
-  const items = rows.map(r => ({
-    cityId: r.cityId,
-    city: r.city,
-    buy: r.buy,
-    sell: r.sell,
-    updatedAt: r.updatedAt,
-    operator: r.operator,
-  }));
+  const items = rows.map(r => {
+    const tax = taxMap.get(Number(r.cityId)) ?? null;
+    return {
+      cityId: r.cityId,
+      city: r.city,
+      sortOrder: r.sortOrder,
+      tax,
+      buy: displayBuy(r.buy, tax, relief),
+      sell: displaySell(r.sell, tax, relief),
+      updatedAt: r.updatedAt,
+      operator: r.operator,
+    };
+  });
+  items.sort((a, b) => {
+    const an = a.buy == null;
+    const bn = b.buy == null;
+    if (an !== bn) return an ? 1 : -1;
+    if (a.buy != null && a.buy !== b.buy) return a.buy - b.buy;
+    return a.sortOrder - b.sortOrder || a.cityId - b.cityId;
+  });
 
   const priced = items.filter(i => i.buy != null || i.sell != null);
   const buys = priced.map(i => i.buy).filter(v => v != null);
@@ -392,7 +435,7 @@ router.get('/matrix', asyncHandler(async (req, res) => {
     bestSellCity: sells.length ? priced.find(i => i.sell === Math.max(...sells)).city : null,
   };
 
-  return ok(res, { server, commodity, burden: commodityRow.burden, items, summary });
+  return ok(res, { server, commodity, burden: commodityRow.burden, relief, items, summary });
 }));
 
 /** GET /api/prices/export?server=&city= —— CSV 导出（带 BOM，Excel 友好） */
@@ -403,6 +446,8 @@ router.get('/export', asyncHandler(async (req, res) => {
 
   const serverId = await findServerId(server);
   const cityId = await findDictId('city', city);
+  const relief = reliefOf(req.query, 'relief');
+  const tax = await getCityTax(serverId, cityId);
   let rows = [];
   if (serverId && cityId) {
     rows = await query(
@@ -412,6 +457,11 @@ router.get('/export', asyncHandler(async (req, res) => {
         WHERE p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`,
       [serverId, cityId]
     );
+    rows = rows.map(r => ({
+      ...r,
+      buy: displayBuy(r.buy, tax, relief),
+      sell: displaySell(r.sell, tax, relief),
+    }));
   }
   const all = await query(
     `SELECT name, burden FROM dict_items WHERE type = 'commodity' AND status = 1 ORDER BY sort_order, id`
@@ -460,6 +510,8 @@ router.post('/import', asyncHandler(async (req, res) => {
   const cityId = await findDictId('city', city);
   if (!cityId) return fail(res, 400, `城池「${city}」不在字典中，请先通过城池下拉框新增`);
   const operator = operatorOf(req.body);
+  const relief = reliefOf(req.body, 'relief');
+  const tax = await getCityTax(serverId, cityId);
 
   const errors = [];
   const parsed = [];
@@ -499,6 +551,12 @@ router.post('/import', asyncHandler(async (req, res) => {
   }
 
   if (errors.length) return fail(res, 400, `导入失败：${errors.slice(0, 3).join('；')}${errors.length > 3 ? ` 等（共 ${errors.length} 条错误）` : ''}`);
+
+  // 导入的是用户看到的税后价，按当前用户减免与该城税率反推税前原价
+  for (const p of parsed) {
+    p.buy = rawBuy(p.buy, tax, relief);
+    p.sell = rawSell(p.sell, tax, relief);
+  }
 
   const unknown = [];
   for (const name of [...new Set(parsed.map(p => p.commodity))]) {
@@ -579,7 +637,7 @@ router.post('/import', asyncHandler(async (req, res) => {
 
   if (created || updated) {
     await cache.invalidate('dict:');
-    broadcast('price.updated', { server, city, operator, items: [] });
+    broadcast('price.updated', { server, city, operator, tax, items: [] });
   }
   if (newDictCount) broadcast('dict.changed', {});
 

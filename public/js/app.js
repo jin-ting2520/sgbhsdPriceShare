@@ -4,7 +4,26 @@ import zhCn from 'element-plus/locale/zh-cn'
 
 const MOBILE_MEDIA = '(max-width: 768px)'
 const STORAGE_KEY = 'sgbhsd.priceShare.form.v1'
-const NICK_KEY = 'sgbhsd.nickname.v1'
+const ACCOUNT_KEY = 'sgbhsd.account.v1'
+const RELIEF_KEY = 'sgbhsd.taxRelief.v1'
+const DEFAULT_RELIEF = 5
+
+const readSavedAccount = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACCOUNT_KEY) || 'null')
+    if (saved && saved.name && saved.session) return { name: String(saved.name).slice(0, 20), session: saved.session }
+  } catch (e) { /* 忽略隐私模式等 */ }
+  return null
+}
+
+let accountSession = (readSavedAccount() || {}).session || ''
+
+const clampRelief = v => {
+  if (v == null || v === '') return DEFAULT_RELIEF
+  const n = Number(v)
+  if (!Number.isFinite(n)) return DEFAULT_RELIEF
+  return Math.min(Math.max(n, 0), 100)
+}
 
 const CRON_PRESETS = [
   { label: '每 1 小时', value: '0 * * * *' },
@@ -23,6 +42,7 @@ async function api(path, options = {}) {
     method: options.method || 'GET',
     headers: { 'Content-Type': 'application/json' },
   }
+  if (accountSession) init.headers['X-Account-Token'] = accountSession
   if (options.body !== undefined) {
     init.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body)
   }
@@ -32,6 +52,7 @@ async function api(path, options = {}) {
   if (!json) throw new Error(`服务异常（HTTP ${res.status}）`)
   if (json.code !== 0) {
     const err = new Error(json.message || '请求失败')
+    err.status = res.status
     err.code = json.code
     err.data = json.data
     throw err
@@ -51,11 +72,15 @@ const fmt = n => (n == null ? '-' : String(n))
 
 createApp({
   setup() {
-    /* ---------- 昵称（进入即用，本机缓存） ---------- */
-    const nickname = ref((localStorage.getItem(NICK_KEY) || '').slice(0, 20))
+    /* ---------- 账号（昵称 + 密码，本机缓存会话） ---------- */
+    const savedAccount = readSavedAccount()
+    const nickname = ref(savedAccount ? savedAccount.name : '')
     const nicknameInput = ref('')
+    const passwordInput = ref('')
+    const accountToken = ref('')
+    const sessionOk = ref(!!accountSession)
     const entering = ref(false)
-    const entered = computed(() => !!nickname.value)
+    const entered = computed(() => !!nickname.value && sessionOk.value)
     const dataLoaded = ref(false)
 
     /* ---------- 基础状态 ---------- */
@@ -64,6 +89,18 @@ createApp({
     const cities = ref([])
     const commodities = ref([])
     const serverList = ref([])
+
+    /* ---------- 个人赋税减免（本机缓存，默认 5%） ---------- */
+    const taxRelief = ref(clampRelief(localStorage.getItem(RELIEF_KEY)))
+    const savedRelief = ref(taxRelief.value)
+    const currentTax = ref(null)
+    const effTax = tax => {
+      const t = Number(tax)
+      if (!Number.isFinite(t) || t <= 0) return 0
+      return t * (1 - taxRelief.value / 100)
+    }
+    const viewBuy = (raw, tax) => (raw == null ? null : Math.round(Number(raw) * (1 + effTax(tax)) * 10) / 10)
+    const viewSell = (raw, tax) => (raw == null ? null : Math.round(Number(raw) * (1 - effTax(tax)) * 10) / 10)
 
     const citySelect = ref(null)
     const commoditySelect = ref(null)
@@ -94,35 +131,58 @@ createApp({
       buy: '', sell: '', updatedAt: null, operator: null, _base: { buy: null, sell: null }, _baseUpdatedAt: null,
     }))
 
-    /** 点击「进入」：校验昵称 → 缓存 → 加载数据 */
+    const loadData = async () => {
+      if (dataLoaded.value) return
+      await Promise.all([loadDict(), loadServers()])
+      buildRowsFromDict()
+      dataLoaded.value = true
+    }
+
+    /** 点击「进入」：昵称 + 密码登录（首次自动注册）→ 缓存会话 → 加载数据 */
     const enterSite = async () => {
       const name = nicknameInput.value.trim().replace(/\s+/g, ' ')
+      const password = passwordInput.value
       if (!name) { ElMessage.warning('请输入你的三国冰河时代昵称'); return }
       if (name.length > 20) { ElMessage.warning('昵称不能超过 20 个字符'); return }
+      if (!password) { ElMessage.warning('请输入密码（首次登录将自动注册）'); return }
+      if (password.length < 4) { ElMessage.warning('密码至少 4 位'); return }
       entering.value = true
-      nickname.value = name
       try {
-        localStorage.setItem(NICK_KEY, name)
-        if (!dataLoaded.value) {
-          await Promise.all([loadDict(), loadServers()])
-          buildRowsFromDict()
-          dataLoaded.value = true
+        const data = await api('/api/auth/login', { method: 'POST', body: { name, password } })
+        accountSession = data.session
+        sessionOk.value = true
+        nickname.value = data.name
+        accountToken.value = data.token || ''
+        passwordInput.value = ''
+        try {
+          localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: data.name, session: data.session }))
+        } catch (e) { /* 忽略隐私模式等 */ }
+        ElMessage.success(data.created ? `已注册并进入，${data.name}` : `欢迎回来，${data.name}`)
+        try {
+          await loadData()
+        } catch (e) {
+          ElMessage.error('数据加载失败，请刷新重试')
         }
-        ElMessage.success(`欢迎，${name}`)
       } catch (e) {
-        nickname.value = ''
-        localStorage.removeItem(NICK_KEY)
+        if (e.status === 401) accountToken.value = ''
         ElMessage.error(e.message)
       } finally {
         entering.value = false
       }
     }
 
-    /** 右上角「切换昵称」：回到入口，重新输入 */
-    const switchNickname = () => {
-      nicknameInput.value = nickname.value
+    /** 右上角「切换账号」：注销当前会话，回到入口 */
+    const switchAccount = async () => {
+      try { await api('/api/auth/logout', { method: 'POST' }) } catch (e) { /* 忽略 */ }
+      accountSession = ''
+      sessionOk.value = false
       nickname.value = ''
-      localStorage.removeItem(NICK_KEY)
+      accountToken.value = ''
+      nicknameInput.value = ''
+      passwordInput.value = ''
+      syncToken.value = ''
+      syncResult.value = null
+      try { localStorage.removeItem(ACCOUNT_KEY) } catch (e) { /* 忽略 */ }
     }
 
     /* ---------- 区服输入联想（纯数字） ---------- */
@@ -182,9 +242,10 @@ createApp({
     const doFetch = async (showLoading = true) => {
       if (showLoading) loading.value = true
       try {
-        const q = new URLSearchParams({ server: form.server.trim(), city: form.city })
+        const q = new URLSearchParams({ server: form.server.trim(), city: form.city, relief: String(taxRelief.value) })
         if (form.commodity) q.set('commodity', form.commodity)
         const res = await api(`/api/prices?${q.toString()}`)
+        currentTax.value = res.tax == null ? null : Number(res.tax)
         rows.value = res.items.map(r => ({
           ...r,
           buy: r.buy == null ? '' : String(r.buy),
@@ -213,6 +274,7 @@ createApp({
       form.city = ''
       form.commodity = ''
       queried.value = false
+      currentTax.value = null
       buildRowsFromDict()
     }
 
@@ -251,6 +313,28 @@ createApp({
     }
 
     const rowClass = row => (queried.value && (isDirty(row.row) || row.row._remoteConflict) ? 'row-dirty' : '')
+
+    const onReliefChange = async () => {
+      const next = clampRelief(taxRelief.value)
+      const prev = savedRelief.value
+      taxRelief.value = next
+      if (next === prev) return
+      if (queried.value && rows.value.some(isDirty)) {
+        try {
+          await ElMessageBox.confirm(
+            `将按 ${next}% 减免重新换算当前城池价格，未保存的修改会丢失。是否继续？`,
+            '调整赋税减免',
+            { type: 'warning', confirmButtonText: '重新加载', cancelButtonText: '取消' }
+          )
+        } catch {
+          taxRelief.value = prev
+          return
+        }
+      }
+      savedRelief.value = next
+      localStorage.setItem(RELIEF_KEY, String(next))
+      if (queried.value) await doFetch(false)
+    }
 
     const changedRows = computed(() => rows.value
       .filter(r => queried.value && isDirty(r))
@@ -319,6 +403,7 @@ createApp({
     const applyRemoteItems = payload => {
       if (!queried.value) return
       if (payload.server !== form.server.trim() || payload.city !== form.city) return
+      if (payload.tax != null) currentTax.value = Number(payload.tax)
       if (!payload.items || !payload.items.length) {
         if (rows.value.some(isDirty)) {
           ElMessage.warning('他人批量更新了价格，你本地有未保存修改；保存时会提示冲突')
@@ -330,17 +415,19 @@ createApp({
       for (const item of payload.items) {
         const row = rows.value.find(r => Number(r.commodityId) === Number(item.commodityId))
         if (!row) continue
+        const buy = viewBuy(item.buy, payload.tax)
+        const sell = viewSell(item.sell, payload.tax)
         if (isDirty(row)) {
           row._remoteConflict = {
-            buy: item.buy, sell: item.sell, operator: item.operator, updatedAt: item.updatedAt,
+            buy, sell, operator: item.operator, updatedAt: item.updatedAt,
           }
           continue
         }
-        row.buy = item.buy == null ? '' : String(item.buy)
-        row.sell = item.sell == null ? '' : String(item.sell)
+        row.buy = buy == null ? '' : String(buy)
+        row.sell = sell == null ? '' : String(sell)
         row.updatedAt = item.updatedAt
         row.operator = item.operator
-        row._base = { buy: item.buy, sell: item.sell }
+        row._base = { buy, sell }
         row._baseUpdatedAt = item.updatedAt
         delete row._remoteConflict
       }
@@ -420,7 +507,10 @@ createApp({
         }))
         const res = await api('/api/prices', {
           method: 'POST',
-          body: { server: form.server.trim(), city: form.city, operator: nickname.value, items, force: force === true },
+          body: {
+            server: form.server.trim(), city: form.city, operator: nickname.value,
+            relief: taxRelief.value, items, force: force === true,
+          },
         })
         ElMessage.success(`保存成功：新增 ${res.created} 条，更新 ${res.updated} 条${res.cleared ? `，清空 ${res.cleared} 条` : ''}`)
         saveVisible.value = false
@@ -596,7 +686,7 @@ createApp({
 
     const loadHistory = async () => {
       try {
-        const res = await api(`/api/prices/history?server=${encodeURIComponent(form.server.trim())}&city=${encodeURIComponent(form.city)}&limit=100`)
+        const res = await api(`/api/prices/history?server=${encodeURIComponent(form.server.trim())}&city=${encodeURIComponent(form.city)}&limit=100&relief=${taxRelief.value}`)
         historyList.value = res.items
       } catch (e) { ElMessage.error(e.message) }
     }
@@ -746,6 +836,7 @@ createApp({
         const q = new URLSearchParams({
           server: form.server.trim(), city: form.city,
           commodity: trendCommodity.value, days: String(trendDays.value),
+          relief: String(taxRelief.value),
         })
         trendData.value = await api(`/api/prices/trend?${q.toString()}`)
         trendView.value = null
@@ -769,7 +860,7 @@ createApp({
       if (!matrixCommodity.value) { ElMessage.warning('请选择商品'); return }
       matrixLoading.value = true
       try {
-        const q = new URLSearchParams({ server: form.server.trim(), commodity: matrixCommodity.value })
+        const q = new URLSearchParams({ server: form.server.trim(), commodity: matrixCommodity.value, relief: String(taxRelief.value) })
         matrixData.value = await api(`/api/prices/matrix?${q.toString()}`)
         matrixSellCity.value = ''
       } catch (e) { ElMessage.error(e.message) } finally { matrixLoading.value = false }
@@ -910,6 +1001,7 @@ createApp({
             server: form.server.trim(),
             city: form.city,
             operator: nickname.value,
+            relief: taxRelief.value,
             rows: rowsIn,
             createCommodities: importAutoCreate.value,
             merge: importMerge.value,
@@ -933,7 +1025,7 @@ createApp({
         return
       }
       try {
-        const q = new URLSearchParams({ server: form.server.trim(), city: form.city })
+        const q = new URLSearchParams({ server: form.server.trim(), city: form.city, relief: String(taxRelief.value) })
         const res = await fetch(`/api/prices/export?${q.toString()}`)
         if (!res.ok) {
           const j = await res.json().catch(() => null)
@@ -960,18 +1052,18 @@ createApp({
     const syncServer = ref('')
     const syncOperator = ref('')
     const syncResult = ref(null)
-    const syncHasSavedToken = ref(false)
+    const syncHasSavedToken = computed(() => !!accountToken.value)
 
     const openSync = async () => {
       syncVisible.value = true
       syncResult.value = null
       syncServer.value = form.server.trim()
       syncOperator.value = nickname.value
-      if (!syncToken.value) syncToken.value = ''
+      syncToken.value = ''
       try {
-        const s = await api('/api/sync-settings')
-        syncHasSavedToken.value = !!s.hasToken
-      } catch (e) { /* ignore */ }
+        const me = await api('/api/auth/me')
+        accountToken.value = me.token || ''
+      } catch (e) { /* 忽略 */ }
     }
 
     const doSync = async () => {
@@ -979,20 +1071,25 @@ createApp({
       syncServer.value = server
       if (!server) { ElMessage.warning('请输入纯数字区服，如 1344'); return }
       if (!syncToken.value.trim() && !syncHasSavedToken.value) {
-        ElMessage.warning('请粘贴游戏登录 token（或先在「定时」中保存）')
+        ElMessage.warning('请粘贴游戏登录 token（保存后仅本账号可见，可复用）')
         return
       }
       syncing.value = true
       syncResult.value = null
       try {
+        const typed = syncToken.value.trim()
         const result = await api('/api/game/sync', {
           method: 'POST',
           body: {
-            token: syncToken.value.trim() || undefined,
+            token: typed || undefined,
             server,
             operator: syncOperator.value || nickname.value,
           },
         })
+        if (typed) {
+          accountToken.value = typed
+          syncToken.value = ''
+        }
         syncResult.value = result
         if (result.saved > 0) ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
         else ElMessage.warning(`同步完成，但没有写入价格（${result.queried}/${result.cities} 城）`)
@@ -1015,23 +1112,22 @@ createApp({
     const syncLogs = ref([])
     const settings = reactive({
       enabled: false, cron: '0 */2 * * *', token: '', server: '', operator: '自动同步',
-      hasToken: false, tokenHint: '', lastRunAt: null, lastStatus: null, lastMessage: null,
-      energy: { energyCost: 1, energyLimit: 10, energyCDHours: 4 },
+      hasToken: false, tokenOwner: null, legacyToken: false, lastRunAt: null, lastStatus: null, lastMessage: null,
     })
 
-    const applySettings = data => {
+    const applySettings = (data, ownToken) => {
       if (!data) return
       settings.enabled = !!data.enabled
       settings.cron = data.cron || '0 */2 * * *'
       settings.server = String(data.server || '').replace(/\D/g, '')
       settings.operator = data.operator || '自动同步'
       settings.hasToken = !!data.hasToken
-      settings.tokenHint = data.tokenHint || ''
+      settings.tokenOwner = data.tokenOwner || null
+      settings.legacyToken = !!data.legacyToken
       settings.lastRunAt = data.lastRunAt
       settings.lastStatus = data.lastStatus
       settings.lastMessage = data.lastMessage
-      if (data.energy) settings.energy = data.energy
-      settings.token = ''
+      if (ownToken !== undefined) settings.token = ownToken
       if (CRON_PRESETS.some(p => p.value === settings.cron)) {
         cronPreset.value = settings.cron
       } else {
@@ -1044,11 +1140,13 @@ createApp({
       settingsVisible.value = true
       settingsLoading.value = true
       try {
-        const [data, logs] = await Promise.all([
+        const [data, logs, me] = await Promise.all([
           api('/api/sync-settings'),
           api('/api/sync-settings/logs?limit=10'),
+          api('/api/auth/me'),
         ])
-        applySettings(data)
+        accountToken.value = me.token || ''
+        applySettings(data, accountToken.value)
         syncLogs.value = logs.items
         if (!settings.server) settings.server = form.server.trim()
         if (!settings.operator) settings.operator = nickname.value
@@ -1061,7 +1159,8 @@ createApp({
       settings.server = server
       if (!cron) { ElMessage.warning('请填写 cron 表达式'); return }
       if (settings.enabled && !server) { ElMessage.warning('启用自动同步需要填写纯数字区服，如 1344'); return }
-      if (settings.enabled && !settings.hasToken && !settings.token.trim()) {
+      const token = String(settings.token || '').trim()
+      if (settings.enabled && !token && !settings.hasToken) {
         ElMessage.warning('启用自动同步需要填写登录 token')
         return
       }
@@ -1072,10 +1171,11 @@ createApp({
           cron,
           server,
           operator: settings.operator,
+          token,
         }
-        if (settings.token.trim()) body.token = settings.token.trim()
         const data = await api('/api/sync-settings', { method: 'PUT', body })
-        applySettings(data)
+        accountToken.value = token
+        applySettings(data, token)
         ElMessage.success(settings.enabled ? '自动同步已启用' : '同步设置已保存')
       } catch (e) {
         ElMessage.error(e.message)
@@ -1111,8 +1211,8 @@ createApp({
     const reportLoading = ref(false)
     const reportDays = ref(7)
     const moversData = ref({ items: [] })
-    const arbData = ref({ items: [], params: {}, energyInfo: {} })
-    const arbParams = reactive({ load: 200, energyPrice: 0, energyPerTrip: 1, returnTrip: true, all: false })
+    const arbData = ref({ items: [], params: {} })
+    const arbParams = reactive({ load: 200, all: false })
     const heatData = ref({ buckets: [], totalChanges: 0, totalSyncs: 0 })
     const heatBucket = ref('day')
     const heatDays = ref(30)
@@ -1131,15 +1231,13 @@ createApp({
       reportLoading.value = true
       try {
         if (reportTab.value === 'movers') {
-          const q = new URLSearchParams({ server: reportServer.value.trim(), days: String(reportDays.value), limit: '30' })
+          const q = new URLSearchParams({ server: reportServer.value.trim(), days: String(reportDays.value), limit: '30', relief: String(taxRelief.value) })
           moversData.value = await api(`/api/reports/movers?${q.toString()}`)
         } else if (reportTab.value === 'arbitrage') {
           const q = new URLSearchParams({
             server: reportServer.value.trim(),
             load: String(arbParams.load),
-            energyPrice: String(arbParams.energyPrice),
-            energyPerTrip: String(arbParams.energyPerTrip),
-            returnTrip: arbParams.returnTrip ? '1' : '0',
+            relief: String(taxRelief.value),
             all: arbParams.all ? '1' : '0',
           })
           arbData.value = await api(`/api/reports/arbitrage?${q.toString()}`)
@@ -1222,9 +1320,24 @@ createApp({
 
       if (entered.value) {
         try {
-          await Promise.all([loadDict(), loadServers()])
-          buildRowsFromDict()
-          dataLoaded.value = true
+          const me = await api('/api/auth/me')
+          accountToken.value = me.token || ''
+          if (me.name && me.name !== nickname.value) {
+            nickname.value = me.name
+            try { localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: me.name, session: accountSession })) } catch (e) { /* 忽略 */ }
+          }
+        } catch (e) {
+          if (e.status === 401) {
+            accountSession = ''
+            sessionOk.value = false
+            nickname.value = ''
+            try { localStorage.removeItem(ACCOUNT_KEY) } catch (err) { /* 忽略 */ }
+            ElMessage.warning('登录已失效，请重新输入昵称和密码')
+            return
+          }
+        }
+        try {
+          await loadData()
           connectWs()
         } catch (e) {
           ElMessage.error('数据加载失败，请刷新重试')
@@ -1239,11 +1352,13 @@ createApp({
     })
 
     return {
-      // 昵称入口
-      nickname, nicknameInput, entering, entered, enterSite, switchNickname,
+      // 账号入口
+      nickname, nicknameInput, passwordInput, entering, entered, enterSite, switchAccount,
       // 基础
       isMobile, form, cities, commodities, serverList, rows, queried, loading,
       citySelect, commoditySelect,
+      // 赋税减免
+      taxRelief, currentTax, onReliefChange,
       // 实时协作
       wsConnected, wsClients, conflictCount,
       // 查询

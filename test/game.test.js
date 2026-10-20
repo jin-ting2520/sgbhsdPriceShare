@@ -13,7 +13,8 @@ for (const suffix of ['', '-wal', '-shm']) {
   try { fs.unlinkSync(process.env.PRICE_DB + suffix); } catch { /* ignore */ }
 }
 const app = require('../server');
-const { productName, gamePrice, parseProducts, harvestEnergy, CITY_MAP } = require('../server/game/sync');
+const { productName, gamePrice, parseProducts, CITY_MAP } = require('../server/game/sync');
+const { displayBuy, displaySell, rawBuy, rawSell, clampRelief } = require('../server/tax');
 
 let server;
 let base = '';
@@ -59,35 +60,34 @@ test('游戏价格换算：分 → 两位小数展示价', () => {
   assert.equal(gamePrice(undefined), null);
 });
 
-test('2104 商品解析：type 0/1 为买价，type 2 为卖价', () => {
+test('2104 商品解析：type=2 为买入价、type 0/1 为卖出价（税前原价）', () => {
   const rows = parseProducts([
     { id: 1, type: 0, price: 1310, num: 0 },
     { id: 1, type: 2, price: 1250, num: 32085 },
     { id: 9, type: 1, price: 4807, num: 0 },
     { id: 999, type: 0, price: 100 },
   ]);
-  assert.deepEqual(rows.get('谷物'), { buy: 13.1, sell: 12.5 });
-  assert.deepEqual(rows.get('药材'), { buy: 48.07, sell: null });
+  assert.deepEqual(rows.get('谷物'), { buy: 12.5, sell: 13.1 });
+  assert.deepEqual(rows.get('药材'), { buy: null, sell: 48.07 });
   assert.equal(rows.size, 2);
 });
 
-test('体力采集：otherPrices[].energy 记录为城池间路线体力', () => {
-  const sink = new Map();
-  const base = 37795n * 100000000000n;
-  harvestEnergy({ name: '桂阳' }, {
-    products: [
-      { id: 1, type: 2, price: 1000, otherPrices: [
-        { capitalNodeId: base + 21n, energy: 2 },
-        { capitalNodeId: base + 142n, energy: 1 },
-        { capitalNodeId: base + 21n, energy: 3 },
-        { capitalNodeId: 123n, energy: 1 },
-        { capitalNodeId: base + 21n, energy: 0 },
-      ] },
-    ],
-  }, sink);
-  assert.equal(sink.get('桂阳|江陵'), 2, '同路线取最小体力');
-  assert.equal(sink.get('桂阳|上庸'), 1);
-  assert.equal(sink.size, 2);
+test('赋税换算：原价 ↔ 个人减免后的显示价（默认 5%）', () => {
+  assert.equal(displaySell(21.72, 0.1, 5), 19.7);
+  assert.equal(displayBuy(21.72, 0.1, 5), 23.8);
+  assert.equal(displaySell(10, 0.2, 5), 8.1);
+  assert.equal(displayBuy(10, 0.2, 5), 11.9);
+  assert.equal(displaySell(10, 0.1, 0), 9);
+  assert.equal(displayBuy(10, 0.1, 0), 11);
+  assert.equal(displaySell(10, 0.1, 100), 10, '100% 减免等于无税');
+  assert.equal(displayBuy(10, 0.1, 100), 10);
+  assert.equal(rawSell(19.7, 0.1, 5), 21.77);
+  assert.equal(rawBuy(23.8, 0.1, 5), 21.74);
+  assert.equal(displaySell(null, 0.1, 5), null);
+  assert.equal(rawBuy(null, 0.1, 5), null);
+  assert.equal(clampRelief('120'), 100);
+  assert.equal(clampRelief(-1), 0);
+  assert.equal(clampRelief(null), 5);
 });
 
 test('城池映射表：42 城，metaId = 1100000 + nodeNo', () => {
@@ -120,4 +120,18 @@ test('POST /api/game/sync 参数校验', async () => {
   });
   assert.equal(noServer.status, 400);
   assert.match(noServer.json.message, /区服/);
+});
+
+test('城池税率：每次同步按最新税率覆盖', async () => {
+  const db = require('../server/db');
+  await db.upsertServer('TAX-T');
+  const serverRow = await db.get('SELECT id FROM servers WHERE name = ?', ['TAX-T']);
+  const cityId = await db.findDictId('city', '桂阳');
+  assert.ok(serverRow && cityId);
+  await db.setCityTax(serverRow.id, cityId, 0.1);
+  assert.equal(await db.getCityTax(serverRow.id, cityId), 0.1);
+  await db.setCityTax(serverRow.id, cityId, 0.2);
+  assert.equal(await db.getCityTax(serverRow.id, cityId), 0.2);
+  await db.setCityTax(serverRow.id, cityId, null);
+  assert.equal(await db.getCityTax(serverRow.id, cityId), 0.2);
 });

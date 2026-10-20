@@ -5,6 +5,7 @@
 const express = require('express');
 const { ok, fail, asyncHandler, cleanName } = require('../util');
 const { syncPrices, CITY_MAP } = require('../game/sync');
+const { setAccountToken } = require('../auth');
 const scheduler = require('../scheduler');
 const { broadcast } = require('../ws');
 
@@ -15,17 +16,21 @@ router.get('/meta', asyncHandler(async (req, res) => {
   return ok(res, { cities: CITY_MAP.map(c => c.name) });
 }));
 
-/** POST /api/game/sync { token?, server?, operator?, cities? } —— token/区服缺省时取同步设置中的值 */
+/** POST /api/game/sync { token?, server?, operator?, cities? } —— token 缺省时使用本账号已保存的 token */
 router.post('/sync', asyncHandler(async (req, res) => {
   const body = req.body || {};
   const settings = await scheduler.getSettings();
-  const token = (typeof body.token === 'string' && body.token.trim()) || settings.token || '';
+  const provided = typeof body.token === 'string' ? body.token.trim() : '';
+  const owner = req.account ? String(req.account.token || '') : '';
+  const token = provided || owner;
   const server = cleanName(body.server, 50) || settings.server || '';
-  const operator = cleanName(body.operator, 20) || settings.operator || '游戏同步';
+  const operator = cleanName(body.operator, 20) || (req.account && req.account.name) || settings.operator || '游戏同步';
 
-  if (!token) return fail(res, 400, '请提供登录 token（x-game-token-pcweb），或在「同步设置」中保存');
+  if (!token) return fail(res, 400, '请提供登录 token（x-game-token-pcweb），或先登录账号并保存 token');
   if (token.length < 60) return fail(res, 400, '登录 token 格式不正确');
   if (!server) return fail(res, 400, '请先输入区服');
+
+  if (provided && req.account) await setAccountToken(req.account.id, provided);
 
   const log = await scheduler.logStart('manual', server);
   let result;

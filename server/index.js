@@ -35,6 +35,8 @@ app.use(express.static(nodePath.join(__dirname, '..', 'public')));
 app.use('/public', express.static(nodePath.join(__dirname, '..', 'public')));
 
 /* ------------------------------ API ------------------------------ */
+app.use(require('./auth').attach);
+app.use('/api/auth', require('./routes/auth'));
 app.use('/api/dict', require('./routes/dict'));
 app.use('/api/servers', require('./routes/servers'));
 app.use('/api/prices', require('./routes/prices'));

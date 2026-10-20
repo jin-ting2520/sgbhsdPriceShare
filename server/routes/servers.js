@@ -45,6 +45,7 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   const s = await get('SELECT * FROM servers WHERE id = ?', [id]);
   if (!s) return fail(res, 404, '区服不存在');
+  await run('DELETE FROM city_taxes WHERE server_id = ?', [id]);
   await run('DELETE FROM servers WHERE id = ?', [id]);
   broadcast('server.deleted', { id, name: s.name });
   return ok(res, { id, deleted: true, name: s.name });

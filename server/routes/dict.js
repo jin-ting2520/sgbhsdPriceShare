@@ -153,6 +153,7 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   if (Number(used) > 0) {
     return fail(res, 409, `「${item.name}」已被 ${used} 条价格记录引用，不能删除（可停用）`, 40902);
   }
+  if (item.type === 'city') await run('DELETE FROM city_taxes WHERE city_id = ?', [id]);
   await run('DELETE FROM dict_items WHERE id = ?', [id]);
   await invalidateDict();
   return ok(res, { id, deleted: true });

@@ -1,6 +1,6 @@
 # 三国冰河时代富甲天下跑商价格分享
 
-城池 / 商品买卖价格的在线录入、查询与共享平台。支持**游戏直连同步**、**WebSocket 实时协作**、**定时自动同步**、**跨城套利报表**；生产环境使用 **MySQL + Redis**，`docker compose up -d --build` 一键部署，本地开发与测试自动使用 SQLite。PC 与手机端自适应，输入游戏昵称即可进入（无需注册）。
+城池 / 商品买卖价格的在线录入、查询与共享平台。支持**游戏直连同步**、**WebSocket 实时协作**、**定时自动同步**、**跨城套利报表**；生产环境使用 **MySQL + Redis**，`docker compose up -d --build` 一键部署，本地开发与测试自动使用 SQLite。PC 与手机端自适应。昵称 + 密码登录（首次输入即自动注册），各账号的游戏 token 独立存储、仅本人可见。
 
 ## 一、技术选型与架构
 
@@ -21,7 +21,8 @@
 │   ├─ /api/dict            字典 CRUD（Redis 缓存 + 变更广播）     │
 │   ├─ /api/servers         区服                                 │
 │   ├─ /api/prices          查询/保存(乐观并发)/日志/趋势/比价/导入导出 │
-│   ├─ /api/game/sync       游戏直连同步（42 城 + 体力采集）        │
+│   ├─ /api/game/sync       游戏直连同步（42 城 × 25 商品，原价 + 税率入账）  │
+│   ├─ /api/auth            账号登录 / 会话 / 本人 token                    │
 │   ├─ /api/sync-settings   定时同步配置 / 立即执行 / 运行日志      │
 │   ├─ /api/reports         涨跌幅榜 / 套利建议 / 更新热度          │
 │   ├─ /ws                  WebSocket 实时协作                    │
@@ -35,13 +36,15 @@
 
 | 模块 | 说明 |
 | --- | --- |
+| 账号入口 | 昵称 + 密码登录，首次输入即自动注册；无角色权限，仅以账号区分更新人并隔离各账号的游戏 token（存库，仅本人可见） |
 | 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
 | 查询与字典 | 区服联想、城池/商品下拉（可输入新增）；商品负重维护；被引用项禁止删除 |
 | 实时协作 | WebSocket 推送他人改价，正在查看的城池立即刷新；本地有未保存修改时标记冲突 |
 | 并发保护 | 保存携带 `baseUpdatedAt`，被他人抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
-| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，逐城抓取 42 城买/卖价并入库，同时采集路线体力 |
-| 定时同步 | 页面配置开关、cron 频率、区服、更新人、token；服务器定时执行并保留运行记录 |
-| 报表 | 涨跌幅榜、城池间套利建议（载重/体力成本/每日收益）、改价与同步热度图 |
+| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，逐城抓取 42 城价格，落库税前原价与城池税率（每城 3 个商品可买入、25 个可卖出） |
+| 赋税换算 | 各城税率自动同步；用户可设「我的赋税减免」（默认 5%，本机缓存），价格按个人减免实时换算，手工录入/导入自动反推原价 |
+| 定时同步 | 页面配置开关、cron 频率、区服、更新人；token 存于保存者账号并绑定该账号，服务器定时执行并保留运行记录 |
+| 报表 | 涨跌幅榜、城池间套利建议（按载重估算可购件数与毛利）、改价与同步热度图 |
 | 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天、缩放/拖拽 |
 | 导入导出 | Excel 导入（模板下载、预览修改、自动建商品、merge 模式）、CSV 导出 |
 | 运维 | 健康检查 `/api/health`、Docker 健康依赖、MySQL 备份/恢复脚本、PWA 离线缓存 |
@@ -59,7 +62,7 @@ docker compose up -d --build
 .\deploy.ps1                # Windows PowerShell
 ```
 
-启动后访问 `http://服务器IP:3000`。首次启动会自动初始化 MySQL 库表与种子数据（40 城池 / 25 商品）。完整部署、备份恢复、反代与升级说明见 **[DEPLOY.md](./DEPLOY.md)**。
+启动后访问 `http://服务器IP:3000`。首次启动会自动初始化 MySQL 库表与种子数据（40 城池 / 25 商品）。首次打开输入昵称与自定义密码即可（自动注册）；进入后在「同步」粘贴自己的游戏 token，token 仅本账号可见、可留空复用。完整部署、备份恢复、反代与升级说明见 **[DEPLOY.md](./DEPLOY.md)**。
 
 ### 本地开发（SQLite，无需 MySQL/Redis）
 
@@ -67,7 +70,7 @@ docker compose up -d --build
 npm install
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 31 项后端/游戏/报表测试
+npm test           # 37 项后端/账号/游戏/报表测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -84,7 +87,7 @@ docker compose exec app npm run db:migrate
 docker compose exec app npm run db:migrate -- --force
 ```
 
-迁移脚本将字典、区服、价格、历史、城池坐标、路线体力与同步设置写入 MySQL；目标库为空时直接导入。
+迁移脚本将字典、区服、价格、历史、城池坐标、城池税率与同步设置写入 MySQL；目标库为空时直接导入。
 
 ## 四、环境变量
 
@@ -112,7 +115,9 @@ sgbhsdPriceShare/
 │   ├── ws.js               # WebSocket 服务端与广播
 │   ├── scheduler.js        # node-cron 定时同步与运行日志
 │   ├── util.js             # 统一响应/校验
+│   ├── auth.js             # 账号密码（scrypt）、会话与 token 隔离
 │   ├── routes/
+│   │   ├── auth.js         # /api/auth 登录注册/会话/本人 token
 │   │   ├── dict.js         # /api/dict
 │   │   ├── servers.js      # /api/servers
 │   │   ├── prices.js       # 查询/保存/日志/趋势/比价/导出/导入
@@ -122,7 +127,7 @@ sgbhsdPriceShare/
 │   ├── game/               # 游戏协议直连（登录链 + WS + Thrift 编解码）
 │   │   ├── login.js        # JWT → authCode → SDK 登录 → v1/login
 │   │   ├── client.js       # 游戏 WebSocket 客户端
-│   │   ├── sync.js         # 逐城抓取 → 落库（含体力采集）
+│   │   ├── sync.js         # 逐城抓取 → 原价 + 税率落库
 │   │   ├── frame.js        # 10 字节帧头
 │   │   ├── thrift.js       # Thrift Compact Protocol
 │   │   ├── thrift_schema.json
@@ -154,31 +159,36 @@ sgbhsdPriceShare/
 
 ## 六、API 一览
 
-除游戏 token 外全部接口开放，无需登录；写操作通过 `operator` 记录更新人昵称。
+除各账号自己的游戏 token 外全部接口开放，无需登录；写操作通过 `operator` 记录更新人昵称。涉账号自身 token 的接口需携带会话头 `X-Account-Token`。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（返回驱动、缓存、WS 人数、定时状态） |
+| POST | `/api/auth/login` `{name,password}` | 昵称 + 密码登录；首次输入自动注册，返回 `{name,session,token,created}` |
+| POST | `/api/auth/logout` | 注销当前会话 |
+| GET | `/api/auth/me` | 当前账号与本人的游戏 token（仅本人可见） |
+| PUT | `/api/auth/token` `{token}` | 更新本人游戏 token |
 | GET | `/api/dict?type=city\|commodity` | 下拉数据源 |
 | GET | `/api/dict/summary` | 管理列表（负重、引用计数） |
 | POST | `/api/dict` `{type,name,burden?}` | 新增字典项 |
 | PUT/DELETE | `/api/dict/:id` | 重命名/负重/启停/排序/删除 |
 | GET | `/api/servers` | 区服列表 |
 | DELETE | `/api/servers/:id` | 删除区服及价格 |
-| GET | `/api/prices?server&city&commodity?` | 查询价格 |
-| POST | `/api/prices` | 保存价格；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903 |
-| GET | `/api/prices/history` | 变更日志 |
-| GET | `/api/prices/trend` | 价格趋势 |
-| GET | `/api/prices/matrix` | 跨城池比价 |
-| GET | `/api/prices/export` | CSV 导出 |
-| POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选） |
+| GET | `/api/prices?server&city&commodity?&relief=5` | 查询价格（按个人减免换算为游戏显示价） |
+| POST | `/api/prices` | 保存价格（税后显示值 + `relief`，服务端反推原价）；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903 |
+| GET | `/api/prices/history` | 变更日志（按当前减免换算显示） |
+| GET | `/api/prices/trend` | 价格趋势（`relief` 可选） |
+| GET | `/api/prices/matrix` | 跨城池比价（`relief` 可选，返回各城税率） |
+| GET | `/api/prices/export` | CSV 导出（按当前减免） |
+| POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选；按 `relief` 反推原价） |
 | GET | `/api/game/meta` | 同步支持城池清单 |
-| POST | `/api/game/sync` | 游戏直连同步 `{token?,server?,operator?,cities?}`；token/区服缺省取定时设置 |
-| GET/PUT | `/api/sync-settings` | 定时同步配置（cron、token、区服、更新人） |
-| POST | `/api/sync-settings/run` | 用已保存配置立即同步 |
+| POST | `/api/game/sync` | 游戏直连同步 `{token?,server?,operator?,cities?}`；token 缺省用本账号已保存 token（同步成功后保存） |
+| GET | `/api/sync-settings` | 定时同步配置（不返回 token 明文；`hasToken/tokenOwner`） |
+| PUT | `/api/sync-settings` | 保存配置（需登录；`token` 存本账号并绑定定时同步） |
+| POST | `/api/sync-settings/run` | 用已保存配置立即同步（需登录） |
 | GET | `/api/sync-settings/logs` | 同步运行记录 |
-| GET | `/api/reports/movers?server&days&limit` | 涨跌幅榜 |
-| GET | `/api/reports/arbitrage?server&load&energyPrice&energyPerTrip&returnTrip&all` | 套利建议（含体力成本） |
+| GET | `/api/reports/movers?server&days&limit&relief` | 涨跌幅榜 |
+| GET | `/api/reports/arbitrage?server&load&relief&all` | 套利建议（按载重与个人减免估算毛利） |
 | GET | `/api/reports/heat?server&days&bucket=day\|hour` | 改价/同步热度 |
 
 错误码：`0` 成功；`40901` 重复；`40902` 被引用不可删除；`40903` 价格已被他人更新（乐观并发冲突）。
@@ -193,22 +203,27 @@ sgbhsdPriceShare/
 
 ### 游戏直连同步
 
-浏览器登录 https://www.wanyiwan.top/game/sgbhsd ，F12 → Application → Local Storage → 复制 `x-game-token-pcweb`（JWT，有效期约 12 天）填入「同步」或「定时」即可。服务端自动完成：换取 authCode → SDK 登录 → 区服登录 → WebSocket 登录 → 逐城拉取行情（游戏以分为单位，落库自动 ÷100），并采集城池间体力消耗写入 `route_energy`。
+浏览器登录 https://www.wanyiwan.top/game/sgbhsd ，F12 → Application → Local Storage → 复制 `x-game-token-pcweb`（JWT，有效期约 12 天）填入「同步」或「定时」即可。token 保存在当前账号下（换账号登录只能看到自己的 token）；服务端自动完成：换取 authCode → SDK 登录 → 区服登录 → WebSocket 登录 → 逐城拉取行情（游戏以分为单位，落库 ÷100 为税前原价），并将各城税率写入 `city_taxes`（每次同步按最新税率覆盖）。
 
-- 单次同步全部 42 城约 10 秒，返回 `{queried,saved,created,updated,energyPairs,failed[]}`；赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
+- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数与游戏显示一致。切换减免只影响显示，不写库。
+- 手工录入 / Excel 导入填写的是自己看到税后价，服务端按当前减免与该城税率反推原价入库；税率未知的城池按原价处理（不折算）。
+- 每城仅 3 个商品可买入（2104 中 type=2），全部 25 个商品均可卖出（type=0/1）；非可购商品的买入价落库为 NULL。
+- 单次同步全部 42 城约 10 秒，返回 `{queried,saved,created,updated,failed[]}`；赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
+- 定时同步使用「定时」页保存 token 的账号的 token（`sync_settings.token_account_id`），到期换 token 后重新保存即可；旧版单行 token 仅作升级兜底。
 - 命令行：`node server/scripts/game-sync.js <token> [区服] [更新人]`，或 `--settings` 复用定时同步配置。
 
 ## 七、数据表
 
 | 表 | 说明 |
 | --- | --- |
+| `accounts` | 账号（昵称唯一、scrypt 密码哈希、会话、本人游戏 token） |
 | `dict_items` | 字典（city/commodity，`(type,name)` 唯一，`burden` 负重） |
 | `servers` | 区服 |
-| `prices` | 价格（`server_id+city_id+commodity_id` 唯一，含更新时间/更新人） |
-| `price_history` | 改价流水（旧值/新值/操作人/时间，按 `HISTORY_LIMIT` 裁剪） |
+| `prices` | 税前原价（`server_id+city_id+commodity_id` 唯一，含更新时间/更新人） |
+| `price_history` | 改价流水（原价旧值/新值/操作人/时间，按 `HISTORY_LIMIT` 裁剪） |
+| `city_taxes` | 城池税率（`server_id+city_id` 唯一，游戏同步写入，0.1~0.9） |
 | `city_nodes` | 城池游戏节点与地图坐标（gridX/gridY） |
-| `route_energy` | 城池间体力消耗（游戏实测，`from_city+to_city` 唯一） |
-| `sync_settings` | 定时同步单行配置（开关/cron/token/区服/更新人/上次状态） |
+| `sync_settings` | 定时同步单行配置（开关/cron/区服/更新人/绑定 token 的账号/上次状态） |
 | `sync_log` | 同步运行记录（触发方式、查询/写入数、失败数、消息） |
 
 ## 八、备份与维护

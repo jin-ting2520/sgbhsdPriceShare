@@ -60,15 +60,23 @@ if (!fs.existsSync(srcFile)) {
       JOIN dict_items c ON c.id = h.city_id
       JOIN dict_items d ON d.id = h.commodity_id
      ORDER BY h.id`);
-  const energyRows = all('SELECT from_city AS fromCity, to_city AS toCity, energy, source FROM route_energy');
   const cityRows = all(`SELECT city_name AS cityName, cfg_name AS cfgName, node_no AS nodeNo,
                                meta_id AS metaId, grid_x AS gridX, grid_y AS gridY FROM city_nodes`);
-  const settingsRows = all(`SELECT enabled, cron_expr AS cron, token, server_name AS server, operator,
-                                   last_run_at AS lastRunAt, last_status AS lastStatus, last_message AS lastMessage
-                              FROM sync_settings WHERE id = 1`);
+  const taxRows = all(`SELECT s.name AS server, c.name AS city, t.tax
+                         FROM city_taxes t
+                         JOIN servers s ON s.id = t.server_id
+                         JOIN dict_items c ON c.id = t.city_id`);
+  const accountRows = all(`SELECT name, password_hash AS passwordHash, token, session_token AS sessionToken,
+                                  created_at AS createdAt, updated_at AS updatedAt FROM accounts`);
+  const settingsRows = all(`SELECT s.enabled, s.cron_expr AS cron, s.token, s.server_name AS server, s.operator,
+                                   s.last_run_at AS lastRunAt, s.last_status AS lastStatus, s.last_message AS lastMessage,
+                                   a.name AS tokenAccountName
+                              FROM sync_settings s
+                              LEFT JOIN accounts a ON a.id = s.token_account_id
+                             WHERE s.id = 1`);
 
   const t = db.nowText();
-  let inserted = { dict: 0, servers: 0, prices: 0, history: 0, energy: 0, cityNodes: 0, settings: 0 };
+  let inserted = { dict: 0, servers: 0, prices: 0, history: 0, cityNodes: 0, cityTaxes: 0, accounts: 0, settings: 0 };
 
   for (const d of dictRows) {
     const row = await db.get('SELECT id FROM dict_items WHERE type = ? AND name = ?', [d.type, d.name]);
@@ -113,16 +121,6 @@ if (!fs.existsSync(srcFile)) {
     inserted.history += 1;
   }
 
-  for (const e of energyRows) {
-    const existing = await db.get('SELECT energy FROM route_energy WHERE from_city = ? AND to_city = ?', [e.fromCity, e.toCity]);
-    if (existing) continue;
-    await db.run(
-      'INSERT INTO route_energy (from_city, to_city, energy, source, updated_at) VALUES (?, ?, ?, ?, ?)',
-      [e.fromCity, e.toCity, e.energy, e.source || 'game', t]
-    );
-    inserted.energy += 1;
-  }
-
   for (const c of cityRows) {
     const existing = await db.get('SELECT city_name FROM city_nodes WHERE city_name = ?', [c.cityName]);
     if (existing) {
@@ -142,14 +140,37 @@ if (!fs.existsSync(srcFile)) {
     inserted.cityNodes += 1;
   }
 
+  for (const ct of taxRows) {
+    const serverId = await db.findServerId(ct.server);
+    const cityId = await db.findDictId('city', ct.city);
+    if (!serverId || !cityId) continue;
+    await db.setCityTax(serverId, cityId, Number(ct.tax));
+    inserted.cityTaxes += 1;
+  }
+
+  for (const a of accountRows) {
+    const existing = await db.get('SELECT id FROM accounts WHERE name = ?', [a.name]);
+    if (existing) continue;
+    await db.run(
+      `INSERT INTO accounts (name, password_hash, token, session_token, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [a.name, a.passwordHash, a.token || null, a.sessionToken || null, a.createdAt || t, a.updatedAt || t]
+    );
+    inserted.accounts += 1;
+  }
+
   if (settingsRows.length) {
     const s = settingsRows[0];
+    const tokenAccount = s.tokenAccountName
+      ? await db.get('SELECT id FROM accounts WHERE name = ?', [s.tokenAccountName])
+      : null;
     await db.run(
       `UPDATE sync_settings
-          SET enabled = ?, cron_expr = ?, token = ?, server_name = ?, operator = ?,
+          SET enabled = ?, cron_expr = ?, token = ?, token_account_id = ?, server_name = ?, operator = ?,
               last_run_at = ?, last_status = ?, last_message = ?
         WHERE id = 1`,
-      [s.enabled ? 1 : 0, s.cron || '0 */2 * * *', s.token || null, s.server || '',
+      [s.enabled ? 1 : 0, s.cron || '0 */2 * * *', s.token || null,
+        tokenAccount ? tokenAccount.id : null, s.server || '',
         s.operator || '自动同步', s.lastRunAt || null, s.lastStatus || null, s.lastMessage || null]
     );
     inserted.settings = 1;

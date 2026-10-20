@@ -96,7 +96,7 @@ docker compose exec app npm run db:migrate           # 目标库为空时
 docker compose exec app npm run db:migrate -- --force # 目标库已有数据时合并
 ```
 
-迁移内容：字典、区服、价格、变更历史、城池坐标、路线体力、同步设置。
+迁移内容：字典、区服、价格、变更历史、城池坐标、城池税率、账号与同步设置。
 
 ## 6. 使用 Docker Hub 镜像（单容器 / SQLite）
 

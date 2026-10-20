@@ -24,18 +24,20 @@
 <body>
 <div id="app" v-cloak>
 
-  <!-- ================= 昵称入口 ================= -->
+  <!-- ================= 账号入口 ================= -->
   <div v-if="!entered" class="login-page">
     <div class="login-card">
       <div class="login-logo">价</div>
       <div class="login-title">三国冰河时代富甲天下跑商价格分享</div>
 <el-input v-model="nicknameInput" placeholder="输入你的三国冰河时代昵称" size="large"
         maxlength="20" show-word-limit clearable @keyup.enter="enterSite"></el-input>
+      <el-input v-model="passwordInput" type="password" show-password placeholder="密码（首次登录将自动注册）"
+        size="large" style="margin-top:10px" maxlength="64" @keyup.enter="enterSite"></el-input>
       <el-button type="primary" size="large" style="width:100%;margin-top:14px"
         :loading="entering" @click="enterSite">进 入</el-button>
       <p class="login-hint">
-        输入游戏内昵称即可进入，无需注册。<br>
-        你录入的价格会以该昵称作为更新人，并缓存在本机，刷新页面无需重复输入。
+        首次使用：输入昵称和自定义密码即自动注册，无其他权限区分。<br>
+        昵称用于价格「更新人」，密码仅用于本机账号登录；游戏同步 token 各账号独立保存、互不可见。
       </p>
     </div>
   </div>
@@ -68,8 +70,8 @@
       <el-button size="small" @click="openMatrix">比价</el-button>
       <el-button size="small" @click="openImport">导入</el-button>
       <el-button size="small" @click="exportCsv">导出</el-button>
-      <el-button size="small" style="margin-left:4px" @click="switchNickname">
-        {{ nickname }} <span style="font-size:10px;color:#999">切换昵称</span>
+      <el-button size="small" style="margin-left:4px" @click="switchAccount">
+        {{ nickname }} <span style="font-size:10px;color:#999">切换账号</span>
       </el-button>
     </div>
   </header>
@@ -116,6 +118,18 @@
         <div class="search-actions">
           <el-button type="primary" :loading="loading" @click="onQuery">查 询</el-button>
           <el-button @click="onReset">重 置</el-button>
+        </div>
+        <div class="relief-row">
+          <el-tooltip content="商队第三辆车夫「赋税减免」技能，默认 5%；价格按你的减免实时换算"
+            placement="top">
+            <span class="relief-label">我的赋税减免</span>
+          </el-tooltip>
+          <el-input-number v-model="taxRelief" :min="0" :max="100" :step="1" size="small"
+            controls-position="right" style="width:96px" @change="onReliefChange"></el-input-number>
+          <span>%</span>
+          <span v-if="queried && currentTax != null" class="relief-tax">
+            （该城赋税 {{ Math.round(currentTax * 100) }}%）
+          </span>
         </div>
         <p style="margin:10px 0 0;font-size:12px;color:var(--ink-2);line-height:1.7">
           提示：城池 / 商品数据来自字典表，输入新名称后按 <b>Enter</b> 或点「保存」即可写入字典；
@@ -259,7 +273,7 @@
     <el-card id="help-card" shadow="never">
       <template #header><b style="font-size:14px">操作说明</b></template>
       <ol class="help-steps">
-        <li><b>输入昵称</b>：进入页面时输入你的三国冰河时代昵称，点击「进入」即可开始使用；昵称会缓存在本机，刷新无需重复输入。</li>
+        <li><b>输入账号</b>：进入页面输入昵称与自定义密码（首次自动注册，密码至少 4 位）；登录会话缓存在本机，刷新无需重复输入。</li>
         <li><b>选择区服</b>：输入纯数字区服编号（如 1344），支持历史联想。</li>
         <li><b>选择城池</b>：必选项，下拉搜索；输入新城池名称按 <b>Enter</b> 即可写入字典表。</li>
         <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；下拉项显示每个商品的负重。</li>
@@ -271,7 +285,7 @@
       <div class="help-grid">
         <div class="help-item">
           <h4>游戏直连同步</h4>
-          <p>点「同步」粘贴游戏登录 token（网页端 localStorage 的 x-game-token-pcweb），即可通过官方接口实时抓取全服约 42 城价格，无需截图逐条录入；同步同时会采集城池间体力消耗。</p>
+          <p>点「同步」粘贴游戏登录 token（网页端 localStorage 的 x-game-token-pcweb），即可通过官方接口实时抓取全服约 42 城价格，无需截图逐条录入；token 保存在当前账号下（其他账号不可见）并可留空复用。数据库存税前原价与各城税率，页面按「我的赋税减免」实时换算（卖出=原价−赋税，买入=原价+赋税），每城仅 3 个商品可买入。</p>
         </div>
         <div class="help-item">
           <h4>实时协作</h4>
@@ -279,11 +293,11 @@
         </div>
         <div class="help-item">
           <h4>定时自动同步</h4>
-          <p>「定时」可配置 cron 频率、区服、更新人与 token，服务器按北京时间自动同步，并保留最近运行记录；也可随时点「立即同步一次」。</p>
+          <p>「定时」可配置 cron 频率、区服、更新人与 token（存于当前账号并绑定定时同步），服务器按北京时间自动同步，并保留最近运行记录；也可随时点「立即同步一次」。</p>
         </div>
         <div class="help-item">
           <h4>报表</h4>
-          <p>「报表」提供涨跌幅榜、跨城池套利建议（按载重计算件数，扣除体力成本并可估算每日收益）与改价/同步热度图。</p>
+          <p>「报表」提供涨跌幅榜、跨城池套利建议（按载重计算可购件数与毛利）与改价/同步热度图。</p>
         </div>
         <div class="help-item">
           <h4>批量导入</h4>
@@ -684,15 +698,16 @@
       </el-form-item>
       <el-form-item label="登录 token">
         <el-input v-model="syncToken" type="textarea" :rows="3"
-          placeholder="粘贴 x-game-token-pcweb；若已在「定时」中保存过可留空"></el-input>
-        <div class="hint-line" v-if="syncHasSavedToken">已保存过 token，可留空直接同步。</div>
+          placeholder="粘贴 x-game-token-pcweb；留空使用本账号已保存的 token（只对本人可见）"></el-input>
+        <div class="hint-line" v-if="syncHasSavedToken">已使用本账号保存的 token，可留空直接同步；粘贴新 token 将覆盖保存。</div>
+        <div class="hint-line" v-else>尚未保存 token；粘贴同步成功后将保存到本账号，下次可留空。</div>
       </el-form-item>
       <el-form-item label="更新人（可选）">
         <el-input v-model="syncOperator" maxlength="20" placeholder="默认当前昵称"></el-input>
       </el-form-item>
     </el-form>
     <el-alert v-if="syncResult" type="success" :closable="false" show-icon
-      :title="`同步完成：查询 ${syncResult.queried}/${syncResult.cities} 城，写入 ${syncResult.saved} 条（新增 ${syncResult.created}，更新 ${syncResult.updated}），体力路线 ${syncResult.energyPairs} 条`">
+      :title="`同步完成：查询 ${syncResult.queried}/${syncResult.cities} 城，写入 ${syncResult.saved} 条（新增 ${syncResult.created}，更新 ${syncResult.updated}）`">
       <div v-if="syncResult.failed && syncResult.failed.length" class="failed-list">
         失败：{{ syncResult.failed.map(f => f.city + '（' + f.error + '）').join('；') }}
       </div>
@@ -728,19 +743,17 @@
         </el-form-item>
         <el-form-item label="登录 token">
           <el-input v-model="settings.token" type="textarea" :rows="3"
-            placeholder="留空表示沿用已保存的 token"></el-input>
-          <div class="hint-line" v-if="settings.hasToken">已保存：{{ settings.tokenHint }}（留空不修改）</div>
-          <div class="hint-line" v-else>尚未保存 token，启用自动同步前必须填写。</div>
+            placeholder="粘贴 x-game-token-pcweb；留空表示清除本账号 token"></el-input>
+          <div class="hint-line" v-if="settings.tokenOwner && settings.tokenOwner === nickname">定时同步使用本账号 token（仅本账号可见）。</div>
+          <div class="hint-line" v-else-if="settings.tokenOwner">当前定时同步使用 <b>{{ settings.tokenOwner }}</b> 的 token（其他账号的 token 不可见）；保存本账号 token 后将改绑。</div>
+          <div class="hint-line" v-else-if="settings.legacyToken">当前使用旧版共享 token；保存本账号 token 后将改绑且共享 token 失效。</div>
+          <div class="hint-line" v-else>尚未保存 token，启用自动同步前必须填写（仅本账号可见）。</div>
         </el-form-item>
       </el-form>
       <div class="statusbar" style="margin-bottom:10px">
         <span>上次运行 <b>{{ settings.lastRunAt || '-' }}</b></span>
         <span>状态 <b :class="settings.lastStatus === 'failed' ? 'danger' : 'ok'">{{ settings.lastStatus || '-' }}</b></span>
         <span v-if="settings.lastMessage">{{ settings.lastMessage }}</span>
-        <span v-if="settings.energy">
-          体力：每次跨城 <b>{{ settings.energy.energyCost }}</b> 点 / 上限 <b>{{ settings.energy.energyLimit }}</b> 点 /
-          <b>{{ settings.energy.energyCDHours }}</b> 小时恢复 1 点
-        </span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin:6px 0 10px">
         <b style="font-size:13px">最近运行记录</b>
@@ -827,18 +840,9 @@
           <span class="param-label">载重</span>
           <el-input-number v-model="arbParams.load" :min="1" :max="100000" size="small"
             controls-position="right" style="width:110px"></el-input-number>
-          <span class="param-label">体力单价</span>
-          <el-input-number v-model="arbParams.energyPrice" :min="0" :max="999999" size="small"
-            controls-position="right" style="width:110px"></el-input-number>
-          <span class="param-label">每趟体力</span>
-          <el-input-number v-model="arbParams.energyPerTrip" :min="1" :max="99" size="small"
-            controls-position="right" style="width:100px"></el-input-number>
-          <el-checkbox v-model="arbParams.returnTrip">回程也耗体力</el-checkbox>
           <el-checkbox v-model="arbParams.all">含亏损路线</el-checkbox>
           <el-button size="small" @click="loadReport">计算</el-button>
         </div>
-        <el-alert type="info" :closable="false" style="margin-bottom:10px"
-          :title="`体力：每次跨城消耗 ${arbData.energyInfo.energyCost ?? 1} 点，上限 ${arbData.energyInfo.energyLimit ?? 10} 点，${arbData.energyInfo.energyCDHours ?? 4} 小时恢复 1 点；每日最多约 ${arbData.energyInfo.dailyMaxTrips ?? '-'} 趟`"></el-alert>
         <el-table :data="arbData.items" size="small" max-height="50vh" border stripe>
           <el-table-column label="商品" prop="commodity" width="90"></el-table-column>
           <el-table-column label="路线" min-width="130">
@@ -854,24 +858,8 @@
             </template>
           </el-table-column>
           <el-table-column label="件数" prop="units" width="65" align="right"></el-table-column>
-          <el-table-column label="毛利" width="85" align="right">
+          <el-table-column label="毛利" width="90" align="right">
             <template #default="s"><b :class="changeClass(s.row.gross)">{{ s.row.gross }}</b></template>
-          </el-table-column>
-          <el-table-column label="单程体力" width="100" align="center">
-            <template #default="s">
-              {{ s.row.energy }}
-              <el-tag v-if="s.row.energySource === 'game'" size="small" effect="plain" type="success"
-                style="margin-left:4px">实测</el-tag>
-              <el-tag v-else size="small" effect="plain" style="margin-left:4px">默认</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="体力成本" prop="energyCost" width="90" align="right"></el-table-column>
-          <el-table-column label="净利" width="90" align="right">
-            <template #default="s"><b :class="changeClass(s.row.net)">{{ s.row.net > 0 ? '+' : '' }}{{ s.row.net }}</b></template>
-          </el-table-column>
-          <el-table-column label="每日趟数" prop="dailyTrips" width="85" align="right"></el-table-column>
-          <el-table-column label="日净利" width="95" align="right">
-            <template #default="s"><b :class="changeClass(s.row.dailyNet)">{{ s.row.dailyNet }}</b></template>
           </el-table-column>
           <template #empty>暂无可计算的套利路线，请先同步或录入更多城池价格</template>
         </el-table>

@@ -15,7 +15,7 @@ async function getSettings() {
   const row = await get('SELECT * FROM sync_settings WHERE id = 1');
   if (!row) {
     return {
-      enabled: false, cron: '0 */2 * * *', token: '', server: '', operator: '自动同步',
+      enabled: false, cron: '0 */2 * * *', token: '', tokenAccountId: null, server: '', operator: '自动同步',
       lastRunAt: null, lastStatus: null, lastMessage: null,
     };
   }
@@ -23,6 +23,7 @@ async function getSettings() {
     enabled: !!Number(row.enabled),
     cron: row.cron_expr,
     token: row.token || '',
+    tokenAccountId: row.token_account_id == null ? null : Number(row.token_account_id),
     server: row.server_name || '',
     operator: row.operator || '自动同步',
     lastRunAt: row.last_run_at,
@@ -31,27 +32,47 @@ async function getSettings() {
   };
 }
 
+/** 解析定时同步实际使用的 token：优先账号表，历史单行 token 仅作兜底 */
+async function resolveToken(s) {
+  if (s.tokenAccountId) {
+    const row = await get('SELECT token FROM accounts WHERE id = ?', [s.tokenAccountId]);
+    return (row && row.token) || '';
+  }
+  return s.token || '';
+}
+
 async function saveSettings(patch) {
   const cur = await getSettings();
   const next = { ...cur, ...patch };
   await run(
-    `UPDATE sync_settings SET enabled = ?, cron_expr = ?, token = ?, server_name = ?, operator = ? WHERE id = 1`,
-    [next.enabled ? 1 : 0, next.cron, next.token || null, next.server || '', next.operator || '自动同步']
+    `UPDATE sync_settings SET enabled = ?, cron_expr = ?, token = ?, token_account_id = ?, server_name = ?, operator = ? WHERE id = 1`,
+    [
+      next.enabled ? 1 : 0, next.cron, next.token || null,
+      next.tokenAccountId == null ? null : next.tokenAccountId,
+      next.server || '', next.operator || '自动同步',
+    ]
   );
   await reschedule();
   const saved = await getSettings();
-  broadcast('settings.updated', { settings: publicSettings(saved) });
+  broadcast('settings.updated', { settings: await publicSettings(saved) });
   return saved;
 }
 
-function publicSettings(s) {
+async function publicSettings(s) {
+  const token = await resolveToken(s);
+  let tokenOwner = null;
+  if (s.tokenAccountId) {
+    const row = await get('SELECT name FROM accounts WHERE id = ?', [s.tokenAccountId]);
+    tokenOwner = row ? row.name : null;
+  }
   return {
     enabled: s.enabled,
     cron: s.cron,
     server: s.server,
     operator: s.operator,
-    hasToken: !!s.token,
-    tokenHint: s.token ? `${s.token.slice(0, 12)}…${s.token.slice(-6)}` : '',
+    hasToken: !!token,
+    tokenOwner,
+    legacyToken: !s.tokenAccountId && !!s.token,
     lastRunAt: s.lastRunAt,
     lastStatus: s.lastStatus,
     lastMessage: s.lastMessage,
@@ -65,7 +86,8 @@ async function reschedule() {
     task = null;
   }
   const s = await getSettings();
-  if (!s.enabled || !s.token || !s.server) return;
+  if (!s.enabled || !s.server) return;
+  if (!(await resolveToken(s))) return;
   if (!cron.validate(s.cron)) {
     console.error(`[scheduler] 无效 cron 表达式：${s.cron}`);
     return;
@@ -112,15 +134,16 @@ async function runNow(trigger = 'manual') {
     throw Object.assign(new Error('同步正在进行中，请稍后再试'), { status: 409 });
   }
   const s = await getSettings();
-  if (!s.token) throw Object.assign(new Error('尚未配置游戏登录 token'), { status: 400 });
-  if (!s.server) throw Object.assign(new Error('尚未配置区服名称'), { status: 400 });
+  const token = await resolveToken(s);
+  if (!token) throw Object.assign(new Error('尚未保存游戏登录 token（请在「定时」中保存本账号 token）'), { status: 400 });
+  if (!s.server) throw Object.assign(new Error('尚未设置同步区服'), { status: 400 });
 
   running = true;
   currentTrigger = trigger;
   const log = await logStart(trigger, s.server);
   try {
     const result = await syncPrices({
-      token: s.token,
+      token,
       server: s.server,
       operator: s.operator || '自动同步',
     });

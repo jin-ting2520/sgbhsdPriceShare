@@ -4,23 +4,21 @@
 
 const express = require('express');
 const cron = require('node-cron');
-const { query, MONOPOLY_DEFAULTS } = require('../db');
+const { get, query } = require('../db');
+const { setAccountToken, requireAccount } = require('../auth');
 const scheduler = require('../scheduler');
 const { ok, fail, asyncHandler, cleanName } = require('../util');
 
 const router = express.Router();
 
-/** GET /api/sync-settings —— 当前配置与上次运行状态 */
+/** GET /api/sync-settings —— 当前配置与上次运行状态（不返回 token 明文） */
 router.get('/', asyncHandler(async (req, res) => {
   const s = await scheduler.getSettings();
-  return ok(res, {
-    ...scheduler.publicSettings(s),
-    energy: MONOPOLY_DEFAULTS,
-  });
+  return ok(res, await scheduler.publicSettings(s));
 }));
 
-/** PUT /api/sync-settings { enabled, cron, token?, server?, operator? } */
-router.put('/', asyncHandler(async (req, res) => {
+/** PUT /api/sync-settings { enabled, cron, token?, server?, operator? }（需登录；token 存本账号） */
+router.put('/', requireAccount, asyncHandler(async (req, res) => {
   const body = req.body || {};
   const patch = {};
 
@@ -33,23 +31,53 @@ router.put('/', asyncHandler(async (req, res) => {
   if (body.token !== undefined) {
     const token = String(body.token || '').trim();
     if (token && token.length < 60) return fail(res, 400, '登录 token 格式不正确（长度过短）');
-    patch.token = token;
+    const acc = await get('SELECT token FROM accounts WHERE id = ?', [req.account.id]);
+    const saved = (acc && acc.token) || '';
+    if (token !== saved) {
+      await setAccountToken(req.account.id, token);
+      req.account.token = token;
+      patch.token = '';
+      patch.tokenAccountId = req.account.id;
+    }
   }
   if (body.server !== undefined) patch.server = cleanName(body.server, 50);
   if (body.operator !== undefined) patch.operator = cleanName(body.operator, 20) || '自动同步';
 
   const cur = await scheduler.getSettings();
   const next = { ...cur, ...patch };
-  if (next.enabled && (!next.token || !next.server)) {
-    return fail(res, 400, '启用自动同步需要先填写 token 与区服名称');
+
+  if (next.enabled && req.account) {
+    const boundRow = next.tokenAccountId
+      ? await get('SELECT token FROM accounts WHERE id = ?', [next.tokenAccountId])
+      : null;
+    const boundToken = next.tokenAccountId ? (boundRow && boundRow.token) : next.token;
+    if (!boundToken) {
+      const own = await get('SELECT token FROM accounts WHERE id = ?', [req.account.id]);
+      if (own && own.token) {
+        patch.tokenAccountId = req.account.id;
+        patch.token = '';
+        next.tokenAccountId = req.account.id;
+        next.token = '';
+      }
+    }
+  }
+
+  if (next.enabled) {
+    const row = next.tokenAccountId
+      ? await get('SELECT token FROM accounts WHERE id = ?', [next.tokenAccountId])
+      : null;
+    const effective = next.tokenAccountId ? (row && row.token) : next.token;
+    if (!effective || !next.server) {
+      return fail(res, 400, '启用自动同步需要先保存登录 token 与区服名称');
+    }
   }
 
   const saved = await scheduler.saveSettings(patch);
-  return ok(res, { ...scheduler.publicSettings(saved), energy: MONOPOLY_DEFAULTS });
+  return ok(res, await scheduler.publicSettings(saved));
 }));
 
-/** POST /api/sync-settings/run —— 使用已保存配置立即同步一次 */
-router.post('/run', asyncHandler(async (req, res) => {
+/** POST /api/sync-settings/run —— 使用已保存配置立即同步一次（需登录） */
+router.post('/run', requireAccount, asyncHandler(async (req, res) => {
   try {
     const result = await scheduler.runNow('manual');
     return ok(res, result);

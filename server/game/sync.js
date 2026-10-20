@@ -2,14 +2,15 @@
 
 /**
  * 富甲天下价格同步：JWT → 登录 → WS → 逐城查询州府商品 → 写入价格库
- * 价格单位：游戏内 psCapitalProduct.price 为「分」，展示价为 /100（游戏 getPriceStr 逻辑）
- * 体力：otherPrices[].energy 为从当前城池出发到目标城池的体力消耗，顺带采集进 route_energy
+ * 价格单位：游戏内 psCapitalProduct.price 为「分」，落库为税前原价（÷100，2 位小数）
+ * 赋税：2104 返回城池赋税 tax（0.1~0.9），写入 city_taxes；展示价按用户「赋税减免」实时换算（见 server/tax.js）
+ * 左右两侧：每城仅 3 个商品可买入（type=2），全部 25 个商品均可卖出（type=0/1）
  */
 
 const fs = require('node:fs');
 const nodePath = require('node:path');
 const {
-  query, get, tx, upsertServer, findDictId, createDictItem, nowText, COMMODITY_LIST,
+  query, get, tx, upsertServer, findDictId, createDictItem, setCityTax, nowText, COMMODITY_LIST,
 } = require('../db');
 const { login } = require('./login');
 const { GameClient } = require('./client');
@@ -25,8 +26,6 @@ try {
 const CITY_QUERY_TIMEOUT_MS = 8000;
 const CITIES_PER_SYNC_LIMIT = 100;
 const QUERY_CONCURRENCY = 4;
-
-const NODE_TO_CITY = new Map(CITY_MAP.filter(c => c.nodeNo != null).map(c => [Number(c.nodeNo), c.name]));
 
 /** 商品配置 id（1-25 及 201-225 复刻）→ 商品名 */
 function productName(id) {
@@ -67,37 +66,20 @@ async function ensureCityId(name) {
   return findDictId('city', name);
 }
 
-/** 2104 响应 → { 商品名: {buy, sell} } */
+/** 2104 响应 → { 商品名: {buy, sell} }（税前原价，元） */
 function parseProducts(products) {
   const out = new Map();
   for (const p of products || []) {
     const name = productName(Number(p.id));
     if (!name) continue;
-    const price = gamePrice(p.price);
-    if (price == null) continue;
+    const raw = gamePrice(p.price);
+    if (raw == null) continue;
     const row = out.get(name) || { buy: null, sell: null };
-    if (Number(p.type) === 2) row.sell = price;
-    else row.buy = price;
+    if (Number(p.type) === 2) row.buy = raw;
+    else row.sell = raw;
     out.set(name, row);
   }
   return out;
-}
-
-/** 2104 响应中采集「当前城池 → 目标城池」的体力消耗（游戏实测样本） */
-function harvestEnergy(city, res, sink) {
-  const base = 100000000000n;
-  for (const p of res.products || []) {
-    for (const op of p.otherPrices || []) {
-      const toNode = Number(BigInt(op.capitalNodeId) % base);
-      const toCity = NODE_TO_CITY.get(toNode);
-      const energy = Number(op.energy);
-      if (!toCity || toCity === city.name) continue;
-      if (!Number.isFinite(energy) || energy <= 0 || energy > 99) continue;
-      const key = `${city.name}|${toCity}`;
-      const prev = sink.get(key);
-      if (prev == null || energy < prev) sink.set(key, energy);
-    }
-  }
 }
 
 /**
@@ -141,14 +123,12 @@ async function syncPrices(opts) {
     saved: 0,
     created: 0,
     updated: 0,
-    energyPairs: 0,
     failed: [],
     syncedAt: nowText(),
   };
 
   const t = nowText();
   const base = BigInt(info.serverId) * 100000000000n;
-  const energySink = new Map();
 
   try {
     await client.open();
@@ -172,17 +152,19 @@ async function syncPrices(opts) {
         continue;
       }
       result.queried += 1;
-      harvestEnergy(city, item.res, energySink);
 
       const rows = parseProducts(item.res.products);
-      if (!rows.size) {
-        result.failed.push({ city: city.name, error: '该城池没有商品数据' });
-        continue;
-      }
 
       const cityId = await ensureCityId(city.name);
       if (!cityId) {
         result.failed.push({ city: city.name, error: '城池不在字典中' });
+        continue;
+      }
+
+      await setCityTax(serverId, cityId, item.res.tax);
+
+      if (!rows.size) {
+        result.failed.push({ city: city.name, error: '该城池没有商品数据' });
         continue;
       }
 
@@ -200,38 +182,38 @@ async function syncPrices(opts) {
               'SELECT buy_price AS buy, sell_price AS sell FROM prices WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
               [serverId, cityId, commodityId]
             );
-            // 游戏数据可信：出现的一侧覆盖，缺失的一侧保留原值
-            const newBuy = buy != null ? buy : (existing ? existing.buy : null);
-            const newSell = sell != null ? sell : (existing ? existing.sell : null);
-            if (newBuy == null && newSell == null) continue;
+            // 游戏数据可信：只写游戏返回的一侧，另一侧归零（如非可购商品的买入价）
+            if (!existing && buy == null && sell == null) continue;
 
             if (existing) {
+              const oldBuy = existing.buy == null ? null : Number(existing.buy);
+              const oldSell = existing.sell == null ? null : Number(existing.sell);
               await conn.run(
                 'UPDATE prices SET buy_price = ?, sell_price = ?, operator = ?, updated_at = ? WHERE server_id = ? AND city_id = ? AND commodity_id = ?',
-                [newBuy, newSell, operator, t, serverId, cityId, commodityId]
+                [buy, sell, operator, t, serverId, cityId, commodityId]
               );
               result.updated += 1;
-              if (Number(existing.buy) !== newBuy) await conn.run(
+              if (oldBuy !== buy) await conn.run(
                 'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'buy_price', existing.buy, newBuy, operator, t]
+                [serverId, cityId, commodityId, 'buy_price', oldBuy, buy, operator, t]
               );
-              if (Number(existing.sell) !== newSell) await conn.run(
+              if (oldSell !== sell) await conn.run(
                 'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'sell_price', existing.sell, newSell, operator, t]
+                [serverId, cityId, commodityId, 'sell_price', oldSell, sell, operator, t]
               );
             } else {
               await conn.run(
                 'INSERT INTO prices (server_id, city_id, commodity_id, buy_price, sell_price, operator, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, newBuy, newSell, operator, t]
+                [serverId, cityId, commodityId, buy, sell, operator, t]
               );
               result.created += 1;
-              await conn.run(
+              if (buy != null) await conn.run(
                 'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'buy_price', null, newBuy, operator, t]
+                [serverId, cityId, commodityId, 'buy_price', null, buy, operator, t]
               );
-              await conn.run(
+              if (sell != null) await conn.run(
                 'INSERT INTO price_history (server_id, city_id, commodity_id, field, old_value, new_value, operator, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [serverId, cityId, commodityId, 'sell_price', null, newSell, operator, t]
+                [serverId, cityId, commodityId, 'sell_price', null, sell, operator, t]
               );
             }
             result.saved += 1;
@@ -249,35 +231,7 @@ async function syncPrices(opts) {
     client.close();
   }
 
-  if (energySink.size) {
-    try {
-      await tx(async conn => {
-        for (const [key, energy] of energySink) {
-          const [from, to] = key.split('|');
-          const existing = await conn.get(
-            'SELECT energy FROM route_energy WHERE from_city = ? AND to_city = ?',
-            [from, to]
-          );
-          if (existing) {
-            await conn.run(
-              'UPDATE route_energy SET energy = ?, source = ?, updated_at = ? WHERE from_city = ? AND to_city = ?',
-              [energy, 'game', t, from, to]
-            );
-          } else {
-            await conn.run(
-              'INSERT INTO route_energy (from_city, to_city, energy, source, updated_at) VALUES (?, ?, ?, ?, ?)',
-              [from, to, energy, 'game', t]
-            );
-          }
-          result.energyPairs += 1;
-        }
-      });
-    } catch (err) {
-      result.failed.push({ city: '(体力数据)', error: err.message });
-    }
-  }
-
   return result;
 }
 
-module.exports = { syncPrices, parseProducts, productName, gamePrice, harvestEnergy, CITY_MAP, NODE_TO_CITY };
+module.exports = { syncPrices, parseProducts, productName, gamePrice, CITY_MAP };

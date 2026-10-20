@@ -1,9 +1,10 @@
 'use strict';
 
-/** 报表：涨跌幅榜 / 城池间套利建议（含体力消耗） / 更新热度 */
+/** 报表：涨跌幅榜 / 城池间套利建议（毛利） / 更新热度 */
 
 const express = require('express');
-const { query, get, findServerId, nowText, MONOPOLY_DEFAULTS } = require('../db');
+const { query, get, findServerId, getCityTaxMap, nowText } = require('../db');
+const { clampRelief, displayBuy, displaySell } = require('../tax');
 const { ok, fail, asyncHandler, cleanName, isBlank } = require('../util');
 
 const router = express.Router();
@@ -28,13 +29,15 @@ async function requireServer(res, name) {
   return serverId;
 }
 
-/** GET /api/reports/movers?server=&days=7&limit=20 —— 涨跌幅榜（基于 price_history） */
+/** GET /api/reports/movers?server=&days=7&limit=20&relief=5 —— 涨跌幅榜（基于 price_history） */
 router.get('/movers', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 365);
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+  const relief = clampRelief(req.query.relief);
   const serverId = await requireServer(res, server);
   if (!serverId) return undefined;
+  const taxMap = await getCityTaxMap(serverId);
 
   const cutoff = bjDate(-days);
   const rows = await query(
@@ -89,15 +92,19 @@ router.get('/movers', asyncHandler(async (req, res) => {
     const start = a.start != null ? a.start : a.seed;
     if (start == null || end == null || !start) continue;
     if (start === end && a.samples < 2) continue;
+    const tax = taxMap.get(Number(a.cityId)) ?? null;
+    const adjust = a.field === 'buy_price' ? displayBuy : displaySell;
+    const startView = adjust(start, tax, relief);
+    const endView = adjust(end, tax, relief);
     const changePct = round2(((end - start) / start) * 100);
     items.push({
       city: a.city,
       commodity: a.commodity,
       burden: a.burden,
       field: a.field === 'buy_price' ? 'buy' : 'sell',
-      start: round2(start),
-      end: round2(end),
-      change: round2(end - start),
+      start: startView,
+      end: endView,
+      change: round2(endView - startView),
       changePct,
       samples: a.samples,
       startAt: a.startAt,
@@ -107,23 +114,22 @@ router.get('/movers', asyncHandler(async (req, res) => {
 
   items.sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct));
   return ok(res, {
-    server, days, totalCandidates: items.length,
+    server, days, relief, totalCandidates: items.length,
     items: items.slice(0, limit),
   });
 }));
 
-/** GET /api/reports/arbitrage?server=&load=&energyPrice=&energyPerTrip=&returnTrip= —— 城池间套利建议 */
+/** GET /api/reports/arbitrage?server=&load=200&relief=5 —— 城池间套利建议（毛利 = 单位价差 × 可载数量） */
 router.get('/arbitrage', asyncHandler(async (req, res) => {
   const server = cleanName(req.query.server, 50);
   const serverId = await requireServer(res, server);
   if (!serverId) return undefined;
 
   const load = Math.min(Math.max(Number(req.query.load) || 200, 1), 100000);
-  const energyPrice = Math.min(Math.max(Number(req.query.energyPrice) || 0, 0), 999999);
-  const energyPerTrip = Math.min(Math.max(Number(req.query.energyPerTrip) || MONOPOLY_DEFAULTS.energyCost, 1), 99);
-  const returnTrip = req.query.returnTrip !== '0' && req.query.returnTrip !== 'false';
   const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
+  const relief = clampRelief(req.query.relief);
   const onlyPositive = req.query.all !== '1';
+  const taxMap = await getCityTaxMap(serverId);
 
   const rows = await query(
     `SELECT p.city_id AS cityId, c.name AS city, p.commodity_id AS commodityId, d.name AS commodity,
@@ -135,20 +141,6 @@ router.get('/arbitrage', asyncHandler(async (req, res) => {
     [serverId]
   );
 
-  const routeEnergy = await query('SELECT from_city AS fromCity, to_city AS toCity, energy FROM route_energy');
-  const energyMap = new Map();
-  for (const r of routeEnergy) {
-    energyMap.set(`${r.fromCity}|${r.toCity}`, Number(r.energy));
-  }
-  const lookupEnergy = (a, b) => {
-    const k1 = energyMap.get(`${a}|${b}`);
-    const k2 = energyMap.get(`${b}|${a}`);
-    if (k1 != null || k2 != null) {
-      return { energy: Math.min(k1 ?? Infinity, k2 ?? Infinity), source: 'game' };
-    }
-    return { energy: energyPerTrip, source: 'default' };
-  };
-
   const byCommodity = new Map();
   for (const r of rows) {
     let g = byCommodity.get(r.commodityId);
@@ -156,8 +148,14 @@ router.get('/arbitrage', asyncHandler(async (req, res) => {
       g = { commodity: r.commodity, burden: r.burden == null ? null : Number(r.burden), buys: [], sells: [] };
       byCommodity.set(r.commodityId, g);
     }
-    if (r.buy != null) g.buys.push({ city: r.city, price: Number(r.buy), updatedAt: r.updatedAt });
-    if (r.sell != null) g.sells.push({ city: r.city, price: Number(r.sell), updatedAt: r.updatedAt });
+    if (r.buy != null) {
+      const tax = taxMap.get(Number(r.cityId)) ?? null;
+      g.buys.push({ city: r.city, price: displayBuy(r.buy, tax, relief), updatedAt: r.updatedAt });
+    }
+    if (r.sell != null) {
+      const tax = taxMap.get(Number(r.cityId)) ?? null;
+      g.sells.push({ city: r.city, price: displaySell(r.sell, tax, relief), updatedAt: r.updatedAt });
+    }
   }
 
   const items = [];
@@ -173,10 +171,6 @@ router.get('/arbitrage', asyncHandler(async (req, res) => {
       const burden = g.burden && g.burden > 0 ? g.burden : null;
       const units = burden ? Math.max(1, Math.floor(load / burden)) : 1;
       const gross = round2(unitProfit * units);
-      const { energy, source } = lookupEnergy(buy.city, sell.city);
-      const energyCost = round2(energy * energyPrice * (returnTrip ? 2 : 1));
-      const net = round2(gross - energyCost);
-      const dailyTrips = Math.max(1, Math.floor(MONOPOLY_DEFAULTS.energyLimit / energy));
       items.push({
         commodityId,
         commodity: g.commodity,
@@ -189,12 +183,6 @@ router.get('/arbitrage', asyncHandler(async (req, res) => {
         load,
         units,
         gross,
-        energy,
-        energySource: source,
-        energyCost,
-        net,
-        dailyTrips,
-        dailyNet: round2(net * dailyTrips),
         perBurden: burden ? round2(unitProfit / burden) : null,
         buyUpdatedAt: buy.updatedAt,
         sellUpdatedAt: sell.updatedAt,
@@ -203,18 +191,12 @@ router.get('/arbitrage', asyncHandler(async (req, res) => {
     }
   }
 
-  const filtered = onlyPositive ? items.filter(i => i.net > 0) : items;
-  filtered.sort((a, b) => b.net - a.net || b.unitProfit - a.unitProfit);
+  const filtered = onlyPositive ? items.filter(i => i.gross > 0) : items;
+  filtered.sort((a, b) => b.gross - a.gross || b.unitProfit - a.unitProfit);
 
   return ok(res, {
     server,
-    params: { load, energyPrice, energyPerTrip, returnTrip, onlyPositive },
-    energyInfo: {
-      energyCost: MONOPOLY_DEFAULTS.energyCost,
-      energyLimit: MONOPOLY_DEFAULTS.energyLimit,
-      energyCDHours: MONOPOLY_DEFAULTS.energyCDHours,
-      dailyMaxTrips: Math.max(1, Math.floor(MONOPOLY_DEFAULTS.energyLimit / energyPerTrip)),
-    },
+    params: { load, relief, onlyPositive },
     totalCandidates: items.length,
     items: filtered.slice(0, limit),
   });
