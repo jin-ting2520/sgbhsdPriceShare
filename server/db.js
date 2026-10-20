@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   current_server TEXT   NOT NULL DEFAULT '',
   allow_sync_server INTEGER NOT NULL DEFAULT 0,
   view_master_prices INTEGER NOT NULL DEFAULT 0,
+  allow_master_prices INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -328,6 +329,7 @@ const MYSQL_SCHEMA = [
     current_server VARCHAR(50) NOT NULL DEFAULT '',
     allow_sync_server TINYINT NOT NULL DEFAULT 0,
     view_master_prices TINYINT NOT NULL DEFAULT 0,
+    allow_master_prices TINYINT NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE KEY uk_accounts_name (name),
@@ -558,6 +560,7 @@ function migrateSqlite() {
   if (!hasCol('accounts', 'current_server')) sqlite.exec("ALTER TABLE accounts ADD COLUMN current_server TEXT NOT NULL DEFAULT ''");
   if (!hasCol('accounts', 'allow_sync_server')) sqlite.exec('ALTER TABLE accounts ADD COLUMN allow_sync_server INTEGER NOT NULL DEFAULT 0');
   if (!hasCol('accounts', 'view_master_prices')) sqlite.exec('ALTER TABLE accounts ADD COLUMN view_master_prices INTEGER NOT NULL DEFAULT 0');
+  if (!hasCol('accounts', 'allow_master_prices')) sqlite.exec('ALTER TABLE accounts ADD COLUMN allow_master_prices INTEGER NOT NULL DEFAULT 1');
 
   if (!hasCol('app_settings', 'key_help_md')) {
     sqlite.exec("ALTER TABLE app_settings ADD COLUMN key_help_md TEXT NOT NULL DEFAULT ''");
@@ -708,6 +711,9 @@ async function migrateMysql() {
   }
   if (!(await hasCol('accounts', 'view_master_prices'))) {
     await pool.query('ALTER TABLE accounts ADD COLUMN view_master_prices TINYINT NOT NULL DEFAULT 0');
+  }
+  if (!(await hasCol('accounts', 'allow_master_prices'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN allow_master_prices TINYINT NOT NULL DEFAULT 1 AFTER view_master_prices');
   }
   if (!(await hasCol('app_settings', 'key_help_md'))) {
     await pool.query('ALTER TABLE app_settings ADD COLUMN key_help_md MEDIUMTEXT NULL');

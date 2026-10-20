@@ -218,6 +218,7 @@ createApp({
     const masterAccountId = ref(null)
     const masterAccountName = ref('')
     const isMaster = ref(false)
+    const masterPricesAllowed = ref(false)
     const viewMasterPrices = ref(false)
     const masterSaving = ref(false)
     const expiryLoaded = ref(false)
@@ -241,7 +242,12 @@ createApp({
       masterAccountId.value = (data && data.masterAccountId) || null
       masterAccountName.value = (data && data.masterAccountName) || ''
       isMaster.value = !!(data && data.isMaster)
+      masterPricesAllowed.value = !!(data && data.masterPricesAllowed)
       viewMasterPrices.value = !!(data && data.viewMasterPrices)
+    }
+
+    const refreshMasterMeta = async () => {
+      try { applyMasterMeta(await api('/api/auth/me')) } catch { /* ignore */ }
     }
 
     const onViewMasterChange = async enabled => {
@@ -776,7 +782,7 @@ createApp({
         masterAccountId.value = msg.masterAccountId || null
         masterAccountName.value = msg.masterAccountName || ''
         isMaster.value = !!msg.masterAccountName && msg.masterAccountName === nickname.value
-        viewMasterPrices.value = false
+        refreshMasterMeta()
         if (queried.value) {
           if (rows.value.some(isDirty)) ElMessage.warning('主账号已变更，你本地有未保存修改；保存时会提示冲突')
           else doFetch(false)
@@ -786,6 +792,7 @@ createApp({
       }
       if (msg.type === 'master.preference') {
         if (masterSaving.value) return
+        if (msg.allowed !== undefined) masterPricesAllowed.value = !!msg.allowed
         viewMasterPrices.value = !!msg.enabled
         if (queried.value) {
           if (rows.value.some(isDirty)) ElMessage.warning('主账号价格共享设置已更新，你本地有未保存修改')
@@ -1633,7 +1640,7 @@ createApp({
       nickname, nicknameInput, passwordInput, keyInput, entering, entered, enterSite, switchAccount,
       authMode, setAuthMode, authHint, renewVisible, renewKey, renewMessage, openRenew, submitRenew,
       accountServer, allowSyncServer, deviceName,
-      masterAccountId, masterAccountName, isMaster, viewMasterPrices, masterSaving, onViewMasterChange,
+      masterAccountId, masterAccountName, isMaster, masterPricesAllowed, viewMasterPrices, masterSaving, onViewMasterChange,
       keyRequired, keyRequiredAtText, keyPlaceholder, keyHelpHtml, tokenHelpHtml,
       expiryText, expiryTooltip, expiryTagType,
       // 基础

@@ -159,7 +159,7 @@ createApp({
     const bindKey = async row => {
       try {
         const accountName = await ask(
-          `卡密：${row.code}\n类型：${row.typeName}\n\n输入要绑定的账号昵称。绑定后立即消耗卡密，有效期从账号当前到期时间（已过期则从现在）顺延。`,
+          `卡密：${row.code}\n类型：${row.typeName}\n\n输入要绑定的账号昵称。绑定后立即消耗卡密，有效期从账号当前到期时间（已过期则从现在）顺延；永久有效账号从现在按卡密时长重新计时。`,
           '绑定卡密',
           { inputPlaceholder: '账号昵称' }
         )
@@ -221,7 +221,7 @@ createApp({
           await api(`/api/admin/accounts/${row.id}/expires`, { method: 'POST', body: { extendDays: Number(days) } })
           ElMessage.success(`已续期 ${days} 天`)
         } else if (cmd === 'renew') {
-          const code = await ask('输入未使用的卡密（每张卡密只能使用一次，有效期从当前到期时间顺延）', '使用卡密续期', {
+          const code = await ask('输入未使用的卡密（每张卡密只能使用一次，有效期从当前到期时间顺延；永久账号从现在重新计时）', '使用卡密续期', {
             inputPlaceholder: 'XXXX-XXXX-XXXX-XXXX',
           })
           const data = await api(`/api/admin/accounts/${row.id}/expires`, { method: 'POST', body: { keyCode: code } })
@@ -248,11 +248,23 @@ createApp({
           )
           await api(`/api/admin/accounts/${row.id}/sync-server`, { method: 'POST', body: { allow } })
           ElMessage.success(allow ? '已允许传区服参数' : '已禁止传区服参数')
+        } else if (cmd === 'allow-master-prices' || cmd === 'deny-master-prices') {
+          const allowed = cmd === 'allow-master-prices'
+          await confirm(
+            allowed
+              ? `允许「${row.name}」共享主账号价格？用户端将显示「主账号价」开关并默认开启共享。`
+              : `禁止「${row.name}」共享主账号价格？用户端将隐藏「主账号价」开关并停止共享。`,
+            '主账号价格共享',
+            { type: allowed ? 'info' : 'warning' }
+          )
+          await api(`/api/admin/accounts/${row.id}/master-prices`, { method: 'POST', body: { allowed } })
+          ElMessage.success(allowed ? '已开启主账号价格共享' : '已关闭主账号价格共享')
+          await afterAccountChange()
         } else if (cmd === 'set-master' || cmd === 'clear-master') {
           const master = cmd === 'set-master'
           await confirm(
             master
-              ? `设「${row.name}」为主账号？其他账号开启共享后，将只读展示该账号缺失的商品价格；所有账号的共享开关会先重置为关闭。`
+              ? `设「${row.name}」为主账号？除已禁用共享的账号外，其他普通账号默认开启共享，只读展示该账号缺失的商品价格。`
               : `取消「${row.name}」的主账号身份？所有账号的共享开关会重置为关闭。`,
             '主账号价格共享',
             { type: master ? 'warning' : 'warning' }

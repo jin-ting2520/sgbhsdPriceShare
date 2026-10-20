@@ -46,7 +46,8 @@ async function loadSession(token) {
     `SELECT s.id AS sessionId, s.device_id AS deviceId, s.token AS sessionToken,
             a.id, a.name, a.token, a.relief, a.status, a.expires_at AS expiresAt,
             a.device_limit AS deviceLimit, a.current_server AS currentServer,
-            a.allow_sync_server AS allowSyncServer, a.view_master_prices AS viewMasterPrices
+            a.allow_sync_server AS allowSyncServer, a.view_master_prices AS viewMasterPrices,
+            a.allow_master_prices AS masterPricesAllowed
        FROM sessions s JOIN accounts a ON a.id = s.account_id
       WHERE s.token = ?`,
     [String(token)]

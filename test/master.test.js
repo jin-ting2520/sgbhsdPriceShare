@@ -55,7 +55,7 @@ after(async () => {
   }
 });
 
-test('后台设置主账号，查看开关仅对普通账号生效且变更时重置', async () => {
+test('后台设置主账号：普通账号默认开启共享，管理员可禁用特定账号', async () => {
   const set = await admin.post(`/api/admin/accounts/${masterId}/master`, { master: true });
   assert.equal(set.status, 200, set.json && set.json.message);
   assert.equal(set.json.data.isMaster, true);
@@ -67,25 +67,60 @@ test('后台设置主账号，查看开关仅对普通账号生效且变更时�
   assert.equal(denied.status, 400);
   assert.match(denied.json.message, /主账号/);
 
-  const enabled = await viewer.put('/api/auth/master-prices', { enabled: true });
-  assert.equal(enabled.status, 200);
   let me = await viewer.get('/api/auth/me');
   assert.equal(me.json.data.masterAccountName, MASTER_NAME);
   assert.equal(me.json.data.isMaster, false);
-  assert.equal(me.json.data.viewMasterPrices, true);
+  assert.equal(me.json.data.masterPricesAllowed, true);
+  assert.equal(me.json.data.viewMasterPrices, true, '设置主账号后普通账号应默认开启共享');
   assert.deepEqual(await masterViewerIds(), [viewerId]);
 
-  const viewerList = await admin.get(`/api/admin/accounts?q=${encodeURIComponent(VIEWER_NAME)}`);
+  let viewerList = await admin.get(`/api/admin/accounts?q=${encodeURIComponent(VIEWER_NAME)}`);
+  assert.equal(viewerList.json.data.items[0].masterPricesAllowed, true);
   assert.equal(viewerList.json.data.items[0].viewMasterPrices, true);
+
+  const disabled = await viewer.put('/api/auth/master-prices', { enabled: false });
+  assert.equal(disabled.status, 200);
+  me = await viewer.get('/api/auth/me');
+  assert.equal(me.json.data.masterPricesAllowed, true);
+  assert.equal(me.json.data.viewMasterPrices, false);
+  assert.deepEqual(await masterViewerIds(), []);
 
   const reset = await admin.post(`/api/admin/accounts/${masterId}/master`, { master: true });
   assert.equal(reset.status, 200);
   me = await viewer.get('/api/auth/me');
-  assert.equal(me.json.data.viewMasterPrices, false, '重新指定主账号应清空所有查看开关');
-  assert.deepEqual(await masterViewerIds(), []);
+  assert.equal(me.json.data.viewMasterPrices, true, '重新设置主账号后普通账号应再次默认开启');
 
-  const enabledAgain = await viewer.put('/api/auth/master-prices', { enabled: true });
-  assert.equal(enabledAgain.status, 200);
+  const blocked = await admin.post(`/api/admin/accounts/${viewerId}/master-prices`, { allowed: false });
+  assert.equal(blocked.status, 200);
+  assert.equal(blocked.json.data.masterPricesAllowed, false);
+  me = await viewer.get('/api/auth/me');
+  assert.equal(me.json.data.masterPricesAllowed, false);
+  assert.equal(me.json.data.viewMasterPrices, false);
+  assert.deepEqual(await masterViewerIds(), []);
+  viewerList = await admin.get(`/api/admin/accounts?q=${encodeURIComponent(VIEWER_NAME)}`);
+  assert.equal(viewerList.json.data.items[0].masterPricesAllowed, false);
+  assert.equal(viewerList.json.data.items[0].viewMasterPrices, false);
+
+  const blockedToggle = await viewer.put('/api/auth/master-prices', { enabled: true });
+  assert.equal(blockedToggle.status, 403);
+  assert.match(blockedToggle.json.message, /管理员已关闭/);
+
+  const resetAgain = await admin.post(`/api/admin/accounts/${masterId}/master`, { master: true });
+  assert.equal(resetAgain.status, 200);
+  me = await viewer.get('/api/auth/me');
+  assert.equal(me.json.data.masterPricesAllowed, false, '重新设置主账号不应覆盖管理员的禁用');
+  assert.equal(me.json.data.viewMasterPrices, false);
+
+  const allowed = await admin.post(`/api/admin/accounts/${viewerId}/master-prices`, { allowed: true });
+  assert.equal(allowed.status, 200);
+  me = await viewer.get('/api/auth/me');
+  assert.equal(me.json.data.masterPricesAllowed, true);
+  assert.equal(me.json.data.viewMasterPrices, true, '管理员重新开启后应默认开启共享');
+  assert.deepEqual(await masterViewerIds(), [viewerId]);
+
+  const masterSelf = await admin.post(`/api/admin/accounts/${masterId}/master-prices`, { allowed: false });
+  assert.equal(masterSelf.status, 400);
+  assert.match(masterSelf.json.message, /主账号/);
 });
 
 test('整行回退：本人没有的商品展示主账号价格并标记来源', async () => {

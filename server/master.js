@@ -18,13 +18,15 @@ async function getMasterAccount() {
 async function masterMeta(account) {
   const master = await getMasterAccount();
   const isMaster = !!(master && account && Number(master.id) === Number(account.id));
+  const allowed = !!(account && Number(account.masterPricesAllowed ?? account.allow_master_prices ?? 1));
   const preference = !!(account && Number(account.viewMasterPrices ?? account.view_master_prices));
   return {
     master,
     masterAccountId: master ? Number(master.id) : null,
     masterAccountName: master ? master.name : '',
     isMaster,
-    viewMasterPrices: !isMaster && !!master && preference,
+    masterPricesAllowed: !isMaster && allowed,
+    viewMasterPrices: !isMaster && !!master && allowed && preference,
   };
 }
 
@@ -32,7 +34,7 @@ async function masterViewerIds() {
   const master = await getMasterAccount();
   if (!master) return [];
   const rows = await query(
-    'SELECT id FROM accounts WHERE view_master_prices = 1 AND id <> ?',
+    'SELECT id FROM accounts WHERE view_master_prices = 1 AND allow_master_prices = 1 AND id <> ?',
     [master.id]
   );
   return rows.map(r => Number(r.id));

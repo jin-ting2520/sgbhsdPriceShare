@@ -69,6 +69,26 @@ test('管理后台：密码错误 401，未带 token 401', async () => {
   assert.ok(overview.json.data.accounts >= 0);
 });
 
+test('管理后台同步日志：按账号筛选并返回服务器别名', async () => {
+  rateLimit.reset();
+  await registerAccount(base, admin, { name: '同步日志账号', type: 'day' });
+  const id = await accountId('同步日志账号');
+  const t = db.nowText();
+  await db.run(
+    `INSERT INTO sync_log
+       (account_id, trigger_type, server_name, started_at, finished_at, status, queried, saved, failed_count, message)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, 'manual', '测试服', t, t, 'success', 3, 2, 0, 'ok']
+  );
+
+  const list = await admin.get(`/api/admin/sync-logs?accountId=${id}`);
+  assert.equal(list.status, 200, list.json && list.json.message);
+  assert.equal(list.json.data.total, 1);
+  assert.equal(list.json.data.items[0].accountName, '同步日志账号');
+  assert.equal(list.json.data.items[0].serverName, '测试服');
+  assert.equal(list.json.data.items[0].trigger_type, 'manual');
+});
+
 test('卡密批量生成 / 列表 / 导出 / 作废', async () => {
   const made = await admin.post('/api/admin/keys', { type: 'month', count: 2, note: '批量测试' });
   assert.equal(made.status, 200);
@@ -145,6 +165,58 @@ test('后台直接绑定卡密：每张只能使用一次，并从当前到期�
   const viaAccountAgain = await admin.post(`/api/admin/accounts/${id}/expires`, { keyCode: code2 });
   assert.equal(viaAccountAgain.status, 400);
   assert.match(viaAccountAgain.json.message, /已被使用/);
+});
+
+test('永久账号绑定卡密后从现在按卡密时长重新计时', async () => {
+  rateLimit.reset();
+  const settings = await admin.put('/api/admin/settings', { keyRequiredAt: '2099-01-01 00:00:00' });
+  assert.equal(settings.status, 200);
+
+  const registered = await createClient(base).login({ name: '永久无卡账号', password: 'pass-1234' });
+  assert.equal(registered.status, 200, registered.json && registered.json.message);
+  assert.equal(registered.json.data.hasKey, false);
+  const id = await accountId('永久无卡账号');
+
+  const permanent = await admin.post(`/api/admin/accounts/${id}/expires`, { expiresAt: null });
+  assert.equal(permanent.status, 200);
+  const before = await db.get('SELECT expires_at, key_code FROM accounts WHERE id = ?', [id]);
+  assert.equal(before.expires_at, null);
+  assert.equal(before.key_code, null);
+
+  const [dayCode] = await issueKeys(admin, 'day', 1);
+  const dayKey = await db.get('SELECT id FROM invite_keys WHERE code = ?', [dayCode]);
+  const bound = await admin.post(`/api/admin/keys/${dayKey.id}/bind`, { accountName: '永久无卡账号' });
+  assert.equal(bound.status, 200, bound.json && bound.json.message);
+  assert.equal(bound.json.data.keyCode, dayCode);
+  const dayCount = (db.parseTime(bound.json.data.expiresAt) - Date.now()) / 86400000;
+  assert.ok(dayCount > 0.99 && dayCount < 1.01, `永久账号应从现在起算 1 天，实际 ${dayCount}`);
+
+  const reset = await admin.post(`/api/admin/accounts/${id}/expires`, { expiresAt: null });
+  assert.equal(reset.status, 200);
+  const [monthCode] = await issueKeys(admin, 'month', 1);
+  const renewed = await admin.post(`/api/admin/accounts/${id}/expires`, { keyCode: monthCode });
+  assert.equal(renewed.status, 200, renewed.json && renewed.json.message);
+  const monthCount = (db.parseTime(renewed.json.data.expiresAt) - Date.now()) / 86400000;
+  assert.ok(monthCount > 29.99 && monthCount < 30.01, `永久账号应从现在起算 30 天，实际 ${monthCount}`);
+
+  const resetAgain = await admin.post(`/api/admin/accounts/${id}/expires`, { expiresAt: null });
+  assert.equal(resetAgain.status, 200);
+  const [loginCode] = await issueKeys(admin, 'day', 1);
+  const loggedIn = await login('永久无卡账号', 'pass-1234', { key: loginCode });
+  assert.equal(loggedIn.res.status, 200, loggedIn.res.json && loggedIn.res.json.message);
+  assert.equal(loggedIn.res.json.data.renewed, true);
+  const loginCount = (db.parseTime(loggedIn.res.json.data.expiresAt) - Date.now()) / 86400000;
+  assert.ok(loginCount > 0.99 && loginCount < 1.01, `永久账号登录续期应从现在起算 1 天，实际 ${loginCount}`);
+
+  const rows = await db.query(
+    'SELECT code, status FROM invite_keys WHERE code IN (?, ?, ?) ORDER BY code',
+    [dayCode, monthCode, loginCode]
+  );
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every(r => r.status === 'used'));
+  const account = await db.get('SELECT expires_at, key_code FROM accounts WHERE id = ?', [id]);
+  assert.equal(account.expires_at, loggedIn.res.json.data.expiresAt);
+  assert.equal(account.key_code, loginCode);
 });
 
 /* ------------------------------ 卡密注册 ------------------------------ */

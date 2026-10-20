@@ -199,6 +199,7 @@
             <el-table-column label="主账号" width="90" align="center">
               <template #default="s">
                 <el-tag v-if="s.row.isMaster" size="small" type="warning">主账号</el-tag>
+                <el-tag v-else-if="!s.row.masterPricesAllowed" size="small" type="info">禁共享</el-tag>
                 <el-tag v-else-if="s.row.viewMasterPrices" size="small" type="success" effect="plain">共享</el-tag>
                 <span v-else class="muted">-</span>
               </template>
@@ -230,6 +231,8 @@
                       <el-dropdown-item command="device">调整设备上限</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.allowSyncServer" command="allow-server">允许传区服参数</el-dropdown-item>
                       <el-dropdown-item v-else command="deny-server">禁止传区服参数</el-dropdown-item>
+                      <el-dropdown-item v-if="!s.row.isMaster && !s.row.masterPricesAllowed" command="allow-master-prices">开启主账号价格共享</el-dropdown-item>
+                      <el-dropdown-item v-else-if="!s.row.isMaster" command="deny-master-prices">关闭主账号价格共享</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.isMaster" command="set-master" divided>设为主账号</el-dropdown-item>
                       <el-dropdown-item v-else command="clear-master" divided>取消主账号</el-dropdown-item>
                       <el-dropdown-item command="password">重置密码</el-dropdown-item>

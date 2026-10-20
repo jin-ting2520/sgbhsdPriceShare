@@ -209,7 +209,7 @@ router.get('/batches', asyncHandler(async (req, res) => {
   })));
 }));
 
-/** 直接把未使用卡密绑定到账号；卡密只能消耗一次，到期时间从账号当前有效期顺延 */
+/** 直接把未使用卡密绑定到账号；卡密只能消耗一次，到期时间从账号当前有效期顺延，永久账号则从现在重新计时 */
 router.post('/keys/:id/bind', asyncHandler(async (req, res) => {
   const keyId = Number(req.params.id);
   if (!Number.isInteger(keyId) || keyId <= 0) return fail(res, 400, '卡密 id 不正确');
@@ -233,7 +233,6 @@ router.post('/keys/:id/bind', asyncHandler(async (req, res) => {
         ? await conn.get('SELECT * FROM accounts WHERE id = ?', [accountId])
         : await conn.get('SELECT * FROM accounts WHERE name = ?', [accountName]);
       if (!account) throw bad(404, '账号不存在');
-      if (account.expires_at == null) throw bad(400, '账号当前为永久有效期，无需绑定卡密');
 
       const currentMs = parseTime(account.expires_at);
       const base = Number.isFinite(currentMs) && currentMs > Date.now() ? currentMs : Date.now();
@@ -283,6 +282,7 @@ router.get('/accounts', asyncHandler(async (req, res) => {
     `SELECT a.id, a.name, a.status, a.expires_at AS expiresAt, a.key_code AS keyCode,
             a.device_limit AS deviceLimit, a.current_server AS currentServer,
             a.allow_sync_server AS allowSyncServer, a.view_master_prices AS viewMasterPrices,
+            a.allow_master_prices AS masterPricesAllowed,
             a.created_at AS createdAt, a.updated_at AS updatedAt, a.relief,
             (SELECT COUNT(*) FROM sessions s WHERE s.account_id = a.id) AS sessions,
             (SELECT COUNT(*) FROM prices p WHERE p.account_id = a.id) AS prices,
@@ -308,6 +308,7 @@ router.get('/accounts', asyncHandler(async (req, res) => {
       currentServer: r.currentServer || '',
       allowSyncServer: !!Number(r.allowSyncServer),
       isMaster: Number(r.id) === masterId,
+      masterPricesAllowed: !!Number(r.masterPricesAllowed),
       viewMasterPrices: !!Number(r.viewMasterPrices),
       sessions: Number(r.sessions) || 0,
       prices: Number(r.prices) || 0,
@@ -336,7 +337,7 @@ router.post('/accounts/:id/status', asyncHandler(async (req, res) => {
   return ok(res, { id, status });
 }));
 
-/** 调整到期：{ expiresAt } 直接覆盖（null=永久）| { extendDays } 顺延 | { keyCode } 绑定未使用卡密 */
+/** 调整到期：{ expiresAt } 直接覆盖（null=永久）| { extendDays } 顺延 | { keyCode } 绑定未使用卡密（永久账号从现在重新计时） */
 router.post('/accounts/:id/expires', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   const account = await loadAccount(id);
@@ -385,7 +386,6 @@ router.post('/accounts/:id/expires', asyncHandler(async (req, res) => {
         if (!KEY_TYPES[key.type]) throw bad(400, '卡密类型无效');
         const current = await conn.get('SELECT expires_at FROM accounts WHERE id = ?', [id]);
         if (!current) throw bad(404, '账号不存在');
-        if (current.expires_at == null) throw bad(400, '账号当前为永久有效期，无需绑定卡密');
         const currentMs = parseTime(current.expires_at);
         const base = Number.isFinite(currentMs) && currentMs > Date.now() ? currentMs : Date.now();
         const expiresAt = expiresAtFor(key.type, base);
@@ -434,7 +434,7 @@ router.post('/accounts/:id/sync-server', asyncHandler(async (req, res) => {
   return ok(res, { id, allowSyncServer: allowed });
 }));
 
-/** 设置/取消全局主账号；切换时清空所有账号的查看偏好 */
+/** 设置/取消全局主账号；设置时允许共享的普通账号默认开启，取消时清空查看偏好 */
 router.post('/accounts/:id/master', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   const master = req.body && req.body.master;
@@ -451,7 +451,15 @@ router.post('/accounts/:id/master', asyncHandler(async (req, res) => {
       'UPDATE app_settings SET master_account_id = ?, updated_at = ? WHERE id = 1',
       [master ? id : null, nowText()]
     );
-    await conn.run('UPDATE accounts SET view_master_prices = 0');
+    if (master) {
+      await conn.run(
+        `UPDATE accounts SET view_master_prices =
+           CASE WHEN allow_master_prices = 1 AND id <> ? THEN 1 ELSE 0 END`,
+        [id]
+      );
+    } else {
+      await conn.run('UPDATE accounts SET view_master_prices = 0');
+    }
   });
   ws.broadcast('master.changed', {
     masterAccountId: master ? id : null,
@@ -463,6 +471,25 @@ router.post('/accounts/:id/master', asyncHandler(async (req, res) => {
     masterAccountId: master ? id : null,
     masterAccountName: master ? account.name : '',
   });
+}));
+
+/** 允许/禁止指定账号查看主账号价格；禁止后用户端隐藏开关 */
+router.post('/accounts/:id/master-prices', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  const allowed = req.body && req.body.allowed;
+  if (typeof allowed !== 'boolean') return fail(res, 400, 'allowed 必须为布尔值');
+  const account = await loadAccount(id);
+  if (!account) return fail(res, 404, '账号不存在');
+
+  const row = await get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
+  if ((Number(row && row.id) || null) === id) return fail(res, 400, '主账号无需设置价格共享');
+
+  await run(
+    'UPDATE accounts SET allow_master_prices = ?, view_master_prices = ?, updated_at = ? WHERE id = ?',
+    [allowed ? 1 : 0, allowed ? 1 : 0, nowText(), id]
+  );
+  ws.broadcast('master.preference', { enabled: allowed, allowed }, { accountId: id });
+  return ok(res, { id, masterPricesAllowed: allowed, viewMasterPrices: allowed });
 }));
 
 router.post('/accounts/:id/password', asyncHandler(async (req, res) => {
@@ -730,8 +757,7 @@ router.get('/sync-logs', asyncHandler(async (req, res) => {
   const params = accountId ? [accountId] : [];
   const totalRow = await get(`SELECT COUNT(*) AS n FROM sync_log l ${where}`, params);
   const rows = await query(
-    `SELECT l.*, s.name AS serverName, a.name AS accountName FROM sync_log l
-       LEFT JOIN servers s ON s.id = l.server_id
+    `SELECT l.*, l.server_name AS serverName, a.name AS accountName FROM sync_log l
        LEFT JOIN accounts a ON a.id = l.account_id
        ${where} ORDER BY l.id DESC LIMIT ? OFFSET ?`,
     [...params, pageSize, (page - 1) * pageSize]

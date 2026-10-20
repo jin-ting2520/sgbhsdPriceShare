@@ -85,7 +85,7 @@
       </div>
     </div>
     <div class="spacer"></div>
-    <el-tooltip v-if="masterAccountName && !isMaster" :content="`查看主账号「${masterAccountName}」维护的价格；本人已录入的商品始终优先`">
+    <el-tooltip v-if="masterAccountName && !isMaster && masterPricesAllowed" :content="`查看主账号「${masterAccountName}」维护的价格；本人已录入的商品始终优先`">
       <span class="master-switch">
         <span class="master-switch__label">主账号价</span>
         <el-switch v-model="viewMasterPrices" size="small" :loading="masterSaving"

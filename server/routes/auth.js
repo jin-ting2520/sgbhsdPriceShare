@@ -45,6 +45,7 @@ async function publicAccount(row, created, session, extra = {}) {
     masterAccountId: meta.masterAccountId,
     masterAccountName: meta.masterAccountName,
     isMaster: meta.isMaster,
+    masterPricesAllowed: meta.masterPricesAllowed,
     viewMasterPrices: meta.viewMasterPrices,
     ...extra,
   };
@@ -110,10 +111,6 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
       }
     }
 
-    if (keyCode && existing.expires_at == null) {
-      return fail(res, 400, '账号已永久有效，无需再使用卡密', 40011);
-    }
-
     let renewed = null;
     if (keyCode) {
       try {
@@ -158,6 +155,8 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
     created = await tx(async conn => {
       const dup = await conn.get('SELECT id FROM accounts WHERE name = ?', [name]);
       if (dup) throw Object.assign(new Error('该昵称刚刚被注册，请直接登录'), { status: 400 });
+      const masterRow = await conn.get('SELECT master_account_id AS id FROM app_settings WHERE id = 1');
+      const viewMasterPrices = Number(masterRow && masterRow.id) ? 1 : 0;
       let code = '';
       let keyType = null;
       let keyId = 0;
@@ -171,9 +170,10 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
         expiresAt = expiresAtFor(valid.row.type);
       }
       const info = await conn.run(
-        `INSERT INTO accounts (name, password_hash, relief, status, expires_at, key_code, device_limit, created_at, updated_at)
-         VALUES (?, ?, 5, 'active', ?, ?, ?, ?, ?)`,
-        [name, passwordHash, expiresAt, code || null, settings.defaultDeviceLimit, t, t]
+        `INSERT INTO accounts (name, password_hash, relief, status, expires_at, key_code, device_limit,
+                               view_master_prices, created_at, updated_at)
+         VALUES (?, ?, 5, 'active', ?, ?, ?, ?, ?, ?)`,
+        [name, passwordHash, expiresAt, code || null, settings.defaultDeviceLimit, viewMasterPrices, t, t]
       );
       if (keyCode) {
         const used = await useKey(conn, keyId, info.insertId);
@@ -209,10 +209,14 @@ router.post('/logout', requireAccount, asyncHandler(async (req, res) => {
 /** GET /api/auth/me 当前账号信息 */
 router.get('/me', requireAccount, asyncHandler(async (req, res) => {
   const row = await get(
-    'SELECT name, token, relief, created_at AS createdAt, current_server AS currentServer, allow_sync_server AS allowSyncServer, status, expires_at AS expiresAt, device_limit AS deviceLimit, key_code AS keyCode, view_master_prices AS viewMasterPrices FROM accounts WHERE id = ?',
+    'SELECT name, token, relief, created_at AS createdAt, current_server AS currentServer, allow_sync_server AS allowSyncServer, status, expires_at AS expiresAt, device_limit AS deviceLimit, key_code AS keyCode, view_master_prices AS viewMasterPrices, allow_master_prices AS masterPricesAllowed FROM accounts WHERE id = ?',
     [req.account.id]
   );
-  const meta = await masterMeta({ id: req.account.id, viewMasterPrices: row.viewMasterPrices });
+  const meta = await masterMeta({
+    id: req.account.id,
+    viewMasterPrices: row.viewMasterPrices,
+    masterPricesAllowed: row.masterPricesAllowed,
+  });
   return ok(res, {
     name: row.name,
     token: row.token || '',
@@ -227,6 +231,7 @@ router.get('/me', requireAccount, asyncHandler(async (req, res) => {
     masterAccountId: meta.masterAccountId,
     masterAccountName: meta.masterAccountName,
     isMaster: meta.isMaster,
+    masterPricesAllowed: meta.masterPricesAllowed,
     viewMasterPrices: meta.viewMasterPrices,
   });
 }));
@@ -248,6 +253,7 @@ router.put('/master-prices', requireAccount, asyncHandler(async (req, res) => {
   if (typeof enabled !== 'boolean') return fail(res, 400, 'enabled 必须为布尔值');
   const meta = await masterMeta(req.account);
   if (meta.isMaster) return fail(res, 400, '主账号无需开启价格共享');
+  if (!meta.masterPricesAllowed) return fail(res, 403, '管理员已关闭该账号的主账号价格共享');
   if (enabled && !meta.master) return fail(res, 400, '管理员尚未指定主账号');
   await run(
     'UPDATE accounts SET view_master_prices = ?, updated_at = ? WHERE id = ?',
