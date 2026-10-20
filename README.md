@@ -21,7 +21,7 @@
 │   ├─ /api/dict            字典 CRUD（Redis 缓存 + 变更广播）     │
 │   ├─ /api/servers         区服                                 │
 │   ├─ /api/prices          查询/保存(乐观并发)/日志/趋势/比价/导入导出 │
-│   ├─ /api/game/sync       游戏直连同步（42 城 × 25 商品，原价 + 税率入账）  │
+│   ├─ /api/game/sync       游戏直连同步（175 城 × 25 商品，原价 + 税率入账）  │
 │   ├─ /api/auth            账号登录 / 会话 / 本人 token                    │
 │   ├─ /api/sync-settings   定时同步配置 / 立即执行 / 运行日志      │
 │   ├─ /api/reports         涨跌幅榜 / 套利建议 / 更新热度          │
@@ -36,13 +36,13 @@
 
 | 模块 | 说明 |
 | --- | --- |
-| 账号入口 | 昵称 + 密码登录，首次输入即自动注册；无角色权限，仅以账号区分更新人并隔离各账号的游戏 token（存库，仅本人可见） |
+| 账号入口 | 昵称 + 密码登录，首次输入即自动注册；无角色权限，仅以账号区分更新人并隔离各账号的游戏 token 与赋税减免（存库，仅本人可见） |
 | 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
 | 查询与字典 | 区服联想、城池/商品下拉（可输入新增）；商品负重维护；被引用项禁止删除 |
 | 实时协作 | WebSocket 推送他人改价，正在查看的城池立即刷新；本地有未保存修改时标记冲突 |
 | 并发保护 | 保存携带 `baseUpdatedAt`，被他人抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
-| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，逐城抓取 42 城价格，落库税前原价与城池税率（每城 3 个商品可买入、25 个可卖出） |
-| 赋税换算 | 各城税率自动同步；用户可设「我的赋税减免」（默认 5%，本机缓存），价格按个人减免实时换算，手工录入/导入自动反推原价 |
+| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，逐城抓取 175 城价格，落库税前原价与城池税率（每城 3 个商品可买入、25 个可卖出） |
+| 赋税换算 | 各城税率自动同步；用户可设「我的赋税减免」（默认 5%，按账号保存在服务端），价格按个人减免实时换算，手工录入/导入自动反推原价 |
 | 定时同步 | 页面配置开关、cron 频率、区服、更新人；token 存于保存者账号并绑定该账号，服务器定时执行并保留运行记录 |
 | 报表 | 涨跌幅榜、城池间套利建议（按载重估算可购件数与毛利）、改价与同步热度图 |
 | 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天、缩放/拖拽 |
@@ -70,7 +70,7 @@ docker compose up -d --build
 npm install
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 38 项后端/账号/游戏/报表测试
+npm test           # 39 项后端/账号/游戏/报表测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -132,7 +132,7 @@ sgbhsdPriceShare/
 │   │   ├── frame.js        # 10 字节帧头
 │   │   ├── thrift.js       # Thrift Compact Protocol
 │   │   ├── thrift_schema.json
-│   │   └── data/city_map.json  # 42 城池映射（nodeNo/metaId/gridX/gridY）
+│   │   └── data/city_map.json  # 175 城池映射（nodeNo/metaId/gridX/gridY）
 │   └── scripts/
 │       ├── game-sync.js        # CLI 同步（--settings 复用定时配置）
 │       ├── migrate-to-mysql.js # SQLite → MySQL
@@ -166,10 +166,11 @@ sgbhsdPriceShare/
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（返回驱动、缓存、WS 人数、定时状态） |
-| POST | `/api/auth/login` `{name,password}` | 昵称 + 密码登录；首次输入自动注册，返回 `{name,session,token,created}` |
+| POST | `/api/auth/login` `{name,password}` | 昵称 + 密码登录；首次输入自动注册，返回 `{name,session,token,relief,created}` |
 | POST | `/api/auth/logout` | 注销当前会话 |
-| GET | `/api/auth/me` | 当前账号与本人的游戏 token（仅本人可见） |
+| GET | `/api/auth/me` | 当前账号、本人的游戏 token 与赋税减免（仅本人可见） |
 | PUT | `/api/auth/token` `{token}` | 更新本人游戏 token |
+| PUT | `/api/auth/relief` `{relief}` | 更新本人赋税减免（0~100，默认 5） |
 | GET | `/api/dict?type=city\|commodity` | 下拉数据源 |
 | GET | `/api/dict/summary` | 管理列表（负重、引用计数） |
 | POST | `/api/dict` `{type,name,burden?}` | 新增字典项 |
@@ -207,10 +208,10 @@ sgbhsdPriceShare/
 
 浏览器登录 https://www.wanyiwan.top/game/sgbhsd ，F12 → Application → Local Storage → 复制 `x-game-token-pcweb`（JWT，有效期约 12 天）填入「同步」或「定时」即可。token 保存在当前账号下（换账号登录只能看到自己的 token）；服务端自动完成：换取 authCode → SDK 登录 → 区服登录 → WebSocket 登录 → 逐城拉取行情（游戏以分为单位，落库 ÷100 为税前原价），并将各城税率写入 `city_taxes`（每次同步按最新税率覆盖）。
 
-- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数与游戏显示一致。切换减免只影响显示，不写库。
+- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%，随账号保存在服务端，换设备登录自动恢复）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数与游戏显示一致。切换减免只影响显示，不写库。
 - 手工录入 / Excel 导入填写的是自己看到税后价，服务端按当前减免与该城税率反推原价入库；税率未知的城池按原价处理（不折算）。
 - 每城仅 3 个商品可买入（2104 中 type=2），全部 25 个商品均可卖出（type=0/1）；非可购商品的买入价落库为 NULL。
-- 单次同步全部 42 城约 10 秒，返回 `{queried,saved,created,updated,newCities[],failed[]}`；字典里缺失的城池同步时自动登记（见 `newCities`）并清缓存广播刷新，赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
+- 单次同步全部 175 城约 30~60 秒，返回 `{queried,saved,created,updated,newCities[],failed[]}`；字典里缺失的城池同步时自动登记（见 `newCities`）并清缓存广播刷新，赛季未开放的州城可能失败并列入 `failed`，不影响其他城池。
 - 定时同步使用「定时」页保存 token 的账号的 token（`sync_settings.token_account_id`），到期换 token 后重新保存即可；旧版单行 token 仅作升级兜底。
 - 命令行：`node server/scripts/game-sync.js <token> [区服] [更新人]`，或 `--settings` 复用定时同步配置。
 
@@ -240,7 +241,7 @@ MySQL 数据位于 Docker 卷 `mysql-data`，Redis 位于 `redis-data`；`./data
 
 ## 九、测试与 CI
 
-- `npm test`：38 项测试，覆盖账号会话、字典、价格、并发冲突、导入导出、游戏协议解析、税率换算、报表、定时设置、健康检查（SQLite 临时库）。
+- `npm test`：39 项测试，覆盖账号会话、字典、价格、并发冲突、导入导出、游戏协议解析、税率与账号减免、报表、定时设置、健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务，验证健康检查、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

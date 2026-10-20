@@ -90,20 +90,24 @@ test('赋税换算：原价 ↔ 个人减免后的显示价（默认 5%）', () 
   assert.equal(clampRelief(null), 5);
 });
 
-test('城池映射表：42 城，metaId = 1100000 + nodeNo', () => {
-  assert.equal(CITY_MAP.length, 42);
+test('城池映射表：175 城，metaId = 1100000 + nodeNo', () => {
+  assert.equal(CITY_MAP.length, 175);
+  const seen = new Set();
   for (const c of CITY_MAP) {
     assert.ok(c.name && Number.isInteger(c.nodeNo) && c.nodeNo > 0, c.name);
     assert.equal(c.metaId, 1100000 + c.nodeNo, c.name);
+    assert.ok(!seen.has(c.nodeNo), `重复 nodeNo ${c.nodeNo}`);
+    seen.add(c.nodeNo);
   }
   const names = new Set(CITY_MAP.map(c => c.name));
   assert.ok(names.has('江陵') && names.has('上庸') && names.has('洛阳'));
+  assert.ok(names.has('绵竹') && names.has('成都') && names.has('晋阳'));
 });
 
 test('GET /api/game/meta 返回城池清单', async () => {
   const r = await api('/api/game/meta');
   assert.equal(r.status, 200);
-  assert.equal(r.json.data.cities.length, 42);
+  assert.equal(r.json.data.cities.length, 175);
 });
 
 test('POST /api/game/sync 参数校验', async () => {

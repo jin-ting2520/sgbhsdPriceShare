@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   password_hash TEXT    NOT NULL,
   token         TEXT,
   session_token TEXT    UNIQUE,
+  relief        REAL    NOT NULL DEFAULT 5,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
@@ -251,6 +252,7 @@ const MYSQL_SCHEMA = [
     password_hash VARCHAR(255) NOT NULL,
     token TEXT NULL,
     session_token VARCHAR(128) NULL,
+    relief DECIMAL(5,2) NOT NULL DEFAULT 5,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE KEY uk_accounts_name (name),
@@ -413,16 +415,25 @@ function migrateSqlite() {
   if (!hasCol('dict_items', 'burden')) sqlite.exec('ALTER TABLE dict_items ADD COLUMN burden REAL');
   if (!hasCol('prices', 'operator')) sqlite.exec('ALTER TABLE prices ADD COLUMN operator TEXT');
   if (!hasCol('sync_settings', 'token_account_id')) sqlite.exec('ALTER TABLE sync_settings ADD COLUMN token_account_id INTEGER');
+  if (!hasCol('accounts', 'relief')) sqlite.exec('ALTER TABLE accounts ADD COLUMN relief REAL NOT NULL DEFAULT 5');
 }
 
 /** 存量 MySQL 库补列（老版本升级） */
 async function migrateMysql() {
-  const [cols] = await pool.query(
-    'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
-    [MYSQL_CFG.database, 'sync_settings']
-  );
-  if (!cols.some(c => c.name === 'token_account_id')) {
+  const colsOf = async table => {
+    const [cols] = await pool.query(
+      'SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?',
+      [MYSQL_CFG.database, table]
+    );
+    return cols;
+  };
+  const syncCols = await colsOf('sync_settings');
+  if (!syncCols.some(c => c.name === 'token_account_id')) {
     await pool.query('ALTER TABLE sync_settings ADD COLUMN token_account_id INT NULL');
+  }
+  const accountCols = await colsOf('accounts');
+  if (!accountCols.some(c => c.name === 'relief')) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN relief DECIMAL(5,2) NOT NULL DEFAULT 5');
   }
 }
 

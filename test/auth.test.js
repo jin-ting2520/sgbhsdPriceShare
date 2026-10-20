@@ -90,6 +90,31 @@ test('游戏 token 只对本人可见', async () => {
   assert.equal(anon.status, 401);
 });
 
+test('赋税减免保存在各自的账号下', async () => {
+  const a = await login('甲玩家', 'pass-1111');
+  const b = await login('乙玩家', 'pass-2222');
+  assert.equal(a.relief, 5);
+
+  const save = await api('/api/auth/relief', { method: 'PUT', body: { relief: 12 }, session: a.session });
+  assert.equal(save.status, 200);
+  assert.equal(save.json.data.relief, 12);
+
+  const meA = await api('/api/auth/me', { session: a.session });
+  assert.equal(meA.json.data.relief, 12);
+  const meB = await api('/api/auth/me', { session: b.session });
+  assert.equal(meB.json.data.relief, 5, '乙账号不受影响');
+
+  const again = await login('甲玩家', 'pass-1111');
+  assert.equal(again.relief, 12, '重新登录后仍保留');
+
+  const clamped = await api('/api/auth/relief', { method: 'PUT', body: { relief: 120 }, session: b.session });
+  assert.equal(clamped.json.data.relief, 100);
+  const bad = await api('/api/auth/relief', { method: 'PUT', body: {}, session: b.session });
+  assert.equal(bad.status, 400);
+  const anon = await api('/api/auth/relief', { method: 'PUT', body: { relief: 5 } });
+  assert.equal(anon.status, 401);
+});
+
 test('定时同步绑定保存 token 的账号，其他账号不可见', async () => {
   const a = await login('甲玩家', 'pass-1111');
   const b = await login('乙玩家', 'pass-2222');

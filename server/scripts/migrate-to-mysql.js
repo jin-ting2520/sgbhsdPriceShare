@@ -66,7 +66,11 @@ if (!fs.existsSync(srcFile)) {
                          FROM city_taxes t
                          JOIN servers s ON s.id = t.server_id
                          JOIN dict_items c ON c.id = t.city_id`);
-  const accountRows = all(`SELECT name, password_hash AS passwordHash, token, session_token AS sessionToken,
+  const accountCols = (() => {
+    try { return raw.prepare('PRAGMA table_info(accounts)').all().map(c => c.name); } catch { return []; }
+  })();
+  const reliefExpr = accountCols.includes('relief') ? 'relief' : '5 AS relief';
+  const accountRows = all(`SELECT name, password_hash AS passwordHash, token, session_token AS sessionToken, ${reliefExpr},
                                   created_at AS createdAt, updated_at AS updatedAt FROM accounts`);
   const settingsRows = all(`SELECT s.enabled, s.cron_expr AS cron, s.token, s.server_name AS server, s.operator,
                                    s.last_run_at AS lastRunAt, s.last_status AS lastStatus, s.last_message AS lastMessage,
@@ -152,9 +156,9 @@ if (!fs.existsSync(srcFile)) {
     const existing = await db.get('SELECT id FROM accounts WHERE name = ?', [a.name]);
     if (existing) continue;
     await db.run(
-      `INSERT INTO accounts (name, password_hash, token, session_token, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [a.name, a.passwordHash, a.token || null, a.sessionToken || null, a.createdAt || t, a.updatedAt || t]
+      `INSERT INTO accounts (name, password_hash, token, session_token, relief, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [a.name, a.passwordHash, a.token || null, a.sessionToken || null, a.relief == null ? 5 : a.relief, a.createdAt || t, a.updatedAt || t]
     );
     inserted.accounts += 1;
   }

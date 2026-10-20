@@ -23,8 +23,8 @@ try {
   throw new Error(`缺少 server/game/data/city_map.json（需随仓库提交，Docker 构建依赖它）: ${err.message}`);
 }
 
-const CITY_QUERY_TIMEOUT_MS = 8000;
-const CITIES_PER_SYNC_LIMIT = 100;
+const CITY_QUERY_TIMEOUT_MS = 4000;
+const CITIES_PER_SYNC_LIMIT = 300;
 const QUERY_CONCURRENCY = 4;
 
 /** 商品配置 id（1-25 及 201-225 复刻）→ 商品名 */

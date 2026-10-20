@@ -90,7 +90,7 @@ createApp({
     const commodities = ref([])
     const serverList = ref([])
 
-    /* ---------- 个人赋税减免（本机缓存，默认 5%） ---------- */
+    /* ---------- 个人赋税减免（随账号保存，本地缓存兜底，默认 5%） ---------- */
     const taxRelief = ref(clampRelief(localStorage.getItem(RELIEF_KEY)))
     const savedRelief = ref(taxRelief.value)
     const currentTax = ref(null)
@@ -153,6 +153,9 @@ createApp({
         sessionOk.value = true
         nickname.value = data.name
         accountToken.value = data.token || ''
+        taxRelief.value = clampRelief(data.relief)
+        savedRelief.value = taxRelief.value
+        try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
         passwordInput.value = ''
         try {
           localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: data.name, session: data.session }))
@@ -332,7 +335,14 @@ createApp({
         }
       }
       savedRelief.value = next
-      localStorage.setItem(RELIEF_KEY, String(next))
+      try { localStorage.setItem(RELIEF_KEY, String(next)) } catch (e) { /* 忽略隐私模式等 */ }
+      if (entered.value) {
+        try {
+          await api('/api/auth/relief', { method: 'PUT', body: { relief: next } })
+        } catch (e) {
+          ElMessage.error(`赋税减免保存失败：${e.message}`)
+        }
+      }
       if (queried.value) await doFetch(false)
     }
 
@@ -1324,6 +1334,9 @@ createApp({
         try {
           const me = await api('/api/auth/me')
           accountToken.value = me.token || ''
+          taxRelief.value = clampRelief(me.relief)
+          savedRelief.value = taxRelief.value
+          try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
           if (me.name && me.name !== nickname.value) {
             nickname.value = me.name
             try { localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: me.name, session: accountSession })) } catch (e) { /* 忽略 */ }
