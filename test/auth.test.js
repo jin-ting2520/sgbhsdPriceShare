@@ -187,6 +187,35 @@ test('后台配置卡密提示与 token 教程，公开接口返回清洗后的 
   assert.equal(badDate.status, 400);
 });
 
+test('登录与注册模式分离：登录不创建账号，注册不使用已有昵称', async () => {
+  rateLimit.reset();
+  const anonymous = createClient(base);
+  const missing = await anonymous.login({ name: '模式分离', password: 'pass-1234', mode: 'login' });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.json.code, 40401);
+  assert.equal(await accountId('模式分离'), undefined, '登录模式不应创建账号');
+
+  const [code] = await issueKeys(admin, 'day', 1);
+  const registered = await anonymous.login({
+    name: '模式分离', password: 'pass-1234', mode: 'register', key: code,
+  });
+  assert.equal(registered.status, 200, registered.json && registered.json.message);
+  assert.equal(registered.json.data.created, true);
+
+  const [unusedCode] = await issueKeys(admin, 'day', 1);
+  const duplicate = await createClient(base).login({
+    name: '模式分离', password: 'pass-1234', mode: 'register', key: unusedCode,
+  });
+  assert.equal(duplicate.status, 400);
+  assert.equal(duplicate.json.code, 40012);
+  const keyRow = await db.get('SELECT account_id FROM invite_keys WHERE code = ?', [unusedCode]);
+  assert.equal(keyRow.account_id, null, '注册已有昵称不应消耗卡密');
+
+  const back = await createClient(base).login({ name: '模式分离', password: 'pass-1234', mode: 'login' });
+  assert.equal(back.status, 200);
+  assert.equal(back.json.data.created, false);
+});
+
 test('永久卡密 expiresAt 为空，1 月卡密为 30 天', async () => {
   const forever = await registerAccount(base, admin, { name: '永久号', type: 'forever' });
   const me = await forever.get('/api/auth/me');

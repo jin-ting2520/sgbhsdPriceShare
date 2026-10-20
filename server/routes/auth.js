@@ -49,9 +49,10 @@ function renewBaseMs(expiresAt) {
   return Number.isFinite(ts) && ts > Date.now() ? ts : Date.now();
 }
 
-/** POST /api/auth/login { name, password, key?, deviceId, deviceName, kick? }
- *  已存在账号：密码登录（多设备上限内建会话，到期可凭新卡密续期）；
- *  新昵称：卡密启用前可直接试用，启用后必须携带有效卡密注册。 */
+/** POST /api/auth/login { name, password, key?, mode?, deviceId, deviceName, kick? }
+ *  mode=login：仅允许已注册账号登录，绝不创建账号；
+ *  mode=register：仅允许新昵称注册，已有账号返回提示；
+ *  未传 mode 时保留旧的自动识别行为。 */
 router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(async (req, res) => {
   const body = req.body || {};
   const { name, password } = readCredentials(body);
@@ -63,9 +64,13 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
   const deviceName = String(body.deviceName || '').trim().slice(0, 80);
   const settings = await getAppSettings();
   const keyCode = String(body.key || '').trim();
+  const mode = body.mode === 'login' || body.mode === 'register' ? body.mode : 'auto';
 
   const existing = await getAccountByName(name);
   if (existing) {
+    if (mode === 'register') {
+      return fail(res, 400, '该昵称已注册，请直接登录', 40012);
+    }
     if (!(await verifyPassword(password, existing.password_hash))) {
       return fail(res, 401, '昵称或密码不正确');
     }
@@ -125,6 +130,7 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
   }
 
   // ---------- 新账号：卡密注册 / 限时试用 ----------
+  if (mode === 'login') return fail(res, 404, '账号不存在，请先注册', 40401);
   if (!settings.registrationEnabled) return fail(res, 403, '注册通道已关闭，请联系管理员', 40303);
   if (settings.keyRequired && !keyCode) {
     return fail(res, 400, '卡密已启用，首次注册需要输入卡密', 40010);

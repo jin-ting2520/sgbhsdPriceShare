@@ -206,6 +206,10 @@ createApp({
     const nicknameInput = ref('')
     const passwordInput = ref('')
     const keyInput = ref('')
+    const authMode = ref('login')
+    const renewVisible = ref(false)
+    const renewKey = ref('')
+    const renewMessage = ref('')
     const accountToken = ref('')
     const accountServer = ref('')
     const allowSyncServer = ref(false)
@@ -240,8 +244,13 @@ createApp({
 
     const keyRequiredAtText = computed(() => String(keyRequiredAt.value || '').slice(0, 16))
     const keyPlaceholder = computed(() => (keyRequired.value
-      ? '卡密（必填；到期续期也在此填写）'
+      ? '卡密（注册必填，如 ABCD-EFGH-JKLM-NPQR）'
       : '卡密（试用期可留空，如 ABCD-EFGH-JKLM-NPQR）'))
+    const authHint = computed(() => (authMode.value === 'login'
+      ? '已有账号直接输入昵称和密码登录；没有账号请先注册。'
+      : (keyRequired.value
+        ? '注册需要填写有效卡密；已有账号请返回登录，试用结束可在登录页续期。'
+        : `注册可先不填卡密试用至 ${keyRequiredAtText.value}，也可填写卡密直接开通。`)))
     const expirySoon = computed(() => {
       if (!accountHasKey.value || !accountExpiresAt.value) return false
       const ts = Date.parse(`${String(accountExpiresAt.value).replace(' ', 'T')}+08:00`)
@@ -318,20 +327,41 @@ createApp({
       dataLoaded.value = true
     }
 
-    /** 点击「进入」：已注册账号用密码登录；卡密启用前新昵称可直接试用 */
-    const enterSite = async (opts = {}) => {
+    const setAuthMode = mode => {
+      if (authMode.value === mode) return
+      authMode.value = mode
+      passwordInput.value = ''
+      keyInput.value = ''
+      renewVisible.value = false
+    }
+
+    const openRenew = () => {
+      if (!nicknameInput.value.trim() || !passwordInput.value) {
+        ElMessage.warning('请先填写昵称和密码，再输入新卡密续期')
+        return
+      }
+      renewMessage.value = '输入新卡密，有效期将从当前到期时间顺延；永久卡密直接生效。'
+      renewKey.value = ''
+      renewVisible.value = true
+    }
+
+    /** 登录 / 注册共用提交：只有注册模式读取卡密，登录模式不发送 key */
+    const submitAuth = async ({ mode = authMode.value, key = '', kick = false } = {}) => {
       const name = nicknameInput.value.trim().replace(/\s+/g, ' ')
       const password = passwordInput.value
-      const key = keyInput.value.trim()
       if (!name) { ElMessage.warning('请输入你的三国冰河时代昵称'); return }
       if (name.length > 20) { ElMessage.warning('昵称不能超过 20 个字符'); return }
-      if (!password) { ElMessage.warning('请输入密码（新账号注册时自定义）'); return }
+      if (!password) { ElMessage.warning(mode === 'register' ? '请设置密码' : '请输入密码'); return }
       if (password.length < 4) { ElMessage.warning('密码至少 4 位'); return }
+      if (mode === 'register' && keyRequired.value && !key) {
+        ElMessage.warning('卡密已启用，注册需要填写卡密')
+        return
+      }
       entering.value = true
       try {
-        const body = { name, password, deviceId: DEVICE_ID, deviceName: DEVICE_NAME }
+        const body = { name, password, mode, deviceId: DEVICE_ID, deviceName: DEVICE_NAME }
         if (key) body.key = key
-        if (opts.kick) body.kick = 'all'
+        if (kick) body.kick = 'all'
         const data = await api('/api/auth/login', { method: 'POST', body })
         accountSession = data.session
         sessionOk.value = true
@@ -346,6 +376,8 @@ createApp({
         try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
         passwordInput.value = ''
         keyInput.value = ''
+        renewKey.value = ''
+        renewVisible.value = false
         try {
           localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: data.name, session: data.session }))
         } catch (e) { /* 忽略隐私模式等 */ }
@@ -374,16 +406,40 @@ createApp({
                 customClass: 'pre-wrap-confirm',
               }
             )
-            entering.value = false
-            await enterSite({ kick: true })
+            await submitAuth({ mode, key, kick: true })
             return
           } catch (err) { /* 用户取消 */ }
+        } else if (e.code === 40301 && mode === 'login') {
+          renewMessage.value = e.message
+          renewKey.value = key
+          renewVisible.value = true
+        } else if (e.code === 40401) {
+          authMode.value = 'register'
+          keyInput.value = ''
+          ElMessage.info('该昵称尚未注册，请先注册')
+        } else if (e.code === 40012) {
+          authMode.value = 'login'
+          keyInput.value = ''
+          ElMessage.info('该昵称已注册，请直接登录')
         } else {
           ElMessage.error(e.message)
         }
       } finally {
         entering.value = false
       }
+    }
+
+    const enterSite = () => {
+      if (authMode.value === 'register') {
+        return submitAuth({ mode: 'register', key: keyInput.value.trim() })
+      }
+      return submitAuth({ mode: 'login' })
+    }
+
+    const submitRenew = () => {
+      const key = renewKey.value.trim()
+      if (!key) { ElMessage.warning('请输入卡密'); return }
+      return submitAuth({ mode: 'login', key })
     }
 
     /** 右上角「退出登录」：注销当前会话，回到入口 */
@@ -401,6 +457,9 @@ createApp({
       nicknameInput.value = ''
       passwordInput.value = ''
       keyInput.value = ''
+      authMode.value = 'login'
+      renewVisible.value = false
+      renewKey.value = ''
       syncToken.value = ''
       syncResult.value = null
       devicesVisible.value = false
@@ -416,6 +475,8 @@ createApp({
       accountExpiresAt.value = null
       accountHasKey.value = true
       expiryLoaded.value = false
+      authMode.value = 'login'
+      renewVisible.value = false
       try { localStorage.removeItem(ACCOUNT_KEY) } catch (e) { /* 忽略 */ }
       ElMessage.warning('登录已失效，请重新登录')
     }
@@ -1474,6 +1535,7 @@ createApp({
     return {
       // 账号入口
       nickname, nicknameInput, passwordInput, keyInput, entering, entered, enterSite, switchAccount,
+      authMode, setAuthMode, authHint, renewVisible, renewKey, renewMessage, openRenew, submitRenew,
       accountServer, allowSyncServer, deviceName,
       keyRequired, keyRequiredAtText, keyPlaceholder, keyHelpHtml, tokenHelpHtml,
       expiryText, expiryTooltip, expiryTagType,

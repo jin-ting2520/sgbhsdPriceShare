@@ -87,7 +87,7 @@ npm install --registry=https://registry.npmmirror.com   # 国内网络建议
 npm run build:ui   # 可选：生成混淆产物；不做则回退源码
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 50 项后端/账号/设备/游戏/报表测试
+npm test           # 51 项后端/账号/设备/游戏/报表测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -103,6 +103,7 @@ ADMIN_PASSWORD='your-strong-password' npm start
 
 ## 四、账号、卡密与设备规则
 
+- 登录与注册已分栏：登录只需昵称 + 密码，不显示卡密输入；注册才显示卡密与卡密帮助；卡密到期/试用结束可在登录页点「卡密续期」或登录后按提示续期。
 - 卡密格式 `XXXX-XXXX-XXXX-XXXX`，字符集去掉易混淆字符（无 0/O/1/I）；生成时记录批次、备注与类型。
 - `day` = 使用后 1 天，`month` = 使用后 30 天，`forever` = 无到期时间；到期后登录返回 40301，在线会话立即失效，数据保留。
 - 后台「卡密启用时间」默认 `2026-10-22 00:00:00`。启用前新账号可不填卡密注册，账号无卡密、到期时间为启用时间，界面显示「试用中」；启用后新注册必须填卡密，已有试用账号也需补卡密才能登录。
@@ -177,7 +178,7 @@ sgbhsdPriceShare/
 │   ├── manifest.webmanifest
 │   └── icons/icon.svg
 ├── scripts/build-ui.js     # esbuild 打包 + javascript-obfuscator 混淆
-├── test/                   # api / auth / game / reports 共 50 项
+├── test/                   # api / auth / game / reports 共 51 项
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -205,7 +206,7 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（驱动、缓存、WS 人数、调度状态） |
 | GET | `/api/public/config` | 公开配置：卡密是否启用、启用时间、注册开关、公告、卡密提示与 token 教程的已清洗 HTML |
-| POST | `/api/auth/login` | `{name,password,key?,deviceId,deviceName,kick?}`；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；超设备上限返回 `40910` |
+| POST | `/api/auth/login` | `{name,password,key?,mode?,deviceId,deviceName,kick?}`；`mode=login` 只登录已有账号（未知账号 `40401`），`mode=register` 只注册新账号（已有昵称 `40012`）；不传 `mode` 保留自动识别；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；超设备上限返回 `40910` |
 | POST | `/api/auth/logout` | 注销当前会话 |
 | GET | `/api/auth/me` | 当前账号、到期时间、游戏 token（仅本人）、赋税减免、当前区服、`allowSyncServer` |
 | PUT | `/api/auth/relief` | 更新赋税减免（0~100） |
@@ -235,7 +236,7 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | GET | `/api/sync-settings/logs` | 本账号同步记录 |
 | GET | `/api/reports/movers`、`/heat` | 涨跌幅 / 热度 |
 
-错误码：`0` 成功；`40010` 卡密启用后新账号缺卡密；`40111` 设备不匹配；`40112` 签名无效；`40301` 卡密到期或试用结束；`40302` 账号封禁；`40303` 注册关闭；`40901` 字典重复/被引用；`40902` 区服被引用；`40903` 价格并发冲突；`40910` 设备数超限；`50301` 后台未启用。
+错误码：`0` 成功；`40010` 卡密启用后新账号缺卡密；`40012` 注册时昵称已存在；`40111` 设备不匹配；`40112` 签名无效；`40301` 卡密到期或试用结束；`40302` 账号封禁；`40303` 注册关闭；`40401` 登录时账号不存在；`40901` 字典重复/被引用；`40902` 区服被引用；`40903` 价格并发冲突；`40910` 设备数超限；`50301` 后台未启用。
 
 ### WebSocket `/ws`
 
@@ -262,7 +263,7 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 
 Chrome / Edge 在 Application → Local Storage；Firefox 在 存储 → 本地存储。token 一般可用约 12 天，失效后重新登录并重新复制。token 等同于游戏账号登录凭证，请勿发给他人或提交到仓库。
 
-以上为默认教程。管理员可在后台「设置 → token 获取教程」用 Markdown 自定义文字、链接和图片，登录页的「如何获取卡密」提示同样可配置；服务端会过滤脚本、事件属性等危险 HTML，外链图片需使用 HTTPS。
+以上为默认教程。管理员可在后台「设置 → token 获取教程」用 Markdown 自定义文字、链接和图片，注册页的「如何获取卡密」提示同样可配置；服务端会过滤脚本、事件属性等危险 HTML，外链图片需使用 HTTPS。
 
 ### 区服处理
 
@@ -325,7 +326,7 @@ docker compose exec app npm run db:migrate -- --force # 目标库已有数据时
 
 ## 十二、测试与 CI
 
-- `npm test`：50 项，覆盖账号/卡密/试用启用/续期/到期/封禁、设备上限与踢出、签名与重放、数据隔离、字典只读、价格并发、导入导出、游戏协议解析、税率、报表、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
+- `npm test`：51 项，覆盖账号/卡密/试用启用/续期/到期/封禁、设备上限与踢出、签名与重放、数据隔离、字典只读、价格并发、导入导出、游戏协议解析、税率、报表、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务（SQLite 默认使用临时库），验证卡密注册、HMAC 签名请求、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

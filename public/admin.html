@@ -271,7 +271,7 @@
 
         <el-tab-pane label="区服" name="servers">
           <div class="toolbar">
-            <el-input v-model="newServer" placeholder="新区服名称（如 1344）" style="width:180px" maxlength="50"
+            <el-input v-model="newServer" placeholder="新区服编号（纯数字，如 1336）" style="width:220px" maxlength="50"
               @keyup.enter="addServer"></el-input>
             <el-button type="primary" @click="addServer">新增</el-button>
             <el-button @click="loadServers">刷新</el-button>

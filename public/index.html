@@ -29,26 +29,48 @@
     <div class="login-card">
       <div class="login-logo">价</div>
       <div class="login-title">三国冰河时代富甲天下跑商价格分享</div>
+      <div class="login-mode">
+        <button type="button" :class="{ active: authMode === 'login' }" @click="setAuthMode('login')">登 录</button>
+        <button type="button" :class="{ active: authMode === 'register' }" @click="setAuthMode('register')">注 册</button>
+      </div>
 <el-input v-model="nicknameInput" placeholder="输入你的三国冰河时代昵称" size="large"
         maxlength="20" show-word-limit clearable @keyup.enter="enterSite"></el-input>
-      <el-input v-model="passwordInput" type="password" show-password placeholder="密码（新账号自行设置，至少 4 位）"
+      <el-input v-model="passwordInput" type="password" show-password :placeholder="authMode === 'register' ? '设置密码（至少 4 位）' : '输入密码'"
         size="large" style="margin-top:10px" maxlength="64" @keyup.enter="enterSite"></el-input>
-      <el-input v-model="keyInput" :placeholder="keyPlaceholder"
+      <el-input v-if="authMode === 'register'" v-model="keyInput" :placeholder="keyPlaceholder"
         size="large" style="margin-top:10px" maxlength="32" clearable @keyup.enter="enterSite"></el-input>
-      <el-collapse v-if="keyHelpHtml" class="login-key-help">
+      <el-collapse v-if="authMode === 'register' && keyHelpHtml" class="login-key-help">
         <el-collapse-item title="如何获取卡密？" name="key-help">
           <div class="md-help" v-html="keyHelpHtml"></div>
         </el-collapse-item>
       </el-collapse>
       <el-button type="primary" size="large" style="width:100%;margin-top:14px"
-        :loading="entering" @click="enterSite">进 入</el-button>
+        :loading="entering" @click="enterSite">{{ authMode === 'login' ? '登 录' : '注册并进入' }}</el-button>
+      <p class="login-switch" v-if="authMode === 'login'">
+        还没有账号？<button type="button" @click="setAuthMode('register')">立即注册</button>
+        <span class="sep">·</span>
+        <button type="button" @click="openRenew">卡密续期</button>
+      </p>
+      <p class="login-switch" v-else>
+        已有账号？<button type="button" @click="setAuthMode('login')">返回登录</button>
+      </p>
       <p class="login-hint">
-        {{ keyRequired ? '卡密已启用：新账号必须填写卡密；试用结束或卡密到期的账号输入新卡密即可继续使用。' : `试用期：新账号可不填卡密直接注册，试用至 ${keyRequiredAtText}。` }}<br>
+        {{ authHint }}<br>
         每个账号默认最多同时登录 3 台设备，可在「设备」中查看并退出其他设备。<br>
         价格、游戏 token、定时同步均按账号独立保存，互不可见。
       </p>
       <p class="login-hint" style="margin-top:6px">本设备：{{ deviceName }}</p>
     </div>
+
+    <el-dialog v-model="renewVisible" title="卡密续期" width="380px" append-to-body>
+      <p class="renew-tip">{{ renewMessage }}</p>
+      <el-input v-model="renewKey" placeholder="输入新卡密，如 ABCD-EFGH-JKLM-NPQR"
+        maxlength="32" clearable @keyup.enter="submitRenew"></el-input>
+      <template #footer>
+        <el-button @click="renewVisible = false">取 消</el-button>
+        <el-button type="primary" :loading="entering" @click="submitRenew">续期并登录</el-button>
+      </template>
+    </el-dialog>
   </div>
 
   <!-- ================= 主界面 ================= -->
@@ -99,7 +121,7 @@
             <el-form-item>
               <template #label><span class="req-star">区服</span>（必填）</template>
 <el-autocomplete :model-value="form.server" :fetch-suggestions="searchServers"
-                placeholder="纯数字，如 1344" clearable style="width:100%"
+                placeholder="纯数字，如 1336" clearable style="width:100%"
                 @update:model-value="v => form.server = String(v).replace(/\D/g, '')"
                 @keyup.enter="onQuery"></el-autocomplete>
             </el-form-item>
@@ -284,7 +306,7 @@
       <template #header><b style="font-size:14px">操作说明</b></template>
       <ol class="help-steps">
         <li><b>登录 / 注册</b>：已注册账号输入昵称与密码登录；新账号须填写管理员发放的卡密（一次性使用）；登录会话缓存在本机，刷新无需重复输入。</li>
-        <li><b>选择区服</b>：输入纯数字区服编号（如 1344），支持历史联想；保存或同步后会记住为「当前区服」。</li>
+        <li><b>选择区服</b>：输入纯数字区服编号（如 1336），支持历史联想；保存或同步后会记住为「当前区服」。</li>
         <li><b>选择城池</b>：必选项，下拉搜索（字典由管理员统一维护）。</li>
         <li><b>选择商品</b>：可选项，留空时商品列固定展示全部商品；下拉项显示每个商品的负重。</li>
         <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>
@@ -635,13 +657,14 @@
       title="管理员尚未配置 token 获取教程，请联系管理员。"></el-alert>
     <el-form label-position="top">
       <el-form-item :label="allowSyncServer ? '区服（可手动指定）' : '区服（由登录 token 自动识别，仅展示）'">
-        <el-input v-model="syncServer" :readonly="!allowSyncServer" placeholder="粘贴 token 后自动识别">
+        <el-input v-model="syncServer" :readonly="!allowSyncServer"
+          :placeholder="allowSyncServer ? '纯数字，如 1336；留空自动识别' : '自动识别，如 1336'">
           <template #suffix>
             <span v-if="syncServerLoading" style="font-size:12px;color:var(--ink-2)">识别中…</span>
             <el-button v-else-if="allowSyncServer" link type="primary" size="small" @click="resolveSyncServer">自动识别</el-button>
           </template>
         </el-input>
-        <div class="hint-line" v-if="allowSyncServer">管理员已为本账号开启区服参数权限：可手动修改区服，留空则按 token 自动识别；仅影响价格落库的区服名。</div>
+        <div class="hint-line" v-if="allowSyncServer">管理员已为本账号开启区服参数权限：可手动填写区服编号（纯数字，如 1336），留空则按 token 自动识别；仅影响价格落库的区服编号。</div>
         <div class="hint-line" v-else>本账号未开启区服参数权限，区服仅用于界面展示；同步时始终按 token 所属区服自动写入。</div>
       </el-form-item>
       <el-form-item label="登录 token">
@@ -686,13 +709,13 @@
         </el-form-item>
         <el-form-item label="区服参数">
           <template v-if="settings.allowSyncServer">
-            <el-input v-model="settings.serverOverride" maxlength="50" placeholder="留空按 token 自动识别" style="width:220px"></el-input>
+            <el-input v-model="settings.serverOverride" maxlength="50" placeholder="纯数字，如 1336；留空自动识别" style="width:260px"></el-input>
             <el-tag type="info" effect="plain" style="margin-left:8px">当前：{{ settings.server || '等待识别' }}</el-tag>
-            <div class="hint-line">管理员已为本账号开启区服参数权限：可手动指定定时同步落库的区服名，留空则自动识别；仅影响区服名，赛季节点仍由 token 决定。</div>
+            <div class="hint-line">管理员已为本账号开启区服参数权限：可手动填写定时同步的区服编号（纯数字，如 1336），留空则自动识别；仅影响区服编号，赛季节点仍由 token 决定。</div>
           </template>
           <template v-else>
             <el-tag type="info" effect="plain">{{ settings.server || (settings.hasToken ? '等待识别' : '尚未保存 token') }}</el-tag>
-            <div class="hint-line">本账号未开启区服参数权限，区服由登录 token 自动识别，仅展示；保存后首次同步会刷新。</div>
+            <div class="hint-line">本账号未开启区服参数权限，区服由登录 token 自动识别（纯数字编号），仅展示；保存后首次同步会刷新。</div>
           </template>
         </el-form-item>
         <el-form-item label="更新人">
@@ -753,7 +776,7 @@
   <!-- ================= 数据报表弹窗 ================= -->
   <el-dialog v-model="reportVisible" title="数据报表" width="1020px" :fullscreen="isMobile" top="5vh">
     <div class="report-toolbar">
-      <el-input v-model="reportServer" placeholder="区服，如 1344" style="width:150px"
+      <el-input v-model="reportServer" placeholder="纯数字，如 1336" style="width:150px"
         @keyup.enter="loadReport"></el-input>
       <el-button :loading="reportLoading" @click="loadReport">刷新</el-button>
     </div>
