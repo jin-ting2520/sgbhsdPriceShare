@@ -729,8 +729,30 @@ async function migrateMysql() {
   }
 
   if (!(await hasCol('city_taxes', 'account_id'))) {
+    // 旧主键 (server_id, city_id) 同时支撑外键，必须先解除外键再改主键
+    const [cityTaxFks] = await pool.query(
+      `SELECT CONSTRAINT_NAME AS name FROM information_schema.TABLE_CONSTRAINTS
+        WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'city_taxes' AND CONSTRAINT_TYPE = 'FOREIGN KEY'`
+    );
+    for (const fk of cityTaxFks) {
+      const name = String(fk.name).replace(/`/g, '``');
+      await pool.query(`ALTER TABLE city_taxes DROP FOREIGN KEY \`${name}\``);
+    }
     await pool.query('ALTER TABLE city_taxes DROP PRIMARY KEY, ADD COLUMN account_id INT NOT NULL DEFAULT 0 FIRST, ADD PRIMARY KEY (account_id, server_id, city_id)');
     await pool.query(`UPDATE city_taxes SET account_id = ${legacyAccount}`);
+  }
+  const [existingCityTaxFks] = await pool.query(
+    `SELECT CONSTRAINT_NAME AS name FROM information_schema.TABLE_CONSTRAINTS
+      WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'city_taxes'
+        AND CONSTRAINT_TYPE = 'FOREIGN KEY'
+        AND CONSTRAINT_NAME IN ('fk_city_taxes_server', 'fk_city_taxes_city')`
+  );
+  const cityTaxFkNames = new Set(existingCityTaxFks.map(fk => fk.name));
+  if (!cityTaxFkNames.has('fk_city_taxes_server')) {
+    await pool.query('ALTER TABLE city_taxes ADD CONSTRAINT fk_city_taxes_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE');
+  }
+  if (!cityTaxFkNames.has('fk_city_taxes_city')) {
+    await pool.query('ALTER TABLE city_taxes ADD CONSTRAINT fk_city_taxes_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE');
   }
 
   if (!(await hasCol('sync_settings', 'account_id'))) {
