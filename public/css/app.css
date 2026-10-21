@@ -28,11 +28,17 @@ body {
 /* ---------------- 顶栏 ---------------- */
 .topbar { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: linear-gradient(180deg, #fff, #fbfaf7); border-bottom: 1px solid var(--line); }
 .topbar .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.topbar .brand > div { min-width: 0; }
 .topbar .logo { width: 34px; height: 34px; flex: none; border-radius: 9px; background: linear-gradient(135deg, var(--accent), #5d1610); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 15px; letter-spacing: 1px; }
-.topbar .title { font-size: 16px; font-weight: 700; white-space: nowrap; }
+.topbar .title { font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar .subtitle { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .topbar .spacer { flex: 1; }
+.topbar-status { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.topbar .tools .el-button + .el-button { margin-left: 0; }
+.account-btn { flex: none; }
+.account-btn__name { display: inline-block; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.account-btn__exit { margin-left: 3px; font-size: 10px; color: #999; }
 .master-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .master-badge { flex: none; }
 
@@ -245,9 +251,34 @@ tr.row-dirty > td { background: #fffaf3 !important; }
 
 /* ---------------- 响应式 ---------------- */
 @media (max-width: 768px) {
-  .topbar { padding: 9px 12px; gap: 8px; }
-  .topbar .title { font-size: 15px; }
+  .topbar {
+    flex-wrap: wrap; align-items: center;
+    gap: 6px 8px; padding: 8px 10px;
+  }
+  .topbar .brand { flex: 1 1 0; gap: 8px; }
+  .topbar .logo { width: 32px; height: 32px; }
+  .topbar .title { font-size: 14px; max-width: 100%; }
   .topbar .subtitle { display: none; }
+  .topbar .spacer { display: none; }
+  .account-btn { order: 2; margin-left: 0; }
+  .account-btn__name { max-width: 88px; }
+  .topbar-status {
+    order: 3; flex: 1 0 100%; gap: 8px;
+    flex-wrap: nowrap; overflow-x: auto;
+    padding-bottom: 1px; scrollbar-width: none;
+  }
+  .topbar-status::-webkit-scrollbar { display: none; }
+  .topbar .tools {
+    order: 4; flex: 1 0 100%;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
+    gap: 6px;
+  }
+  .topbar .tools .el-button {
+    width: 100%; margin-left: 0;
+    padding-left: 4px; padding-right: 4px;
+  }
+  .expiry-full { display: none; }
+  .topbar .expiry-tag .expiry-short { display: inline; }
   .master-switch__label { display: none; }
   .container { padding: 12px 10px 64px; }
   .desktop-table { display: none; }
@@ -325,3 +356,4 @@ tr.row-dirty > td { background: #fffaf3 !important; }
 .settings-tip { width: 100%; margin-top: 4px; line-height: 1.6; }
 .settings-preview-bar { width: 100%; margin-top: 8px; }
 .expiry-tag { white-space: nowrap; }
+.expiry-short { display: none; }

@@ -313,6 +313,15 @@ createApp({
       if (!accountExpiresAt.value) return '永久有效'
       return `有效期至 ${String(accountExpiresAt.value).slice(0, 16)}`
     })
+    const expiryShortText = computed(() => {
+      if (!expiryLoaded.value) return '到期时间…'
+      if (!accountHasKey.value) return '试用中'
+      if (!accountExpiresAt.value) return '永久有效'
+      const ts = Date.parse(`${String(accountExpiresAt.value).replace(' ', 'T')}+08:00`)
+      if (!Number.isFinite(ts)) return '有效期'
+      if (ts <= Date.now()) return '已到期'
+      return `剩余 ${Math.max(1, Math.ceil((ts - Date.now()) / 86400000))} 天`
+    })
     const expiryTooltip = computed(() => {
       if (!expiryLoaded.value) return '正在读取卡密到期时间'
       if (!accountHasKey.value) return `试用期至 ${keyRequiredAtText.value}；启用卡密后需输入卡密继续使用`
@@ -1696,7 +1705,7 @@ createApp({
       openServerPicker, saveServer, allowSyncServer, deviceName,
       masterAccountId, masterAccountName, isMaster, masterPricesAllowed, viewMasterPrices, masterSaving, onViewMasterChange,
       keyRequired, keyRequiredAtText, keyPlaceholder, keyHelpHtml, tokenHelpHtml,
-      expiryText, expiryTooltip, expiryTagType,
+      expiryText, expiryShortText, expiryTooltip, expiryTagType,
       // 基础
       isMobile, form, cities, commodities, serverList, rows, queried, loading, sharedCount,
       // 赋税减免

@@ -85,28 +85,33 @@
       </div>
     </div>
     <div class="spacer"></div>
-    <el-tooltip v-if="masterAccountName && !isMaster && masterPricesAllowed" :content="`查看主账号「${masterAccountName}」维护的价格；本人已录入的商品始终优先`">
-      <span class="master-switch">
-        <span class="master-switch__label">主账号价</span>
-        <el-switch v-model="viewMasterPrices" size="small" :loading="masterSaving"
-          @change="onViewMasterChange"></el-switch>
-      </span>
-    </el-tooltip>
-    <el-tag v-else-if="isMaster" size="small" type="warning" effect="plain" class="master-badge">主账号</el-tag>
-    <el-tooltip content="点击切换当前所在区服">
-      <el-tag size="small" effect="plain" style="cursor:pointer" @click="openServerPicker()">
-        {{ accountServer ? `当前区服 ${accountServer}` : '选择当前区服' }}
-      </el-tag>
-    </el-tooltip>
-    <el-tooltip :content="expiryTooltip">
-      <el-tag size="small" class="expiry-tag" :type="expiryTagType">{{ expiryText }}</el-tag>
-    </el-tooltip>
-    <el-tooltip :content="wsConnected ? `实时协作已连接（本账号在线 ${wsClients} 台设备）` : '实时协作未连接，正在重连…'">
-      <span class="ws-pill">
-        <span class="ws-dot" :class="{ on: wsConnected }"></span>
-        <span class="ws-text">实时</span>
-      </span>
-    </el-tooltip>
+    <div class="topbar-status">
+      <el-tooltip v-if="masterAccountName && !isMaster && masterPricesAllowed" :content="`查看主账号「${masterAccountName}」维护的价格；本人已录入的商品始终优先`">
+        <span class="master-switch">
+          <span class="master-switch__label">主账号价</span>
+          <el-switch v-model="viewMasterPrices" size="small" :loading="masterSaving"
+            @change="onViewMasterChange"></el-switch>
+        </span>
+      </el-tooltip>
+      <el-tag v-else-if="isMaster" size="small" type="warning" effect="plain" class="master-badge">主账号</el-tag>
+      <el-tooltip content="点击切换当前所在区服">
+        <el-tag size="small" effect="plain" style="cursor:pointer" @click="openServerPicker()">
+          {{ accountServer ? `当前区服 ${accountServer}` : '选择当前区服' }}
+        </el-tag>
+      </el-tooltip>
+      <el-tooltip :content="expiryTooltip">
+        <el-tag size="small" class="expiry-tag" :type="expiryTagType">
+          <span class="expiry-full">{{ expiryText }}</span>
+          <span class="expiry-short">{{ expiryShortText }}</span>
+        </el-tag>
+      </el-tooltip>
+      <el-tooltip :content="wsConnected ? `实时协作已连接（本账号在线 ${wsClients} 台设备）` : '实时协作未连接，正在重连…'">
+        <span class="ws-pill">
+          <span class="ws-dot" :class="{ on: wsConnected }"></span>
+          <span class="ws-text">实时</span>
+        </span>
+      </el-tooltip>
+    </div>
     <div class="tools">
       <el-button size="small" type="primary" plain @click="openSync">同步</el-button>
       <el-button size="small" @click="openReports">报表</el-button>
@@ -117,10 +122,11 @@
       <el-button size="small" @click="openMatrix">比价</el-button>
       <el-button size="small" @click="openImport">导入</el-button>
       <el-button size="small" @click="exportCsv">导出</el-button>
-      <el-button size="small" style="margin-left:4px" @click="switchAccount">
-        {{ nickname }} <span style="font-size:10px;color:#999">退出</span>
-      </el-button>
     </div>
+    <el-button size="small" class="account-btn" @click="switchAccount">
+      <span class="account-btn__name">{{ nickname }}</span>
+      <span class="account-btn__exit">退出</span>
+    </el-button>
   </header>
 
   <main class="container stack">
