@@ -600,7 +600,8 @@
         @change="loadMatrix">
 <el-option v-for="c in commodities" :key="c.id" :label="c.name" :value="c.name"></el-option>
       </el-select>
-      <el-select v-model="matrixSellCity" clearable placeholder="参考卖出城（可选）" style="width:200px">
+      <el-select v-model="matrixSellCity" filterable clearable default-first-option
+        placeholder="输入或选择参考卖出城（可选）" style="width:220px">
         <el-option v-for="it in matrixData.items" :key="it.city" :label="it.city" :value="it.city"></el-option>
       </el-select>
       <el-button :loading="matrixLoading" @click="loadMatrix">刷新</el-button>
