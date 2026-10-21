@@ -66,6 +66,8 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-sgbhsd_pass}
       REDIS_URL: redis://redis:6379
       HISTORY_LIMIT: ${HISTORY_LIMIT:-20000}
+      FORCE_HTTPS: ${FORCE_HTTPS:-0}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_TOKEN_HOURS: ${ADMIN_TOKEN_HOURS:-168}
     volumes:

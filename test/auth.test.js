@@ -14,11 +14,12 @@ for (const suffix of ['', '-wal', '-shm']) {
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
+const WebSocket = require('ws');
 const app = require('../server');
 const db = require('../server/db');
 const rateLimit = require('../server/ratelimit');
 const {
-  createClient, createAdmin, registerAccount, issueKeys, makeDeviceId,
+  createClient, createAdmin, registerAccount, issueKeys, makeDeviceId, signRequest,
 } = require('./helpers');
 
 const BASE_FILE = process.env.PRICE_DB;
@@ -69,6 +70,56 @@ test('管理后台：密码错误 401，未带 token 401', async () => {
   assert.ok(overview.json.data.accounts >= 0);
 });
 
+test('管理后台请求必须验签且防重放', async () => {
+  const path = '/api/admin/overview';
+  const unsigned = await fetch(base + path, { headers: { 'X-Admin-Token': admin.token } });
+  assert.equal(unsigned.status, 401);
+
+  const s = signRequest(admin.token, 'GET', path, undefined);
+  const headers = {
+    'X-Admin-Token': admin.token,
+    'X-Timestamp': s.ts,
+    'X-Nonce': s.nonce,
+    'X-Sign': s.sign,
+  };
+  const first = await fetch(base + path, { headers });
+  assert.equal(first.status, 200);
+  const replay = await fetch(base + path, { headers });
+  assert.equal(replay.status, 401);
+  assert.match((await replay.json()).message, /重复/);
+});
+
+test('实时协作：一次性 WebSocket 票据且不可重放', async () => {
+  rateLimit.reset();
+  const client = await registerAccount(base, admin, { name: '票据用户', type: 'day' });
+  const issued = await client.post('/api/auth/ws-ticket', {});
+  assert.equal(issued.status, 200);
+  const ticket = issued.json.data.ticket;
+  assert.match(ticket, /^[a-f0-9]{64}$/);
+  const wsUrl = `ws://127.0.0.1:${server.address().port}/ws?ticket=${encodeURIComponent(ticket)}`;
+
+  const first = await new Promise((resolve, reject) => {
+    const socket = new WebSocket(wsUrl, { origin: base });
+    const timer = setTimeout(() => { socket.terminate(); reject(new Error('WebSocket hello timeout')); }, 3000);
+    socket.once('message', raw => {
+      clearTimeout(timer);
+      const msg = JSON.parse(raw.toString());
+      resolve({ socket, msg });
+    });
+    socket.once('error', err => { clearTimeout(timer); reject(err); });
+  });
+  assert.equal(first.msg.type, 'hello');
+  first.socket.terminate();
+
+  const replayCode = await new Promise(resolve => {
+    const socket = new WebSocket(wsUrl, { origin: base });
+    const timer = setTimeout(() => { socket.terminate(); resolve(-1); }, 3000);
+    socket.once('close', code => { clearTimeout(timer); resolve(code); });
+    socket.once('error', () => {});
+  });
+  assert.equal(replayCode, 4401);
+});
+
 test('管理后台同步日志：按账号筛选并返回服务器别名', async () => {
   rateLimit.reset();
   await registerAccount(base, admin, { name: '同步日志账号', type: 'day' });
@@ -103,8 +154,15 @@ test('卡密批量生成 / 列表 / 导出 / 作废', async () => {
   assert.equal(csv.status, 200);
   assert.ok(csv.json === null, '导出应为 CSV 而非 JSON');
 
-  const exportText = await fetch(`${base}/api/admin/keys/export?batch=${batchId}`, {
-    headers: { 'X-Admin-Token': admin.token },
+  const exportPath = `/api/admin/keys/export?batch=${batchId}`;
+  const exportSign = signRequest(admin.token, 'GET', exportPath, undefined);
+  const exportText = await fetch(base + exportPath, {
+    headers: {
+      'X-Admin-Token': admin.token,
+      'X-Timestamp': exportSign.ts,
+      'X-Nonce': exportSign.nonce,
+      'X-Sign': exportSign.sign,
+    },
   }).then(res => res.text());
   assert.ok(exportText.includes(codes[0]));
 

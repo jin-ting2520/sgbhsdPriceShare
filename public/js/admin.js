@@ -1,6 +1,7 @@
 import { createApp, reactive, ref } from 'vue'
 import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import zhCn from 'element-plus/locale/zh-cn'
+import { signHeaders } from './request-sign.js'
 
 const TOKEN_KEY = 'sgbhsd.admin.v1'
 
@@ -19,9 +20,11 @@ createApp({
     const overview = reactive({ accounts: 0, banned: 0, expired: 0, sessions: 0, keysUnused: 0, keysUsed: 0, prices: 0, history: 0, servers: 0, syncOk: 0, syncTotal: 0, adminTtlHours: 168 })
 
     async function api(path, { method = 'GET', body } = {}) {
+      const payload = body === undefined ? undefined : JSON.stringify(body)
       const headers = { 'X-Admin-Token': token.value }
-      if (body !== undefined) headers['Content-Type'] = 'application/json'
-      const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+      if (payload !== undefined) headers['Content-Type'] = 'application/json'
+      if (token.value) Object.assign(headers, signHeaders(token.value, method, path, payload))
+      const res = await fetch(path, { method, headers, body: payload })
       let json = null
       try { json = await res.json() } catch { json = null }
       if (!json) throw new Error(`服务异常（HTTP ${res.status}）`)
@@ -130,8 +133,12 @@ createApp({
         if (keyFilter.q) q.set('q', keyFilter.q)
         if (keyFilter.status) q.set('status', keyFilter.status)
         if (keyFilter.type) q.set('type', keyFilter.type)
-        const res = await fetch(`/api/admin/keys/export?${q.toString()}`, {
-          headers: { 'X-Admin-Token': token.value },
+        const path = `/api/admin/keys/export?${q.toString()}`
+        const res = await fetch(path, {
+          headers: {
+            'X-Admin-Token': token.value,
+            ...signHeaders(token.value, 'GET', path, undefined),
+          },
         })
         if (!res.ok) {
           const j = await res.json().catch(() => null)

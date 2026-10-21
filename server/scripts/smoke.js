@@ -57,15 +57,17 @@ async function main() {
     if (admin) {
       headers['X-Admin-Token'] = adminToken;
     } else if (signed && session) {
+      headers['X-Account-Token'] = session;
+      headers['X-Device-Id'] = DEVICE_ID;
+    }
+    if (admin ? adminToken : (signed && session)) {
       const ts = String(Date.now());
       const nonce = crypto.randomBytes(12).toString('hex');
       const bodyHash = crypto.createHash('sha256').update(raw).digest('hex');
       const expect = [method.toUpperCase(), path, ts, nonce, bodyHash].join('\n');
-      headers['X-Account-Token'] = session;
-      headers['X-Device-Id'] = DEVICE_ID;
       headers['X-Timestamp'] = ts;
       headers['X-Nonce'] = nonce;
-      headers['X-Sign'] = crypto.createHmac('sha256', session).update(expect).digest('hex');
+      headers['X-Sign'] = crypto.createHmac('sha256', admin ? adminToken : session).update(expect).digest('hex');
     }
     const res = await fetch(base + path, { method, headers, body: body === undefined ? undefined : raw });
     return { status: res.status, json: await res.json().catch(() => null) };

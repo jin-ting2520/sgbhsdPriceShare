@@ -1,11 +1,43 @@
 'use strict';
 
-/** WebSocket 实时协作：需登录（token + device 校验），广播按账号隔离 */
+/** WebSocket 实时协作：一次性票据 + 会话/设备校验，广播按账号隔离 */
 
+const crypto = require('node:crypto');
 const { WebSocketServer } = require('ws');
 const auth = require('./auth');
 
 let wss = null;
+const TICKET_TTL_MS = 60 * 1000;
+const tickets = new Map();
+
+function issueTicket(account, session) {
+  const ticket = crypto.randomBytes(32).toString('hex');
+  tickets.set(ticket, {
+    accountId: Number(account.id),
+    sessionId: Number(session.id),
+    sessionToken: session.token,
+    deviceId: session.deviceId || '',
+    expiresAt: Date.now() + TICKET_TTL_MS,
+  });
+  return ticket;
+}
+
+function consumeTicket(value) {
+  const ticket = String(value || '').trim();
+  if (!ticket) return null;
+  const record = tickets.get(ticket);
+  tickets.delete(ticket);
+  if (!record || record.expiresAt <= Date.now()) return null;
+  return record;
+}
+
+const ticketTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [ticket, record] of tickets) {
+    if (record.expiresAt <= now) tickets.delete(ticket);
+  }
+}, 30 * 1000);
+if (ticketTimer.unref) ticketTimer.unref();
 
 function attach(server) {
   if (wss) return wss;
@@ -14,20 +46,31 @@ function attach(server) {
   wss.on('connection', async (ws, req) => {
     let account = null;
     try {
+      const origin = String(req.headers.origin || '').trim();
+      if (origin) {
+        const parsed = new URL(origin);
+        if (parsed.host !== req.headers.host) {
+          ws.close(4401, 'origin-mismatch');
+          return;
+        }
+      }
       const url = new URL(req.url, 'http://localhost');
-      const token = url.searchParams.get('token') || '';
-      const device = url.searchParams.get('device') || '';
-      account = await auth.loadSession(token);
-      if (!account) {
-        try { ws.close(4401, 'unauthorized'); } catch { /* ignore */ }
+      const ticket = consumeTicket(url.searchParams.get('ticket'));
+      if (!ticket) {
+        ws.close(4401, 'unauthorized');
+        return;
+      }
+      account = await auth.loadSession(ticket.sessionToken);
+      if (!account || Number(account.id) !== ticket.accountId || Number(account.sessionId) !== ticket.sessionId) {
+        ws.close(4401, 'unauthorized');
         return;
       }
       if (auth.accountBlocked(account)) {
-        try { ws.close(4403, 'forbidden'); } catch { /* ignore */ }
+        ws.close(4403, 'forbidden');
         return;
       }
-      if (account.deviceId && device && account.deviceId !== device) {
-        try { ws.close(4401, 'device-mismatch'); } catch { /* ignore */ }
+      if (account.deviceId && ticket.deviceId && account.deviceId !== ticket.deviceId) {
+        ws.close(4401, 'device-mismatch');
         return;
       }
     } catch {
@@ -103,4 +146,6 @@ function close() {
   wss = null;
 }
 
-module.exports = { attach, broadcast, clientCount, closeSessions, close };
+module.exports = {
+  attach, broadcast, clientCount, closeSessions, close, issueTicket, consumeTicket, TICKET_TTL_MS,
+};

@@ -88,7 +88,7 @@ npm install --registry=https://registry.npmmirror.com   # 国内网络建议
 npm run build:ui   # 可选：生成混淆产物；不做则回退源码
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 66 项后端/账号/设备/游戏/大事件/报表/按区服主账号测试
+npm test           # 68 项后端/账号/设备/游戏/大事件/报表/按区服主账号测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -121,6 +121,8 @@ ADMIN_PASSWORD='your-strong-password' npm start
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `3000` | 监听端口 |
+| `FORCE_HTTPS` | 未启用 | 设为 `1` 时 HTTP 请求 308 跳转 HTTPS；生产环境建议开启 |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Express 信任的代理网段；直连可设 `false`，单层反代可设 `1` |
 | `ADMIN_PASSWORD` | 空 | 管理后台密码；为空则后台禁用（生产必填） |
 | `ADMIN_TOKEN_HOURS` | `168` | 管理后台登录有效期（小时），默认 7 天，最长 365 天 |
 | `DB_DRIVER` | 有 `MYSQL_HOST` 则 `mysql`，否则 `sqlite` | 强制指定驱动 |
@@ -142,12 +144,13 @@ sgbhsdPriceShare/
 │   ├── db.js               # 双驱动数据层（MySQL/SQLite）、建表、种子、事务
 │   ├── cache.js            # Redis 字典缓存（失败自动退化）
 │   ├── dict-cache.js       # 字典缓存失效 + 广播
-│   ├── ws.js               # WebSocket 认证、按账号广播
+│   ├── ws.js               # WebSocket 一次性票据认证、按账号广播
 │   ├── master.js           # 按区服主账号、共享开关与查看者广播
 │   ├── scheduler.js        # 按账号 cron 定时同步与运行日志
 │   ├── util.js             # 统一响应/校验
 │   ├── auth.js             # 密码（scrypt）、设备记录/会话、账号状态
-│   ├── sign.js             # HMAC 请求签名 + nonce 防重放
+│   ├── sign.js             # 用户/后台 HMAC 请求签名 + nonce 防重放
+│   ├── security.js         # HTTPS/HSTS、CSP/安全头、JSON 请求限制
 │   ├── ratelimit.js        # 内存限流
 │   ├── keys.js             # 卡密生成/校验/类型
 │   ├── routes/
@@ -178,15 +181,16 @@ sgbhsdPriceShare/
 ├── public/
 │   ├── index.html          # 用户端模板
 │   ├── admin.html          # 管理后台模板
-│   ├── js/app.js           # 用户端源码（WS、签名、设备管理、报表）
-│   ├── js/admin.js         # 管理后台源码
+│   ├── js/app.js           # 用户端源码（WS 票据、签名、设备管理、报表）
+│   ├── js/admin.js         # 管理后台源码（签名请求）
+│   ├── js/request-sign.js  # 纯 JS SHA-256/HMAC 请求签名
 │   ├── dist/               # 构建产物（app.js / admin.js，混淆）
 │   ├── css/app.css
 │   ├── sw.js               # Service Worker（/admin 不做缓存）
 │   ├── manifest.webmanifest
 │   └── icons/icon.svg
 ├── scripts/build-ui.js     # esbuild 打包 + javascript-obfuscator 混淆
-├── test/                   # api / auth / game / reports / master 共 66 项
+├── test/                   # api / auth / game / reports / master 共 68 项
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -217,6 +221,7 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | POST | `/api/auth/login` | `{name,password,key?,mode?,deviceId,deviceName,deviceMeta?,kick?}`；`mode=login` 只登录已有账号（未知账号 `40401`），`mode=register` 只注册新账号（已有昵称 `40012`）；不传 `mode` 保留自动识别；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；新设备超出记录上限返回 `40910`，`kick=all` 或设备记录 ID 可移除后继续 |
 | POST | `/api/auth/logout` | 注销当前会话 |
 | GET | `/api/auth/me` | 当前账号、到期时间、游戏 token（仅本人）、赋税减免、当前区服、`allowSyncServer`、本区服主账号名称、`masterPricesAllowed` 与查看开关 |
+| POST | `/api/auth/ws-ticket` | 签发 60 秒一次性 WebSocket 连接票据（需签名）；旧版 `?token=` 直连方式已停用 |
 | PUT | `/api/auth/server` | 传 `{server:string}` 设置/切换当前区服，返回该区服主账号与共享开关状态 |
 | PUT | `/api/auth/relief` | 更新赋税减免（0~100） |
 | PUT | `/api/auth/master-prices` | 传 `{enabled:boolean}` 开启/关闭查看本区服主账号价格；主账号自身不可开启，管理员禁用共享的账号返回 `403`，当前区服无主账号时开启返回 `400` |
@@ -333,17 +338,20 @@ docker compose exec app npm run db:migrate -- --force # 目标库已有数据时
 
 ## 十一、安全与加固说明
 
-- 所有已登录 API 强制 HMAC 签名 + 时间窗 + nonce 去重，降低抓包重放与脚本直刷风险。
-- 登录限流：用户登录 40 次 / 5 分钟 / IP；后台登录 10 次 / 15 分钟 / IP；同步 1 次 / 30 秒 / 账号。
-- 会话 token 仅存服务端，浏览器 localStorage 保存；封禁/重置密码/到期会立即注销会话。
-- 管理 token 保存在服务端内存（默认 7 天，可用 `ADMIN_TOKEN_HOURS` 调整），服务重启后需重新登录。
+- 所有已登录用户 API 与后台 API 强制 HMAC-SHA256 验签：签名覆盖方法、原始 URL、时间戳、nonce 和请求体 SHA-256；时间窗 5 分钟，nonce 10 分钟内仅可使用一次，后台 token 同样作为签名密钥。
+- WebSocket 不再把会话 token 放入 URL，改为先调用签名接口 `/api/auth/ws-ticket` 获取 60 秒一次性票据，并校验连接 `Origin`；票据使用后立即失效。
+- 请求加密依赖 HTTPS/TLS，应用层 HMAC 只负责防篡改与防重放，不等同于加密。生产环境应设置 `FORCE_HTTPS=1`，由反向代理配置证书并传递 `X-Forwarded-Proto`；应用会 308 跳转 HTTP、启用 HSTS，并设置 CSP、`X-Frame-Options: DENY`、`nosniff`、COOP/CORP 等安全头。
+- 注册密码至少 8 位（已有旧账号仍可按原密码登录）。限流：登录 40 次 / 5 分钟 / IP，后台登录 10 次 / 15 分钟 / IP，同步 1 次 / 30 秒 / 账号；全 API 600 次 / 分钟 / IP，后台 API 240 次 / 分钟 / IP，认证 API 120 次 / 分钟 / IP。
+- 请求体仅接受 `application/json`，上限 1 MB；禁用嵌套 query 解析、启用 JSON 转义，并限制 HTTP 头/请求超时。
+- 会话 token 仅存服务端，浏览器 localStorage 保存；封禁/重置密码/到期会立即注销会话。管理 token 保存在服务端内存（默认 7 天，可用 `ADMIN_TOKEN_HOURS` 调整），服务重启后需重新登录。
 - 前端生产构建使用 esbuild 压缩 + javascript-obfuscator 混淆；`/bundle/*` 优先返回 `public/dist` 产物，缺失时回退源码（不影响功能）。
-- CSP、`X-Frame-Options`、`nosniff` 等安全头默认开启；`/admin` 不被 Service Worker 缓存，避免缓存串页。
-- 前端会在非安全上下文（HTTP 局域网）使用内置纯 JS SHA-256/HMAC 实现，保证签名在无 `crypto.subtle` 时仍可用；正式环境仍建议启用 HTTPS。
+- `/admin` 与 API 响应禁止缓存；`/admin` 不被 Service Worker 缓存，避免缓存串页。
+- 前端在非安全上下文（HTTP 局域网）使用内置纯 JS SHA-256/HMAC 实现，保证签名在无 `crypto.subtle` 时仍可用；正式环境必须启用 HTTPS。
+- nonce 与 WebSocket 票据保存在进程内存，适用于单实例部署；多实例横向扩展需改为 Redis 等共享存储。
 
 ## 十二、测试与 CI
 
-- `npm test`：66 项，覆盖账号/卡密一次性占用/后台绑定/永久账号重新计时/试用启用/续期/到期/封禁、设备记录上限与同设备多会话/退出保留记录/指纹兜底/踢出、签名与重放、数据隔离、首次登录强制设置当前区服与切换、按区服主账号设置/隔离/默认共享/管理员禁用、整行回退、历史/趋势/比价/导出、税率回退、删除主账号清理、字典只读、价格并发、导入导出、游戏协议解析、2136 大事件映射/去重/区服共享/过期过滤/文案与价格修正、报表、同步日志、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
+- `npm test`：68 项，覆盖账号/卡密一次性占用/后台绑定/永久账号重新计时/试用启用/续期/到期/封禁、设备记录上限与同设备多会话/退出保留记录/指纹兜底/踢出、签名与重放、后台验签、WebSocket 一次性票据、数据隔离、首次登录强制设置当前区服与切换、按区服主账号设置/隔离/默认共享/管理员禁用、整行回退、历史/趋势/比价/导出、税率回退、删除主账号清理、字典只读、价格并发、导入导出、游戏协议解析、2136 大事件映射/去重/区服共享/过期过滤/文案与价格修正、报表、同步日志、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务（SQLite 默认使用临时库），验证卡密注册、HMAC 签名请求、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

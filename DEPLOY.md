@@ -44,6 +44,8 @@ docker compose logs -f app # 应用日志
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `3000` | 宿主机访问端口 |
+| `FORCE_HTTPS` | `0` | 生产建议设为 `1`，HTTP 请求会 308 跳转 HTTPS |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | 反向代理信任范围；直连可设 `false` |
 | `ADMIN_PASSWORD` | 空 | 管理后台密码（**必须设置**；为空则后台禁用） |
 | `ADMIN_TOKEN_HOURS` | `168` | 管理后台登录有效期（小时），默认 7 天，最长 365 天 |
 | `MYSQL_ROOT_PASSWORD` | `sgbhsd_root` | MySQL root 密码（**生产务必修改**） |
@@ -158,8 +160,12 @@ server {
     server_name price.example.com;
     ssl_certificate     /etc/letsencrypt/live/price.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/price.example.com/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     location / {
+        client_max_body_size 2m;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -173,7 +179,7 @@ server {
 }
 ```
 
-启用 HTTPS 后浏览器可使用 `crypto.subtle` 签名；HTTP 局域网环境会自动回退到内置纯 JS HMAC 实现，功能不受影响。
+生产环境建议在 `.env` 设置 `FORCE_HTTPS=1`，由 Nginx 传递 `X-Forwarded-Proto`；应用会强制 308 跳转并发送 HSTS。请求正文的加密由 HTTPS/TLS 负责，应用层 HMAC 负责签名、防篡改和防重放。HTTP 局域网环境会自动回退到内置纯 JS HMAC 实现，功能不受影响。
 
 ## 8. 升级
 
@@ -214,7 +220,7 @@ docker compose up -d --build    # 重建 app；MySQL/Redis 数据卷不受影响
 npm ci
 npm run build:ui   # 可选：生成 public/dist 混淆产物
 npm run dev        # 默认 3000 端口，SQLite data/price.db
-npm test           # 66 项测试
+npm test           # 68 项测试
 npm run test:smoke # 冒烟自检
 
 # 管理后台

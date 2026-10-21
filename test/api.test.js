@@ -352,4 +352,7 @@ test('健康检查可用', async () => {
   const r = await createClient(base).get('/api/health');
   assert.equal(r.status, 200);
   assert.equal(r.json.code, 0);
+  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(r.headers.get('x-frame-options'), 'DENY');
+  assert.match(r.headers.get('cache-control') || '', /no-store/);
 });

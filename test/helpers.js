@@ -15,7 +15,8 @@ function signRequest(token, method, path, payload) {
   const ts = String(Date.now());
   const nonce = crypto.randomBytes(8).toString('hex');
   const bodyHash = crypto.createHash('sha256').update(payload === undefined ? '' : payload).digest('hex');
-  const base = [method.toUpperCase(), encodeURI(path), ts, nonce, bodyHash].join('\n');
+  const canonicalPath = /[^\x00-\x7F]/.test(path) ? encodeURI(path) : path;
+  const base = [method.toUpperCase(), canonicalPath, ts, nonce, bodyHash].join('\n');
   return {
     ts,
     nonce,
@@ -80,14 +81,16 @@ function createAdmin(base) {
   };
 
   admin.request = async (path, { method = 'GET', body } = {}) => {
-    const res = await fetch(base + path, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Admin-Token': admin.token,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const headers = { 'X-Admin-Token': admin.token };
+    if (payload !== undefined) headers['Content-Type'] = 'application/json';
+    if (admin.token) {
+      const s = signRequest(admin.token, method, path, payload);
+      headers['X-Timestamp'] = s.ts;
+      headers['X-Nonce'] = s.nonce;
+      headers['X-Sign'] = s.sign;
+    }
+    const res = await fetch(base + path, { method, headers, body: payload });
     const json = await res.json().catch(() => null);
     return { status: res.status, json };
   };

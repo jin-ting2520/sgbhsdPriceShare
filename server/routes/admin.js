@@ -13,6 +13,7 @@ const { createBatch, KEY_TYPES, KEY_TYPE_NAMES, KEY_STATUS_NAMES, normalizeCode,
 const { renderMarkdown, MAX_MARKDOWN } = require('../markdown');
 const { hashPassword } = require('../auth');
 const rateLimit = require('../ratelimit');
+const sign = require('../sign');
 const ws = require('../ws');
 const { invalidateDict } = require('../dict-cache');
 
@@ -48,10 +49,12 @@ router.post('/login', rateLimit.middleware(10, 15 * 60 * 1000), asyncHandler(asy
 }));
 
 function requireAdmin(req, res, next) {
-  if (!adminPassword()) return fail(res, 503, '后台未启用：服务端未配置 ADMIN_PASSWORD 环境变量', 50301);
+  if (!adminPassword()) return fail(res, 503, '后台未启用，请先在环境变量设置 ADMIN_PASSWORD 后重启', 50301);
   const token = String(req.get('x-admin-token') || '').trim();
   const exp = tokens.get(token);
   if (!token || !exp || exp <= Date.now()) return fail(res, 401, '管理登录已过期，请重新登录', 40101);
+  const signatureError = sign.checkAdminSignature(req, token);
+  if (signatureError) return fail(res, 401, signatureError, 40113);
   req.adminToken = token;
   next();
 }

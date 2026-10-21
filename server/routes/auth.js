@@ -17,12 +17,13 @@ const {
 const { clampRelief } = require('../tax');
 const { validateKey, useKey, expiresAtFor, KEY_TYPE_NAMES } = require('../keys');
 const { masterMeta } = require('../master');
-const { broadcast, closeSessions } = require('../ws');
+const { broadcast, closeSessions, issueTicket } = require('../ws');
 const rateLimit = require('../ratelimit');
 
 const router = express.Router();
 
 const PASSWORD_MIN = 4;
+const PASSWORD_REGISTER_MIN = 8;
 const PASSWORD_MAX = 64;
 
 function readCredentials(body) {
@@ -169,6 +170,9 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
   if (settings.keyRequired && !keyCode) {
     return fail(res, 400, '卡密已启用，首次注册需要输入卡密', 40010);
   }
+  if (password.length < PASSWORD_REGISTER_MIN) {
+    return fail(res, 400, `注册密码至少 ${PASSWORD_REGISTER_MIN} 位`);
+  }
 
   const passwordHash = await hashPassword(password);
   const t = nowText();
@@ -262,6 +266,11 @@ router.get('/me', requireAccount, asyncHandler(async (req, res) => {
     masterPricesAllowed: meta.masterPricesAllowed,
     viewMasterPrices: meta.viewMasterPrices,
   });
+}));
+
+/** POST /api/auth/ws-ticket 签发一次性 WebSocket 连接票据 */
+router.post('/ws-ticket', requireAccount, asyncHandler(async (req, res) => {
+  return ok(res, { ticket: issueTicket(req.account, req.session), expiresIn: 60 });
 }));
 
 /** PUT /api/auth/server { server } 设置当前所在区服 */
