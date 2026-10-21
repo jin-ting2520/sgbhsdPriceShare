@@ -68,13 +68,13 @@ services:
       HISTORY_LIMIT: ${HISTORY_LIMIT:-20000}
       FORCE_HTTPS: ${FORCE_HTTPS:-0}
       TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-19981216.cao}
       ADMIN_TOKEN_HOURS: ${ADMIN_TOKEN_HOURS:-168}
     volumes:
       # SQLite 旧库/兜底库与迁移源（容器内 /app/data/price.db）
-      - ./data:/app/data
+      - /root/data:/app/data
       # 备份目录（部署脚本备份的数据库会落在这里）
-      - ./backup:/app/backup
+      - /root/backup:/app/backup
 
 volumes:
   mysql-data:
