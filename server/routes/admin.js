@@ -295,9 +295,10 @@ router.get('/accounts', asyncHandler(async (req, res) => {
             a.allow_sync_server AS allowSyncServer, a.view_master_prices AS viewMasterPrices,
             a.allow_master_prices AS masterPricesAllowed,
             a.created_at AS createdAt, a.updated_at AS updatedAt, a.relief,
+            (SELECT COUNT(*) FROM account_devices d WHERE d.account_id = a.id) AS devices,
             (SELECT COUNT(*) FROM sessions s WHERE s.account_id = a.id) AS sessions,
             (SELECT COUNT(*) FROM prices p WHERE p.account_id = a.id) AS prices,
-            (SELECT MAX(s.last_seen_at) FROM sessions s WHERE s.account_id = a.id) AS lastSeenAt,
+            (SELECT MAX(d.last_seen_at) FROM account_devices d WHERE d.account_id = a.id) AS lastSeenAt,
             (SELECT i.type FROM invite_keys i WHERE i.code = a.key_code) AS keyType
        FROM accounts a ${whereSql} ORDER BY a.id DESC LIMIT ? OFFSET ?`,
     [...params, pageSize, (page - 1) * pageSize]
@@ -326,6 +327,7 @@ router.get('/accounts', asyncHandler(async (req, res) => {
         masterServers: servers,
         masterPricesAllowed: !!Number(r.masterPricesAllowed),
         viewMasterPrices: !!Number(r.viewMasterPrices),
+        devices: Number(r.devices) || 0,
         sessions: Number(r.sessions) || 0,
         prices: Number(r.prices) || 0,
         lastSeenAt: r.lastSeenAt || null,
@@ -430,7 +432,7 @@ router.post('/accounts/:id/expires', asyncHandler(async (req, res) => {
 router.post('/accounts/:id/device-limit', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   const limit = Number((req.body && req.body.limit) || 0);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 50) return fail(res, 400, '设备上限应为 1~50 的整数');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) return fail(res, 400, '设备记录上限应为 1~50 的整数');
   const account = await loadAccount(id);
   if (!account) return fail(res, 404, '账号不存在');
   await run('UPDATE accounts SET device_limit = ?, updated_at = ? WHERE id = ?', [limit, nowText(), id]);
@@ -485,9 +487,10 @@ router.post('/accounts/:id/password', asyncHandler(async (req, res) => {
 
 router.post('/accounts/:id/kick', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
-  const { removeAllSessions } = require('../auth');
-  const count = await removeAllSessions(id);
-  return ok(res, { id, count });
+  const { removeAllDevices } = require('../auth');
+  const removed = await removeAllDevices(id);
+  ws.closeSessions(removed.sessionIds);
+  return ok(res, { id, count: removed.count, sessions: removed.sessions });
 }));
 
 router.delete('/accounts/:id', asyncHandler(async (req, res) => {

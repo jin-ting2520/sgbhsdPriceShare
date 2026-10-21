@@ -233,11 +233,11 @@ createApp({
           await api(`/api/admin/accounts/${row.id}/expires`, { method: 'POST', body: { expiresAt: value } })
           ElMessage.success('到期时间已更新')
         } else if (cmd === 'device') {
-          const limit = await ask('该账号最多同时登录设备数（1~50）', '设备上限', {
+          const limit = await ask('该账号最多保存的设备记录数（1~50）', '设备记录上限', {
             inputValue: String(row.deviceLimit), inputPattern: /^\d+$/, inputErrorMessage: '请输入 1~50 的整数',
           })
           await api(`/api/admin/accounts/${row.id}/device-limit`, { method: 'POST', body: { limit: Number(limit) } })
-          ElMessage.success('设备上限已更新')
+          ElMessage.success('设备记录上限已更新')
         } else if (cmd === 'allow-server' || cmd === 'deny-server') {
           const allow = cmd === 'allow-server'
           await confirm(
@@ -280,9 +280,9 @@ createApp({
           await api(`/api/admin/accounts/${row.id}/password`, { method: 'POST', body: { password: pwd } })
           ElMessage.success('密码已重置，全部会话已注销')
         } else if (cmd === 'kick') {
-          await confirm(`确定让「${row.name}」的全部设备立即下线？`, '踢下线')
+          await confirm(`确定让「${row.name}」的全部设备立即下线，并清空其设备记录？`, '踢下线')
           const data = await api(`/api/admin/accounts/${row.id}/kick`, { method: 'POST' })
-          ElMessage.success(`已注销 ${data.count} 个会话`)
+          ElMessage.success(`已清空 ${data.count} 台设备记录，注销 ${data.sessions} 个会话`)
         } else if (cmd === 'ban' || cmd === 'unban') {
           const status = cmd === 'ban' ? 'banned' : 'active'
           await confirm(cmd === 'ban' ? `确定封禁「${row.name}」？封禁后立即下线且无法登录。` : `确定解封「${row.name}」？`, '账号状态')

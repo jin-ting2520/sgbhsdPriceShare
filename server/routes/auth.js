@@ -1,13 +1,14 @@
 'use strict';
 
-/** 账号入口：卡密注册 / 密码登录 / 多设备会话 / 游戏 token / 赋税减免 */
+/** 账号入口：卡密注册 / 密码登录 / 设备记录 / 游戏 token / 赋税减免 */
 
 const express = require('express');
 const { ok, fail, asyncHandler, cleanName, isUniqueConstraintError } = require('../util');
 const {
   hashPassword, verifyPassword, requireAccount, accountBlocked,
-  getAccountByName, setAccountToken, createSession, countSessions,
-  listSessions, removeSession, removeOtherSessions, removeAllSessions,
+  getAccountByName, setAccountToken, normalizeDeviceMeta, deviceFingerprint,
+  resolveDeviceId, listDevices, getDevice, countDevices, ensureDevice,
+  createSession, removeSession, removeDevice, removeOtherDevices, removeAllDevices,
 } = require('../auth');
 const {
   get, run, tx, nowText, parseTime, getAppSettings, claimLegacyData, normalizeKeyRequiredAt,
@@ -16,7 +17,7 @@ const {
 const { clampRelief } = require('../tax');
 const { validateKey, useKey, expiresAtFor, KEY_TYPE_NAMES } = require('../keys');
 const { masterMeta } = require('../master');
-const { broadcast } = require('../ws');
+const { broadcast, closeSessions } = require('../ws');
 const rateLimit = require('../ratelimit');
 
 const router = express.Router();
@@ -60,7 +61,8 @@ function renewBaseMs(expiresAt) {
   return Number.isFinite(ts) && ts > Date.now() ? ts : Date.now();
 }
 
-/** POST /api/auth/login { name, password, key?, mode?, deviceId, deviceName, kick? }
+/** POST /api/auth/login { name, password, key?, mode?, deviceId, deviceName, deviceMeta, kick? }
+ *  设备记录达到上限时返回 409；kick=all 或设备记录编号可移除后继续登录。
  *  mode=login：仅允许已注册账号登录，绝不创建账号；
  *  mode=register：仅允许新昵称注册，已有账号返回提示；
  *  未传 mode 时保留旧的自动识别行为。 */
@@ -71,8 +73,10 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
   if (password.length < PASSWORD_MIN) return fail(res, 400, `密码至少 ${PASSWORD_MIN} 位`);
   if (password.length > PASSWORD_MAX) return fail(res, 400, `密码最长 ${PASSWORD_MAX} 位`);
 
-  const deviceId = String(body.deviceId || '').trim().slice(0, 64);
-  const deviceName = String(body.deviceName || '').trim().slice(0, 80);
+  const deviceMeta = normalizeDeviceMeta(body.deviceMeta);
+  const fingerprint = deviceFingerprint(deviceMeta, req.get('user-agent'));
+  const deviceId = resolveDeviceId(body.deviceId, fingerprint);
+  const deviceName = String(body.deviceName || deviceMeta.platform || '未知设备').trim().slice(0, 80);
   const settings = await getAppSettings();
   const keyCode = String(body.key || '').trim();
   const mode = body.mode === 'login' || body.mode === 'register' ? body.mode : 'auto';
@@ -96,21 +100,30 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
     }
 
     const limit = Math.max(1, Number(existing.device_limit) || 3);
-    const used = await countSessions(existing.id);
-    if (used >= limit) {
-      const kick = body.kick;
-      if (kick === 'all') {
-        await removeAllSessions(existing.id);
-      } else if (Number.isInteger(Number(kick)) && Number(kick) > 0) {
-        const okKick = await removeSession(existing.id, Number(kick));
-        if (!okKick) return fail(res, 400, '要退出的设备不存在，请刷新设备列表后重试');
-      } else {
-        const sessions = await listSessions(existing.id);
-        return res.status(409).json({
-          code: 40910,
-          message: `该账号最多同时登录 ${limit} 台设备，请先退出其他设备后再登录`,
-          data: { limit, sessions: sessions.map(s => ({ ...s, current: false })) },
-        });
+    const knownDevice = await getDevice(existing.id, deviceId);
+    if (!knownDevice) {
+      const used = await countDevices(existing.id);
+      if (used >= limit) {
+        const kick = body.kick;
+        if (kick === 'all') {
+          const removed = await removeAllDevices(existing.id);
+          closeSessions(removed.sessionIds);
+        } else if (Number.isInteger(Number(kick)) && Number(kick) > 0) {
+          const kicked = await removeDevice(existing.id, Number(kick));
+          if (!kicked.removed) return fail(res, 400, '要移除的设备记录不存在，请刷新设备列表后重试');
+          closeSessions(kicked.sessionIds);
+        } else {
+          const devices = await listDevices(existing.id);
+          return res.status(409).json({
+            code: 40910,
+            message: `该账号最多保存 ${limit} 台设备记录，请先移除一台设备后再登录`,
+            data: {
+              limit,
+              devices,
+              sessions: devices.map(device => ({ ...device, current: false })),
+            },
+          });
+        }
       }
     }
 
@@ -137,11 +150,17 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
       existing.expires_at = renewed.expiresAt;
     }
 
-    const session = await createSession(existing.id, { deviceId, deviceName, ip: req.ip });
+    const device = await ensureDevice(existing.id, {
+      deviceId, fingerprint, deviceName, platform: deviceMeta.platform, ip: req.ip,
+    });
+    const session = await createSession(existing.id, {
+      deviceId, deviceRefId: device.id, deviceName: device.deviceName || deviceName, ip: req.ip,
+    });
     return ok(res, await publicAccount(existing, false, session, renewed ? {
       renewed: true,
       keyType: KEY_TYPE_NAMES[renewed.keyType] || renewed.keyType,
-    } : {}));
+      deviceId,
+    } : { deviceId }));
   }
 
   // ---------- 新账号：卡密注册 / 限时试用 ----------
@@ -195,15 +214,22 @@ router.post('/login', rateLimit.middleware(40, 5 * 60 * 1000), asyncHandler(asyn
     console.warn('[auth] 旧数据接管失败:', err.message);
   }
 
-  const session = await createSession(created.row.id, { deviceId, deviceName, ip: req.ip });
+  const device = await ensureDevice(created.row.id, {
+    deviceId, fingerprint, deviceName, platform: deviceMeta.platform, ip: req.ip,
+  });
+  const session = await createSession(created.row.id, {
+    deviceId, deviceRefId: device.id, deviceName: device.deviceName || deviceName, ip: req.ip,
+  });
   return ok(res, await publicAccount(created.row, true, session, {
     keyType: created.keyType ? (KEY_TYPE_NAMES[created.keyType] || created.keyType) : null,
+    deviceId,
   }));
 }));
 
 /** POST /api/auth/logout 退出当前设备 */
 router.post('/logout', requireAccount, asyncHandler(async (req, res) => {
   await removeSession(req.account.id, req.session.id);
+  closeSessions([req.session.id]);
   return ok(res, null);
 }));
 
@@ -296,35 +322,46 @@ router.put('/token', requireAccount, asyncHandler(async (req, res) => {
   return ok(res, { token });
 }));
 
-/** GET /api/auth/sessions 本账号已登录设备列表 */
-router.get('/sessions', requireAccount, asyncHandler(async (req, res) => {
-  const rows = await listSessions(req.account.id);
+/** GET /api/auth/sessions|devices 本账号设备记录（同设备可有多个在线会话） */
+router.get(['/sessions', '/devices'], requireAccount, asyncHandler(async (req, res) => {
+  const rows = await listDevices(req.account.id, req.session.id);
   return ok(res, {
     limit: Math.max(1, Number(req.account.deviceLimit) || 3),
-    items: rows.map(s => ({
-      id: s.id,
-      deviceName: s.deviceName || '未知设备',
-      ip: s.ip || '',
-      createdAt: s.createdAt,
-      lastSeenAt: s.lastSeenAt,
-      current: Number(s.id) === Number(req.session.id),
+    items: rows.map(device => ({
+      id: device.id,
+      deviceId: device.deviceId,
+      deviceName: device.deviceName || '未知设备',
+      platform: device.platform || '',
+      ip: device.ip || '',
+      createdAt: device.createdAt,
+      lastSeenAt: device.lastSeenAt,
+      activeSessions: device.activeSessions,
+      online: device.online,
+      current: device.current,
     })),
   });
 }));
 
-/** DELETE /api/auth/sessions/:id 退出指定设备（可退出自己=注销） */
-router.delete('/sessions/:id', requireAccount, asyncHandler(async (req, res) => {
+/** DELETE /api/auth/sessions|devices/:id 移除设备记录及其全部会话（可移除自己=注销） */
+router.delete(['/sessions/:id', '/devices/:id'], requireAccount, asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return fail(res, 400, '设备编号不正确');
-  const okDel = await removeSession(req.account.id, id);
-  if (!okDel) return fail(res, 404, '该设备会话不存在或已退出');
-  return ok(res, { id, deleted: true, self: id === Number(req.session.id) });
+  const removed = await removeDevice(req.account.id, id);
+  if (!removed.removed) return fail(res, 404, '该设备记录不存在或已移除');
+  closeSessions(removed.sessionIds);
+  return ok(res, {
+    id,
+    deleted: true,
+    self: id === Number(req.session.deviceRefId),
+    sessions: removed.sessions,
+  });
 }));
 
-/** POST /api/auth/sessions/kick-others 退出其他全部设备 */
-router.post('/sessions/kick-others', requireAccount, asyncHandler(async (req, res) => {
-  const count = await removeOtherSessions(req.account.id, req.session.id);
-  return ok(res, { count });
+/** POST /api/auth/sessions|devices/kick-others 移除其他全部设备及会话 */
+router.post(['/sessions/kick-others', '/devices/kick-others'], requireAccount, asyncHandler(async (req, res) => {
+  const removed = await removeOtherDevices(req.account.id, req.session.deviceRefId);
+  closeSessions(removed.sessionIds);
+  return ok(res, { count: removed.count, sessions: removed.sessions });
 }));
 
 module.exports = router;

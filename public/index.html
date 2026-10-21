@@ -56,7 +56,7 @@
       </p>
       <p class="login-hint">
         {{ authHint }}<br>
-        每个账号默认最多同时登录 3 台设备，可在「设备」中查看并退出其他设备。<br>
+        每个账号默认最多保存 3 台设备记录，同一设备可同时在线；可在「设备」中查看或移除记录。<br>
         价格、游戏 token、定时同步均按账号独立保存，互不可见。
       </p>
       <p class="login-hint" style="margin-top:6px">本设备：{{ deviceName }}</p>
@@ -105,7 +105,7 @@
           <span class="expiry-short">{{ expiryShortText }}</span>
         </el-tag>
       </el-tooltip>
-      <el-tooltip :content="wsConnected ? `实时协作已连接（本账号在线 ${wsClients} 台设备）` : '实时协作未连接，正在重连…'">
+      <el-tooltip :content="wsConnected ? `实时协作已连接（本账号在线 ${wsClients} 个会话）` : '实时协作未连接，正在重连…'">
         <span class="ws-pill">
           <span class="ws-dot" :class="{ on: wsConnected }"></span>
           <span class="ws-text">实时</span>
@@ -335,7 +335,7 @@
         <li><b>点击查询</b>：区服与城池填充进列表，买价/卖价/更新时间/更新人从数据库带出，查不到价格显示 “-”。</li>
         <li><b>填写价格</b>：直接在买价/卖价输入框录入；支持「同上一行」；同账号其他设备同时改价会实时提示并标记冲突。</li>
         <li><b>点击保存</b>：右上角「保存」→ 弹窗确认变更明细 → 确认后写入数据库，记录更新时间与更新人。</li>
-        <li><b>设备管理</b>：「设备」可查看本账号已登录设备、退出单台或退出其他全部设备（默认上限 3 台）。</li>
+        <li><b>设备管理</b>：「设备」可查看本账号保存的设备记录，移除单台或其他全部设备（默认上限 3 台）；同一设备可同时打开多个会话，退出登录不会删除设备记录。</li>
       </ol>
       <div class="help-grid">
         <div class="help-item">
@@ -422,28 +422,44 @@
   </el-dialog>
 
   <!-- ================= 设备管理弹窗 ================= -->
-  <el-dialog v-model="devicesVisible" title="登录设备" width="620px" :fullscreen="isMobile" top="8vh">
+  <el-dialog v-model="devicesVisible" title="设备记录" width="660px" :fullscreen="isMobile" top="8vh">
     <div class="confirm-summary">
-      同一账号最多同时登录 <b>{{ deviceLimit }}</b> 台设备；会话绑定设备标识，换设备需重新登录。
+      同一账号最多保存 <b>{{ deviceLimit }}</b> 台设备记录，同一设备可同时在线；移除记录会注销该设备的全部会话。
     </div>
     <el-table :data="devices" size="small" v-loading="devicesLoading" max-height="46vh">
-      <el-table-column label="设备" min-width="140">
+      <el-table-column label="设备" min-width="150">
         <template #default="s">
           {{ s.row.deviceName || '未知设备' }}
           <el-tag v-if="s.row.current" size="small" type="success" effect="plain" style="margin-left:6px">本机</el-tag>
+          <div v-if="isMobile" style="margin-top:3px">
+            <el-tag v-if="s.row.online" size="small" type="success" effect="plain">
+              在线{{ s.row.activeSessions > 1 ? ` ${s.row.activeSessions}` : '' }}
+            </el-tag>
+            <el-tag v-else size="small" type="info" effect="plain">离线</el-tag>
+            <span class="muted" style="font-size:12px;line-height:1.4;margin-left:6px">
+              {{ s.row.lastSeenAt || '暂无活跃记录' }}
+            </span>
+          </div>
         </template>
       </el-table-column>
-      <el-table-column label="IP" prop="ip" width="120" show-overflow-tooltip></el-table-column>
-      <el-table-column label="最近活跃" prop="lastSeenAt" width="150"></el-table-column>
-      <el-table-column label="登录时间" prop="createdAt" width="150"></el-table-column>
-      <el-table-column label="操作" width="80" align="center">
+      <el-table-column v-if="!isMobile" label="状态" width="80" align="center">
         <template #default="s">
-          <el-button link type="danger" size="small" @click="kickDevice(s.row)">退出</el-button>
+          <el-tag v-if="s.row.online" size="small" type="success" effect="plain">
+            在线{{ s.row.activeSessions > 1 ? ` ${s.row.activeSessions}` : '' }}
+          </el-tag>
+          <el-tag v-else size="small" type="info" effect="plain">离线</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="!isMobile" label="IP" prop="ip" width="115" show-overflow-tooltip></el-table-column>
+      <el-table-column v-if="!isMobile" label="最近活跃" prop="lastSeenAt" width="150"></el-table-column>
+      <el-table-column label="操作" width="70" align="center">
+        <template #default="s">
+          <el-button link type="danger" size="small" @click="kickDevice(s.row)">移除</el-button>
         </template>
       </el-table-column>
     </el-table>
     <template #footer>
-      <el-button type="warning" plain @click="kickOtherDevices">退出其他全部设备</el-button>
+      <el-button type="warning" plain @click="kickOtherDevices">移除其他全部设备</el-button>
       <el-button @click="devicesVisible = false">关 闭</el-button>
     </template>
   </el-dialog>

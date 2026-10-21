@@ -208,7 +208,7 @@
             </el-table-column>
             <el-table-column label="卡密" prop="keyCode" width="190" show-overflow-tooltip></el-table-column>
             <el-table-column label="设备" width="90" align="center">
-              <template #default="s">{{ s.row.sessions }}/{{ s.row.deviceLimit }}</template>
+              <template #default="s">{{ s.row.devices }}/{{ s.row.deviceLimit }}</template>
             </el-table-column>
             <el-table-column label="价格数" prop="prices" width="75" align="center"></el-table-column>
             <el-table-column label="当前区服" prop="currentServer" width="100" align="center"></el-table-column>
@@ -230,7 +230,7 @@
                       <el-dropdown-item command="extend">续期（按天）</el-dropdown-item>
                       <el-dropdown-item command="renew">使用卡密续期</el-dropdown-item>
                       <el-dropdown-item command="expires">设置到期时间</el-dropdown-item>
-                      <el-dropdown-item command="device">调整设备上限</el-dropdown-item>
+                      <el-dropdown-item command="device">调整设备记录上限</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.allowSyncServer" command="allow-server">允许传区服参数</el-dropdown-item>
                       <el-dropdown-item v-else command="deny-server">禁止传区服参数</el-dropdown-item>
                       <el-dropdown-item v-if="!s.row.isMaster && !s.row.masterPricesAllowed" command="allow-master-prices">开启主账号价格共享</el-dropdown-item>
@@ -328,9 +328,9 @@
                 format="YYYY-MM-DD HH:mm" placeholder="选择启用时间" style="width:240px"></el-date-picker>
               <div class="muted settings-tip">启用前新账号可不填卡密直接注册，到期处显示“试用中”；启用后必须输入卡密才能注册，试用账号也需补卡密才能登录。修改时间会同步所有无卡密试用账号的到期时间。</div>
             </el-form-item>
-            <el-form-item label="默认设备上限">
+            <el-form-item label="默认设备记录上限">
               <el-input-number v-model="appSettings.defaultDeviceLimit" :min="1" :max="20"></el-input-number>
-              <span class="muted" style="margin-left:8px">仅影响新注册账号</span>
+              <div class="muted settings-tip">每个账号最多保存的设备记录数，仅影响新注册账号；同一设备可同时打开多个会话。</div>
             </el-form-item>
             <el-form-item label="公告">
               <el-input v-model="appSettings.announcement" type="textarea" :rows="4" maxlength="500" show-word-limit

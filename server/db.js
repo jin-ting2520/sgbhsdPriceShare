@@ -189,17 +189,34 @@ CREATE TABLE IF NOT EXISTS server_masters (
 );
 CREATE INDEX IF NOT EXISTS idx_server_masters_account ON server_masters(account_id);
 
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE IF NOT EXISTS account_devices (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  token        TEXT    NOT NULL UNIQUE,
   account_id   INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  device_id    TEXT,
+  device_id    TEXT    NOT NULL,
+  fingerprint  TEXT,
   device_name  TEXT,
+  platform     TEXT,
   ip           TEXT,
   created_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-  last_seen_at TEXT
+  last_seen_at TEXT,
+  UNIQUE(account_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_devices_account ON account_devices(account_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_devices_fingerprint ON account_devices(account_id, fingerprint);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  token         TEXT    NOT NULL UNIQUE,
+  account_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_ref_id INTEGER REFERENCES account_devices(id) ON DELETE CASCADE,
+  device_id     TEXT,
+  device_name   TEXT,
+  ip            TEXT,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  last_seen_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_device ON sessions(device_ref_id);
 
 CREATE TABLE IF NOT EXISTS invite_keys (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -352,10 +369,26 @@ const MYSQL_SCHEMA = [
     CONSTRAINT fk_server_masters_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
     CONSTRAINT fk_server_masters_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS account_devices (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    account_id INT NOT NULL,
+    device_id VARCHAR(64) NOT NULL,
+    fingerprint VARCHAR(64) NULL,
+    device_name VARCHAR(80) NULL,
+    platform VARCHAR(80) NULL,
+    ip VARCHAR(45) NULL,
+    created_at DATETIME NOT NULL,
+    last_seen_at DATETIME NULL,
+    UNIQUE KEY uk_devices_account_device (account_id, device_id),
+    KEY idx_devices_account (account_id, id),
+    KEY idx_devices_fingerprint (account_id, fingerprint),
+    CONSTRAINT fk_devices_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS sessions (
     id INT AUTO_INCREMENT PRIMARY KEY,
     token VARCHAR(64) NOT NULL,
     account_id INT NOT NULL,
+    device_ref_id INT NULL,
     device_id VARCHAR(64) NULL,
     device_name VARCHAR(80) NULL,
     ip VARCHAR(45) NULL,
@@ -363,7 +396,9 @@ const MYSQL_SCHEMA = [
     last_seen_at DATETIME NULL,
     UNIQUE KEY uk_sessions_token (token),
     KEY idx_sessions_account (account_id, id),
-    CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+    KEY idx_sessions_device (device_ref_id),
+    CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    CONSTRAINT fk_sessions_device FOREIGN KEY (device_ref_id) REFERENCES account_devices(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS invite_keys (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -674,6 +709,40 @@ function migrateSqlite() {
   if (!hasCol('sync_log', 'account_id')) sqlite.exec('ALTER TABLE sync_log ADD COLUMN account_id INTEGER');
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_sync_log_account ON sync_log(account_id, id DESC)');
 
+  if (hasTable('sessions') && !hasCol('sessions', 'device_ref_id')) {
+    sqlite.exec('ALTER TABLE sessions ADD COLUMN device_ref_id INTEGER REFERENCES account_devices(id) ON DELETE CASCADE');
+  }
+  if (hasTable('sessions')) {
+    sqlite.exec('CREATE INDEX IF NOT EXISTS idx_sessions_device ON sessions(device_ref_id)');
+    const pending = sqlite.prepare(`
+      SELECT s.id, s.account_id, s.device_id, s.device_name, s.ip, s.created_at, s.last_seen_at
+        FROM sessions s LEFT JOIN account_devices d
+          ON d.account_id = s.account_id AND d.device_id = s.device_id
+       WHERE s.device_ref_id IS NULL AND s.device_id IS NOT NULL AND s.device_id <> ''
+       ORDER BY s.id`).all();
+    const findDevice = sqlite.prepare('SELECT id FROM account_devices WHERE account_id = ? AND device_id = ?');
+    const insertDevice = sqlite.prepare(`INSERT INTO account_devices
+      (account_id, device_id, fingerprint, device_name, platform, ip, created_at, last_seen_at)
+      VALUES (?, ?, NULL, ?, NULL, ?, ?, ?)`);
+    const touchDevice = sqlite.prepare('UPDATE account_devices SET last_seen_at = ? WHERE id = ?');
+    const bindSession = sqlite.prepare('UPDATE sessions SET device_ref_id = ? WHERE id = ?');
+    for (const row of pending) {
+      const seenAt = row.last_seen_at || row.created_at || nowText();
+      let device = findDevice.get(row.account_id, row.device_id);
+      if (!device) {
+        const info = insertDevice.run(
+          row.account_id, row.device_id, row.device_name || null,
+          row.ip || null, row.created_at || seenAt, seenAt,
+        );
+        device = { id: info.lastInsertRowid };
+      } else if (seenAt) {
+        const current = sqlite.prepare('SELECT last_seen_at FROM account_devices WHERE id = ?').get(device.id);
+        if (!current || !current.last_seen_at || current.last_seen_at < seenAt) touchDevice.run(seenAt, device.id);
+      }
+      bindSession.run(device.id, row.id);
+    }
+  }
+
   const legacyMaster = hasTable('server_masters')
     ? sqlite.prepare(`SELECT a.id AS accountId, a.current_server AS serverName
         FROM app_settings st JOIN accounts a ON a.id = st.master_account_id
@@ -711,6 +780,7 @@ async function migrateMysql() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       token VARCHAR(64) NOT NULL,
       account_id INT NOT NULL,
+      device_ref_id INT NULL,
       device_id VARCHAR(64) NULL,
       device_name VARCHAR(80) NULL,
       ip VARCHAR(45) NULL,
@@ -718,7 +788,9 @@ async function migrateMysql() {
       last_seen_at DATETIME NULL,
       UNIQUE KEY uk_sessions_token (token),
       KEY idx_sessions_account (account_id, id),
-      CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+      KEY idx_sessions_device (device_ref_id),
+      CONSTRAINT fk_sessions_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+      CONSTRAINT fk_sessions_device FOREIGN KEY (device_ref_id) REFERENCES account_devices(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
   }
 
@@ -846,6 +918,45 @@ async function migrateMysql() {
   if (!(await hasCol('sync_log', 'account_id'))) {
     await pool.query('ALTER TABLE sync_log ADD COLUMN account_id INT NULL AFTER id');
     await pool.query('ALTER TABLE sync_log ADD KEY idx_sync_log_account (account_id, id)');
+  }
+
+  if (!(await hasCol('sessions', 'device_ref_id'))) {
+    await pool.query('ALTER TABLE sessions ADD COLUMN device_ref_id INT NULL AFTER account_id');
+  }
+  await tryQuery('ALTER TABLE sessions ADD KEY idx_sessions_device (device_ref_id)');
+  await tryQuery(`ALTER TABLE sessions ADD CONSTRAINT fk_sessions_device
+    FOREIGN KEY (device_ref_id) REFERENCES account_devices(id) ON DELETE CASCADE`);
+  const [pendingDevices] = await pool.query(
+    `SELECT s.id, s.account_id, s.device_id, s.device_name, s.ip, s.created_at, s.last_seen_at
+       FROM sessions s LEFT JOIN account_devices d
+         ON d.account_id = s.account_id AND d.device_id = s.device_id
+      WHERE s.device_ref_id IS NULL AND s.device_id IS NOT NULL AND s.device_id <> ''
+      ORDER BY s.id`
+  );
+  for (const row of pendingDevices) {
+    const seenAt = row.last_seen_at || row.created_at || nowText();
+    const [found] = await pool.query(
+      'SELECT id FROM account_devices WHERE account_id = ? AND device_id = ?',
+      [row.account_id, row.device_id]
+    );
+    let deviceId = found[0] && found[0].id;
+    if (!deviceId) {
+      const [inserted] = await pool.query(
+        `INSERT INTO account_devices
+          (account_id, device_id, fingerprint, device_name, platform, ip, created_at, last_seen_at)
+         VALUES (?, ?, NULL, ?, NULL, ?, ?, ?)`,
+        [row.account_id, row.device_id, row.device_name || null, row.ip || null,
+          row.created_at || seenAt, seenAt]
+      );
+      deviceId = inserted.insertId;
+    } else {
+      await pool.query(
+        `UPDATE account_devices SET last_seen_at = ?
+          WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)`,
+        [seenAt, deviceId, seenAt]
+      );
+    }
+    await pool.query('UPDATE sessions SET device_ref_id = ? WHERE id = ?', [deviceId, row.id]);
   }
 
   const [legacyMasters] = await pool.query(

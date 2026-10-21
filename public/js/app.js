@@ -7,6 +7,7 @@ const STORAGE_KEY = 'sgbhsd.priceShare.form.v1'
 const ACCOUNT_KEY = 'sgbhsd.account.v1'
 const RELIEF_KEY = 'sgbhsd.taxRelief.v1'
 const DEVICE_KEY = 'sgbhsd.device.v1'
+const DEVICE_COOKIE = 'sgbhsd_device_id'
 const DEFAULT_RELIEF = 5
 
 const readSavedAccount = () => {
@@ -23,19 +24,67 @@ const randomHex = n => {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
 }
 
-const readDeviceId = () => {
+const isDeviceId = value => /^[A-Za-z0-9_-]{8,64}$/.test(String(value || ''))
+
+const readCookie = name => {
   try {
-    const saved = localStorage.getItem(DEVICE_KEY)
-    if (/^[a-f0-9]{16,64}$/.test(saved || '')) return saved
-    const id = randomHex(16)
-    localStorage.setItem(DEVICE_KEY, id)
-    return id
+    const prefix = `${name}=`
+    const hit = document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith(prefix))
+    return hit ? decodeURIComponent(hit.slice(prefix.length)) : ''
   } catch (e) {
-    return randomHex(16)
+    return ''
   }
 }
 
-const deviceLabel = () => {
+const writeCookie = (name, value) => {
+  try {
+    const secure = location.protocol === 'https:' ? '; Secure' : ''
+    document.cookie = `${name}=${encodeURIComponent(value)}; Path=/; Max-Age=63072000; SameSite=Lax${secure}`
+    return readCookie(name) === value
+  } catch (e) {
+    return false
+  }
+}
+
+const rememberDeviceId = id => {
+  let persisted = false
+  try {
+    localStorage.setItem(DEVICE_KEY, id)
+    persisted = true
+  } catch (e) { /* 忽略隐私模式等 */ }
+  if (writeCookie(DEVICE_COOKIE, id)) persisted = true
+  return persisted
+}
+
+/* localStorage 与 first-party cookie 互为备份；都不可用时交给服务端设备指纹兜底 */
+const readDeviceId = () => {
+  let local = ''
+  let cookie = ''
+  try { local = localStorage.getItem(DEVICE_KEY) || '' } catch (e) { /* 忽略隐私模式等 */ }
+  try { cookie = readCookie(DEVICE_COOKIE) } catch (e) { /* 忽略隐私模式等 */ }
+  const saved = isDeviceId(local) ? local : (isDeviceId(cookie) ? cookie : '')
+  const id = saved || randomHex(16)
+  const persisted = rememberDeviceId(id) || !!saved
+  return persisted ? id : ''
+}
+
+const collectDeviceMeta = () => {
+  const uaData = navigator.userAgentData || {}
+  let timezone = ''
+  try { timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch (e) { /* 忽略 */ }
+  return {
+    platform: uaData.platform || navigator.platform || '',
+    language: navigator.language || '',
+    timezone,
+    screen: `${screen.width || 0}x${screen.height || 0}@${window.devicePixelRatio || 1}`,
+    cores: navigator.hardwareConcurrency || 0,
+    memory: navigator.deviceMemory || 0,
+    touch: navigator.maxTouchPoints || 0,
+    standalone: matchMedia('(display-mode: standalone)').matches,
+  }
+}
+
+const deviceLabel = (id = '') => {
   const ua = navigator.userAgent
   const os = /Windows/i.test(ua) ? 'Windows'
     : /Android/i.test(ua) ? 'Android'
@@ -46,11 +95,13 @@ const deviceLabel = () => {
     : /Chrome\//i.test(ua) ? 'Chrome'
       : /Firefox\//i.test(ua) ? 'Firefox'
         : /Safari\//i.test(ua) ? 'Safari' : '浏览器'
-  return `${os} · ${browser}`
+  const suffix = id ? ` · ${id.slice(-4).toUpperCase()}` : ''
+  return `${os} · ${browser}${suffix}`
 }
 
-const DEVICE_ID = readDeviceId()
-const DEVICE_NAME = deviceLabel()
+let DEVICE_ID = readDeviceId()
+let DEVICE_NAME = deviceLabel(DEVICE_ID)
+const DEVICE_META = collectDeviceMeta()
 
 let accountSession = (readSavedAccount() || {}).session || ''
 let onAuthInvalid = null
@@ -234,7 +285,7 @@ createApp({
     const entering = ref(false)
     const entered = computed(() => !!nickname.value && sessionOk.value)
     const dataLoaded = ref(false)
-    const deviceName = DEVICE_NAME
+    const deviceName = ref(DEVICE_NAME)
 
     const applyExpiry = data => {
       accountExpiresAt.value = (data && data.expiresAt) || null
@@ -419,10 +470,18 @@ createApp({
       }
       entering.value = true
       try {
-        const body = { name, password, mode, deviceId: DEVICE_ID, deviceName: DEVICE_NAME }
+        const body = {
+          name, password, mode, deviceId: DEVICE_ID, deviceName: DEVICE_NAME, deviceMeta: DEVICE_META,
+        }
         if (key) body.key = key
         if (kick) body.kick = 'all'
         const data = await api('/api/auth/login', { method: 'POST', body })
+        if (data.deviceId && data.deviceId !== DEVICE_ID) {
+          DEVICE_ID = data.deviceId
+          DEVICE_NAME = deviceLabel(DEVICE_ID)
+          deviceName.value = DEVICE_NAME
+          rememberDeviceId(DEVICE_ID)
+        }
         accountSession = data.session
         sessionOk.value = true
         nickname.value = data.name
@@ -455,15 +514,18 @@ createApp({
         if (!accountServer.value) openServerPicker(true)
       } catch (e) {
         if (e.code === 40910) {
-          const sessions = (e.data && e.data.sessions) || []
-          const list = sessions.map(s => `· ${s.deviceName || '未知设备'}（${s.lastSeenAt || '未知时间'}）`).join('\n')
+          const devices = (e.data && (e.data.devices || e.data.sessions)) || []
+          const list = devices.map(d => {
+            const state = d.online ? `在线 ${d.activeSessions || 1} 个会话` : '离线'
+            return `· ${d.deviceName || '未知设备'}（${state}，${d.lastSeenAt || '未知时间'}）`
+          }).join('\n')
           try {
             await ElMessageBox.confirm(
-              `该账号最多同时登录 ${e.data.limit || 3} 台设备，当前已登录：\n${list}\n\n是否退出其他全部设备并继续登录？`,
-              '设备数量已达上限',
+              `该账号最多保存 ${(e.data && e.data.limit) || 3} 台设备记录，当前已有：\n${list}\n\n是否移除全部旧设备记录并继续登录？`,
+              '设备记录已达上限',
               {
                 type: 'warning',
-                confirmButtonText: '退出其他设备并登录',
+                confirmButtonText: '移除旧设备并登录',
                 cancelButtonText: '取消',
                 customClass: 'pre-wrap-confirm',
               }
@@ -972,7 +1034,7 @@ createApp({
     const loadDevices = async () => {
       devicesLoading.value = true
       try {
-        const data = await api('/api/auth/sessions')
+        const data = await api('/api/auth/devices')
         devices.value = data.items || []
         deviceLimit.value = Math.max(1, Number(data.limit) || 3)
       } catch (e) {
@@ -987,28 +1049,37 @@ createApp({
       loadDevices()
     }
 
-    const kickDevice = async session => {
+    const kickDevice = async device => {
       try {
         await ElMessageBox.confirm(
-          session.current
-            ? '退出当前设备将注销登录并返回入口，是否继续？'
-            : `确定退出设备「${session.deviceName || '未知设备'}」？`,
-          '退出设备',
-          { type: 'warning', confirmButtonText: '退 出', cancelButtonText: '取 消' }
+          device.current
+            ? '移除当前设备记录将注销本机并返回入口，是否继续？'
+            : `确定移除设备「${device.deviceName || '未知设备'}」？该设备的全部登录会话将立即失效。`,
+          '移除设备记录',
+          { type: 'warning', confirmButtonText: '移 除', cancelButtonText: '取 消' }
         )
       } catch (e) { return }
       try {
-        await api(`/api/auth/sessions/${session.id}`, { method: 'DELETE' })
-        if (session.current) { await switchAccount(); return }
-        ElMessage.success('已退出该设备')
+        await api(`/api/auth/devices/${device.id}`, { method: 'DELETE' })
+        if (device.current) { await switchAccount(); return }
+        ElMessage.success('已移除该设备记录')
         await loadDevices()
       } catch (e) { ElMessage.error(e.message) }
     }
 
     const kickOtherDevices = async () => {
+      const others = devices.value.filter(device => !device.current).length
+      if (!others) { ElMessage.info('没有其他设备记录'); return }
       try {
-        const res = await api('/api/auth/sessions/kick-others', { method: 'POST' })
-        ElMessage.success(res.count ? `已退出其他 ${res.count} 台设备` : '没有其他在线设备')
+        await ElMessageBox.confirm(
+          `将移除其他 ${others} 台设备记录，并注销这些设备的全部登录会话，是否继续？`,
+          '移除其他设备',
+          { type: 'warning', confirmButtonText: '移 除', cancelButtonText: '取 消' }
+        )
+      } catch (e) { return }
+      try {
+        const res = await api('/api/auth/devices/kick-others', { method: 'POST' })
+        ElMessage.success(res.count ? `已移除其他 ${res.count} 台设备记录` : '没有其他设备记录')
         await loadDevices()
       } catch (e) { ElMessage.error(e.message) }
     }

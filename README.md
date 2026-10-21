@@ -14,7 +14,7 @@
 | 缓存 | **Redis 7（可选）** | 字典缓存；未配置或连接失败时自动退化为无缓存 |
 | 定时任务 | **node-cron** | 按账号注册定时同步，频率可在页面配置 |
 | 前台 | **Vue 3 + Element Plus** | 源码开发，生产构建为压缩 + 混淆产物；importmap 指向本地 vendor，不依赖外网 CDN |
-| 加固 | **HMAC 请求签名 + 设备会话 + 限流** | 所有已登录请求需签名，时间窗 ±5 分钟、nonce 防重放 |
+| 加固 | **HMAC 请求签名 + 设备记录 + 限流** | 所有已登录请求需签名，时间窗 ±5 分钟、nonce 防重放 |
 | 部署 | **Docker Compose** | app + mysql + redis 一次拉起，健康检查、数据卷、备份脚本齐备 |
 
 ```
@@ -22,7 +22,7 @@
 │  app (node:24-alpine, 非 root, :3000)                          │
 │   ├─ /                用户端（卡密登录 / 价格 / 报表）          │
 │   ├─ /admin           管理后台（ADMIN_PASSWORD 登录）           │
-│   ├─ /api/auth        卡密注册 / 密码登录 / 设备会话            │
+│   ├─ /api/auth        卡密注册 / 密码登录 / 设备记录            │
 │   ├─ /api/admin       卡密 / 账号 / 字典 / 区服 / 设置 / 日志   │
 │   ├─ /api/prices      查询/保存(乐观并发)/趋势/比价/导入导出    │
 │   ├─ /api/game/sync   游戏直连同步（175 城 × 25 商品）          │
@@ -43,7 +43,7 @@
 | 密码登录 | 已注册账号直接「昵称 + 密码」登录；到期或试用结束返回 40301，封禁返回 40302，后台关闭注册返回 40303 |
 | 帮助配置 | 后台可用 Markdown 配置「卡密获取提示」和「token 获取教程」，支持链接、图片、列表等；服务端清洗危险 HTML，公开配置接口无需登录 |
 | 数据隔离 | 价格、历史、税率、定时同步配置、游戏 token、当前区服默认按账号隔离；首次登录必须设置当前区服，之后可随时切换；启用主账号共享后仅只读回退本区服缺失商品，未登录不可访问业务接口 |
-| 设备管理 | 每账号默认 3 台设备；超限登录返回设备列表，可踢出单个或全部其他设备；后台可调整单账号上限并强制下线 |
+| 设备管理 | 每账号默认保存 3 台设备记录，同一设备可多标签页同时在线；新增设备超限时返回记录列表，可移除单台或全部其他设备；后台可调整单账号记录上限并强制下线 |
 | 价格录入 | 桌面表格 / 手机卡片双布局；行内输入、同上一行、脏值跟踪、确认弹窗、Ctrl+Enter 保存 |
 | 查询与字典 | 区服必填、城池必选、商品可选；城池 / 商品字典**只读**，由管理员在后台统一维护 |
 | 实时协作 | WebSocket 推送同账号其他设备的改价，正在查看的城池立即刷新；本地未保存修改时标记冲突 |
@@ -55,7 +55,7 @@
 | 报表 | 涨跌幅榜、改价与同步热度图 |
 | 历史与趋势 | `price_history` 记录改价前后值与操作人；SVG 趋势图支持 7/30/90 天 |
 | 导入导出 | Excel 导入（模板下载、预览、merge 模式；未知商品需管理员先维护）、CSV 导出 |
-| 管理后台 | 概览、卡密批量生成（单批最多 500）/导出/直接绑定账号/作废、账号续期/改设备上限/重置密码/踢下线/封禁/删除、区服参数授权、字典与区服维护、卡密启用时间、注册开关与公告、卡密提示与 token 教程 Markdown 配置、同步日志 |
+| 管理后台 | 概览、卡密批量生成（单批最多 500）/导出/直接绑定账号/作废、账号续期/改设备记录上限/重置密码/踢下线/封禁/删除、区服参数授权、字典与区服维护、卡密启用时间、注册开关与公告、卡密提示与 token 教程 Markdown 配置、同步日志 |
 | 运维 | 健康检查 `/api/health`、Docker 健康依赖、MySQL 备份/恢复脚本、PWA 离线缓存 |
 
 ## 三、快速开始
@@ -88,7 +88,7 @@ npm install --registry=https://registry.npmmirror.com   # 国内网络建议
 npm run build:ui   # 可选：生成混淆产物；不做则回退源码
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 60 项后端/账号/设备/游戏/报表/按区服主账号测试
+npm test           # 62 项后端/账号/设备/游戏/报表/按区服主账号测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -111,8 +111,9 @@ ADMIN_PASSWORD='your-strong-password' npm start
 - 后台「卡密启用时间」默认 `2026-10-22 00:00:00`。启用前新账号可不填卡密注册，账号无卡密、到期时间为启用时间，界面显示「试用中」；启用后新注册必须填卡密，已有试用账号也需补卡密才能登录。
 - 修改启用时间会同步所有无卡密试用账号的到期时间；试用账号在启用前也可提前输入卡密转为正式账号。
 - 后台可对账号直接修改到期时间，也可「用卡密续期」：输入一张未使用卡密，按其类型从当前到期时间（已过期则从现在）顺延；永久有效账号同样从现在重新计时。
-- 设备会话：登录必须携带 `deviceId`/`deviceName`（浏览器自动生成）。默认上限 3 台；超限时返回 `40910` 与在线设备列表，用户确认后可踢出全部其他设备再登录。
-- 后台可踢出单台设备、踢出全部设备、重置密码（同时注销全部会话）、封禁（同时删除全部会话）与解封。
+- 设备记录：登录携带 `deviceId`/`deviceName`/`deviceMeta`。设备 ID 同时保存在 localStorage 与 first-party cookie，二者互为备份；都不可用时服务端按浏览器特征生成 `fp-*` 指纹 ID。每个设备记录可同时建立多个会话（例如同一浏览器多个标签页），不额外占用名额。
+- 默认最多保存 3 台设备记录；新设备超限时返回 `40910` 与设备记录列表，用户确认后可移除全部旧记录再登录。普通退出登录只删除会话，不删除设备记录；移除设备记录会注销该设备的全部会话。
+- 后台可调整单账号设备记录上限、清空全部设备记录并踢下线、重置密码（同时注销全部会话）、封禁（同时删除全部会话）与解封。
 - 同一账号的多台设备共享价格与游戏 token，可实现实时协作；不同账号之间完全不可见。
 
 ## 五、环境变量
@@ -145,12 +146,12 @@ sgbhsdPriceShare/
 │   ├── master.js           # 按区服主账号、共享开关与查看者广播
 │   ├── scheduler.js        # 按账号 cron 定时同步与运行日志
 │   ├── util.js             # 统一响应/校验
-│   ├── auth.js             # 密码（scrypt）、设备会话、账号状态
+│   ├── auth.js             # 密码（scrypt）、设备记录/会话、账号状态
 │   ├── sign.js             # HMAC 请求签名 + nonce 防重放
 │   ├── ratelimit.js        # 内存限流
 │   ├── keys.js             # 卡密生成/校验/类型
 │   ├── routes/
-│   │   ├── auth.js         # 卡密注册 / 登录 / 设备会话
+│   │   ├── auth.js         # 卡密注册 / 登录 / 设备记录
 │   │   ├── admin.js        # /api/admin 管理接口
 │   │   ├── dict.js         # /api/dict（只读）
 │   │   ├── servers.js      # /api/servers
@@ -182,7 +183,7 @@ sgbhsdPriceShare/
 │   ├── manifest.webmanifest
 │   └── icons/icon.svg
 ├── scripts/build-ui.js     # esbuild 打包 + javascript-obfuscator 混淆
-├── test/                   # api / auth / game / reports / master 共 60 项
+├── test/                   # api / auth / game / reports / master 共 62 项
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -204,22 +205,22 @@ X-Nonce:         <随机串>
 X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + TS + "\n" + NONCE + "\n" + SHA256(rawBody))
 ```
 
-服务端校验时间窗 ±5 分钟、nonce 10 分钟去重、设备与会话绑定；失败返回 401（`40111` 设备不匹配，`40112` 签名无效/重放）。
+服务端校验时间窗 ±5 分钟、nonce 10 分钟去重、会话与设备 ID 绑定；失败返回 401（`40111` 设备不匹配，`40112` 签名无效/重放）。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查（驱动、缓存、WS 人数、调度状态） |
 | GET | `/api/public/config` | 公开配置：卡密是否启用、启用时间、注册开关、公告、卡密提示与 token 教程的已清洗 HTML |
-| POST | `/api/auth/login` | `{name,password,key?,mode?,deviceId,deviceName,kick?}`；`mode=login` 只登录已有账号（未知账号 `40401`），`mode=register` 只注册新账号（已有昵称 `40012`）；不传 `mode` 保留自动识别；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；超设备上限返回 `40910` |
+| POST | `/api/auth/login` | `{name,password,key?,mode?,deviceId,deviceName,deviceMeta?,kick?}`；`mode=login` 只登录已有账号（未知账号 `40401`），`mode=register` 只注册新账号（已有昵称 `40012`）；不传 `mode` 保留自动识别；卡密启用前新账号可无 key 试用，启用后必须带卡密；已有账号可带新卡密续期；新设备超出记录上限返回 `40910`，`kick=all` 或设备记录 ID 可移除后继续 |
 | POST | `/api/auth/logout` | 注销当前会话 |
 | GET | `/api/auth/me` | 当前账号、到期时间、游戏 token（仅本人）、赋税减免、当前区服、`allowSyncServer`、本区服主账号名称、`masterPricesAllowed` 与查看开关 |
 | PUT | `/api/auth/server` | 传 `{server:string}` 设置/切换当前区服，返回该区服主账号与共享开关状态 |
 | PUT | `/api/auth/relief` | 更新赋税减免（0~100） |
 | PUT | `/api/auth/master-prices` | 传 `{enabled:boolean}` 开启/关闭查看本区服主账号价格；主账号自身不可开启，管理员禁用共享的账号返回 `403`，当前区服无主账号时开启返回 `400` |
 | PUT | `/api/auth/token` | 更新本人游戏 token |
-| GET | `/api/auth/sessions` | 当前账号在线设备列表 |
-| DELETE | `/api/auth/sessions/:id` | 踢出指定设备 |
-| POST | `/api/auth/sessions/kick-others` | 踢出除本机外的全部设备 |
+| GET | `/api/auth/sessions`、`/api/auth/devices` | 当前账号设备记录列表（含在线会话数、是否本机、最近活跃；`sessions` 为兼容别名） |
+| DELETE | `/api/auth/sessions/:id`、`/api/auth/devices/:id` | 移除指定设备记录及其全部会话 |
+| POST | `/api/auth/sessions/kick-others`、`/api/auth/devices/kick-others` | 移除除本机外的全部设备记录及会话 |
 | POST | `/api/admin/login` | 管理后台登录（`X-Admin-Token` 默认有效期 7 天，可用 `ADMIN_TOKEN_HOURS` 调整，重启失效） |
 | GET | `/api/admin/overview` | 概览统计 |
 | GET/POST | `/api/admin/keys`、`/keys/export`、`/keys/revoke`、`/batches` | 卡密生成/列表/导出/作废/批次 |
@@ -227,7 +228,7 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | GET/POST | `/api/admin/accounts`、`/:id/status`、`/:id/expires`、`/:id/device-limit`、`/:id/password`、`/:id/kick`、`/:id/sync-server`、`/:id/master`、`/:id/master-prices`、`DELETE /:id` | 账号管理；`/expires` 支持 `expiresAt` / `extendDays` / `keyCode`，卡密绑定从当前到期时间顺延且只能使用一次（永久账号从现在重新计时）；`/sync-server` 传 `{allow:boolean}` 控制区服参数权限；`/master` 传 `{master:boolean}` 按账号当前区服设置/取消主账号；`/master-prices` 传 `{allowed:boolean}` 允许/禁止指定账号共享主账号价格 |
 | GET/POST/PUT/DELETE | `/api/admin/dict`、`/api/admin/servers` | 字典 / 区服维护（删除被引用项返回 40901/40902，`?force=1` 强制）；区服列表返回 `masterAccountId` 与 `masterCandidates` |
 | POST | `/api/admin/servers/:id/master` | 传 `{accountId:number\|null}` 设置/取消该区服主账号；账号当前区服必须与目标区服一致。设置时本区服允许共享的普通账号默认开启，取消时关闭 |
-| GET/PUT | `/api/admin/settings` | 注册开关、公告、默认设备上限、`keyRequiredAt`、`keyHelpMd`、`tokenHelpMd`；GET/PUT 返回渲染后的 HTML |
+| GET/PUT | `/api/admin/settings` | 注册开关、公告、默认设备记录上限、`keyRequiredAt`、`keyHelpMd`、`tokenHelpMd`；GET/PUT 返回渲染后的 HTML |
 | POST | `/api/admin/markdown/preview` | `{text}` 预览 Markdown（服务端清洗后返回 HTML） |
 | GET/DELETE | `/api/admin/sync-logs` | 全部账号同步日志 |
 | GET | `/api/dict?type=city\|commodity` | 下拉数据源（登录可读） |
@@ -244,13 +245,13 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | GET | `/api/sync-settings/logs` | 本账号同步记录 |
 | GET | `/api/reports/movers`、`/heat` | 涨跌幅 / 热度 |
 
-错误码：`0` 成功；`40010` 卡密启用后新账号缺卡密；`40012` 注册时昵称已存在；`40111` 设备不匹配；`40112` 签名无效；`40301` 卡密到期或试用结束；`40302` 账号封禁；`40303` 注册关闭；`40401` 登录时账号不存在；`40901` 字典重复/被引用；`40902` 区服被引用；`40903` 价格并发冲突；`40910` 设备数超限；`50301` 后台未启用。
+错误码：`0` 成功；`40010` 卡密启用后新账号缺卡密；`40012` 注册时昵称已存在；`40111` 设备不匹配；`40112` 签名无效；`40301` 卡密到期或试用结束；`40302` 账号封禁；`40303` 注册关闭；`40401` 登录时账号不存在；`40901` 字典重复/被引用；`40902` 区服被引用；`40903` 价格并发冲突；`40910` 设备记录数超限；`50301` 后台未启用。
 
 ### WebSocket `/ws`
 
-连接地址 `/ws?token=<session>&device=<deviceId>`，校验失败关闭码 4401（未认证）/ 4403（账号不可用）。服务端只向同账号在线设备广播：
+连接地址 `/ws?token=<session>&device=<deviceId>`，校验失败关闭码 4401（未认证/设备记录已移除）/ 4403（账号不可用）。服务端只向同账号在线会话广播：
 
-- `hello`（账号昵称、在线设备数）
+- `hello`（账号昵称、在线会话数）
 - `price.updated` `{server,city,operator,items[]}`（`items` 为空表示需刷新；主账号共享更新额外带 `shared:true`）
 - `master.changed` `{server, masterAccountId, masterAccountName}`（按区服主账号设置变更，客户端忽略非当前区服事件）、`master.preference` `{enabled, allowed?}`（共享开关或管理员权限变更）
 - `dict.changed`、`server.deleted`、`settings.updated`
@@ -293,10 +294,11 @@ Chrome / Edge 在 Application → Local Storage；Firefox 在 存储 → 本地�
 
 | 表 | 说明 |
 | --- | --- |
-| `accounts` | 账号（昵称唯一、scrypt 密码、状态、到期时间、卡密、设备上限、当前区服、区服参数权限） |
-| `sessions` | 设备会话（token、账号、device_id/name、IP、最后活跃） |
+| `accounts` | 账号（昵称唯一、scrypt 密码、状态、到期时间、卡密、设备记录上限、当前区服、区服参数权限） |
+| `account_devices` | 设备记录（账号、稳定 device_id/指纹、名称/平台、首次与最后活跃；账号内 device_id 唯一） |
+| `sessions` | 登录会话（token、账号、设备记录、device_id/name、IP、最后活跃；同一设备可多行） |
 | `invite_keys` | 卡密（code 唯一、类型、状态、批次、备注、使用者、使用时间） |
-| `app_settings` | 全局设置单行（注册开关、公告、默认设备上限、卡密启用时间、卡密提示与 token 教程 Markdown；旧 `master_account_id` 仅用于升级迁移） |
+| `app_settings` | 全局设置单行（注册开关、公告、默认设备记录上限、卡密启用时间、卡密提示与 token 教程 Markdown；旧 `master_account_id` 仅用于升级迁移） |
 | `dict_items` | 字典（city/commodity，`(type,name)` 唯一，`burden` 负重） |
 | `servers` | 区服 |
 | `server_masters` | 区服主账号映射（`server_id` 主键，每区服最多一个主账号；账号或区服删除时级联清理） |
@@ -322,7 +324,7 @@ docker compose exec app npm run db:migrate            # 目标库为空时
 docker compose exec app npm run db:migrate -- --force # 目标库已有数据时合并
 ```
 
-迁移脚本兼容旧版共享库与新卡密库：字典、区服、账号（含区服参数权限）、卡密、价格、历史、税率、坐标、定时设置（含 `server_override`）、按区服主账号映射与同步日志都会导入；旧数据没有 `account_id` 时归入「历史归属账号」（旧 token 所属账号，否则最早注册账号）。旧版全局 `master_account_id` 会按该主账号当时的 `current_server` 转入 `server_masters`，当前区服为空时无法自动归属，需在后台重新设置。本地 SQLite 旧库没有账号时，**首个注册的账号会自动接管旧数据**。会话不迁移，升级后需重新登录以绑定设备。
+迁移脚本兼容旧版共享库与新卡密库：字典、区服、账号（含区服参数权限）、卡密、价格、历史、税率、坐标、定时设置（含 `server_override`）、按区服主账号映射与同步日志都会导入；旧数据没有 `account_id` 时归入「历史归属账号」（旧 token 所属账号，否则最早注册账号）。旧版全局 `master_account_id` 会按该主账号当时的 `current_server` 转入 `server_masters`，当前区服为空时无法自动归属，需在后台重新设置。本地 SQLite 旧库没有账号时，**首个注册的账号会自动接管旧数据**。`migrate-to-mysql` 不迁移会话与设备记录，迁移后需重新登录并重新生成设备记录；同库原地升级会自动补建 `account_devices` 并把仍有 `account_id` 的旧会话回填到设备记录。
 
 ## 十一、安全与加固说明
 
@@ -336,7 +338,7 @@ docker compose exec app npm run db:migrate -- --force # 目标库已有数据时
 
 ## 十二、测试与 CI
 
-- `npm test`：60 项，覆盖账号/卡密一次性占用/后台绑定/永久账号重新计时/试用启用/续期/到期/封禁、设备上限与踢出、签名与重放、数据隔离、首次登录强制设置当前区服与切换、按区服主账号设置/隔离/默认共享/管理员禁用、整行回退、历史/趋势/比价/导出、税率回退、删除主账号清理、字典只读、价格并发、导入导出、游戏协议解析、报表、同步日志、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
+- `npm test`：62 项，覆盖账号/卡密一次性占用/后台绑定/永久账号重新计时/试用启用/续期/到期/封禁、设备记录上限与同设备多会话/退出保留记录/指纹兜底/踢出、签名与重放、数据隔离、首次登录强制设置当前区服与切换、按区服主账号设置/隔离/默认共享/管理员禁用、整行回退、历史/趋势/比价/导出、税率回退、删除主账号清理、字典只读、价格并发、导入导出、游戏协议解析、报表、同步日志、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务（SQLite 默认使用临时库），验证卡密注册、HMAC 签名请求、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

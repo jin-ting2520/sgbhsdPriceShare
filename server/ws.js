@@ -36,6 +36,8 @@ function attach(server) {
     }
 
     ws.accountId = account.id;
+    ws.sessionId = account.sessionId;
+    ws.deviceRefId = account.deviceRefId;
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('message', raw => {
@@ -64,7 +66,7 @@ function attach(server) {
   return wss;
 }
 
-/** 广播：accountId / accountIds 提供时仅发给指定账号的在线设备 */
+/** 广播：accountId / accountIds 提供时仅发给指定账号的在线会话 */
 function broadcast(type, payload, { except, accountId, accountIds } = {}) {
   if (!wss) return;
   const text = JSON.stringify({ type, ...payload, time: Date.now() });
@@ -82,6 +84,16 @@ function clientCount() {
   return wss ? wss.clients.size : 0;
 }
 
+/** 会话或设备被移除后断开对应实时连接 */
+function closeSessions(sessionIds) {
+  if (!wss || !Array.isArray(sessionIds) || !sessionIds.length) return;
+  const ids = new Set(sessionIds.map(Number));
+  for (const ws of wss.clients) {
+    if (!ids.has(Number(ws.sessionId))) continue;
+    try { ws.close(4401, 'session-removed'); } catch { /* ignore */ }
+  }
+}
+
 function close() {
   if (!wss) return;
   for (const ws of wss.clients) {
@@ -91,4 +103,4 @@ function close() {
   wss = null;
 }
 
-module.exports = { attach, broadcast, clientCount, close };
+module.exports = { attach, broadcast, clientCount, closeSessions, close };

@@ -1,6 +1,6 @@
 'use strict';
 
-/** 账号体系：卡密注册 / 到期 / 封禁 / 多设备会话 / 管理后台 / 数据隔离 */
+/** 账号体系：卡密注册 / 到期 / 封禁 / 设备记录 / 管理后台 / 数据隔离 */
 
 const fs = require('node:fs');
 const nodePath = require('node:path');
@@ -394,10 +394,20 @@ test('封禁账号：登录 403，在线会话立即失效；解封恢复', asyn
   assert.equal(back.res.status, 200);
 });
 
-/* ------------------------------ 多设备会话 ------------------------------ */
+/* ------------------------------ 设备记录 ------------------------------ */
 
-test('默认 3 台设备：第 4 台返回设备列表，踢出后可登录', async () => {
-  const first = await registerAccount(base, admin, { name: '设备测试', deviceId: makeDeviceId('d1') });
+test('默认 3 台设备记录：同一设备可多标签页在线，第 4 台设备需清理后登录', async () => {
+  const d1 = makeDeviceId('d1');
+  const first = await registerAccount(base, admin, { name: '设备测试', deviceId: d1 });
+  const sameDeviceTab = await login('设备测试', 'pass-1234', { deviceId: d1, deviceName: '同一台另一个标签页' });
+  assert.equal(sameDeviceTab.res.status, 200, '同一设备不应占用新的设备名额');
+
+  const firstDevices = await sameDeviceTab.client.get('/api/auth/devices');
+  assert.equal(firstDevices.status, 200);
+  assert.equal(firstDevices.json.data.items.length, 1);
+  assert.equal(firstDevices.json.data.items[0].activeSessions, 2);
+  assert.equal(firstDevices.json.data.items[0].current, true);
+
   const second = await login('设备测试', 'pass-1234', { deviceId: makeDeviceId('d2'), deviceName: '第二台' });
   const third = await login('设备测试', 'pass-1234', { deviceId: makeDeviceId('d3'), deviceName: '第三台' });
   assert.equal(second.res.status, 200);
@@ -408,11 +418,13 @@ test('默认 3 台设备：第 4 台返回设备列表，踢出后可登录', as
   assert.equal(fourth.status, 409);
   assert.equal(fourth.json.code, 40910);
   assert.equal(fourth.json.data.limit, 3);
+  assert.equal(fourth.json.data.devices.length, 3);
   assert.equal(fourth.json.data.sessions.length, 3);
 
   const kickAll = await fourthClient.login({ name: '设备测试', password: 'pass-1234', kick: 'all' });
   assert.equal(kickAll.status, 200, kickAll.json && kickAll.json.message);
-  assert.equal((await first.get('/api/auth/me')).status, 401, '旧设备会话应被踢出');
+  assert.equal((await first.get('/api/auth/me')).status, 401, '旧设备会话应被注销');
+  assert.equal((await sameDeviceTab.client.get('/api/auth/me')).status, 401, '同设备其他会话也应被注销');
 
   const sessions = await fourthClient.get('/api/auth/sessions');
   assert.equal(sessions.json.data.limit, 3);
@@ -425,14 +437,59 @@ test('默认 3 台设备：第 4 台返回设备列表，踢出后可登录', as
   assert.equal(c6.res.status, 200);
 
   const kickOthers = await c6.client.post('/api/auth/sessions/kick-others', {});
-  assert.equal(kickOthers.json.data.count, 2);
+  assert.equal(kickOthers.json.data.count, 2, '应移除当前设备以外的 2 台设备记录');
   assert.equal((await c5.client.get('/api/auth/me')).status, 401);
 
-  const own = await c6.client.get('/api/auth/sessions');
+  const own = await c6.client.get('/api/auth/devices');
   const ownId = own.json.data.items.find(s => s.current).id;
   const removed = await c6.client.del(`/api/auth/sessions/${ownId}`);
   assert.equal(removed.status, 200);
+  assert.equal(removed.json.data.self, true);
   assert.equal((await c6.client.get('/api/auth/me')).status, 401);
+});
+
+test('普通退出只删除会话，设备记录保留', async () => {
+  const deviceId = makeDeviceId('keep');
+  const user = await registerAccount(base, admin, { name: '退出保留设备', deviceId });
+  await user.post('/api/auth/logout', {});
+  assert.equal((await user.get('/api/auth/me')).status, 401);
+
+  const again = await login('退出保留设备', 'pass-1234', { deviceId });
+  assert.equal(again.res.status, 200);
+  const devices = await again.client.get('/api/auth/devices');
+  assert.equal(devices.json.data.items.length, 1);
+  assert.equal(devices.json.data.items[0].current, true);
+});
+
+test('无持久设备 ID 时按设备特征兜底识别为同一设备', async () => {
+  rateLimit.reset();
+  const [code] = await issueKeys(admin, 'day', 1);
+  const meta = {
+    platform: 'TestOS', screen: '1920x1080@1', timezone: 'UTC',
+    language: 'zh-CN', cores: 8, memory: 8, touch: 0,
+  };
+  const first = createClient(base);
+  const firstLogin = await first.login({
+    name: '指纹设备测试', password: 'pass-1234', key: code,
+    deviceId: '', deviceName: '指纹设备', deviceMeta: meta,
+  });
+  assert.equal(firstLogin.status, 200, firstLogin.json && firstLogin.json.message);
+  const derivedId = firstLogin.json.data.deviceId;
+  assert.match(derivedId, /^fp-[a-f0-9]{32}$/);
+  first.deviceId = derivedId;
+
+  const second = createClient(base);
+  const secondLogin = await second.login({
+    name: '指纹设备测试', password: 'pass-1234',
+    deviceId: '', deviceName: '指纹设备', deviceMeta: meta,
+  });
+  assert.equal(secondLogin.status, 200);
+  assert.equal(secondLogin.json.data.deviceId, derivedId);
+  second.deviceId = derivedId;
+
+  const devices = await second.get('/api/auth/devices');
+  assert.equal(devices.json.data.items.length, 1);
+  assert.equal(devices.json.data.items[0].activeSessions, 2);
 });
 
 test('设备已满时提交续期卡密不消耗卡密，踢出后重试成功', async () => {
@@ -465,7 +522,7 @@ test('设备已满时提交续期卡密不消耗卡密，踢出后重试成功',
   assert.equal((await first.get('/api/auth/me')).status, 401, 'kick=all 应注销旧设备');
 });
 
-test('管理员可调整单账号设备上限并踢下线', async () => {
+test('管理员可调整单账号设备记录上限并踢下线', async () => {
   const user = await registerAccount(base, admin, { name: '上限调整', deviceId: makeDeviceId('u1') });
   const id = await accountId('上限调整');
 
@@ -477,6 +534,7 @@ test('管理员可调整单账号设备上限并踢下线', async () => {
 
   const kick = await admin.post(`/api/admin/accounts/${id}/kick`, {});
   assert.equal(kick.json.data.count, 1);
+  assert.equal(kick.json.data.sessions, 1);
   assert.equal((await user.get('/api/auth/me')).status, 401);
 
   await admin.post(`/api/admin/accounts/${id}/device-limit`, { limit: 3 });
