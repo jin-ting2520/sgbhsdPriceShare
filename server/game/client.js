@@ -23,6 +23,7 @@ const MSG = {
   GC_MONOPOLY_INFO: 2102,
   CG_MONOPOLY_PRODUCT: 2103,
   GC_MONOPOLY_PRODUCT: 2104,
+  GC_MONOPOLY_NEWS: 2136,
   CG_REGION_CAPITAL_APPLY_LIST: 6905,
 };
 
@@ -39,6 +40,9 @@ class GameClient {
     this.parser = new FrameParser();
     this.waiters = [];
     this.errors = [];
+    this.news = [];
+    this.newsSeen = false;
+    this.firstNews = new Promise(resolve => { this.resolveFirstNews = resolve; });
     this.heartbeatTimer = null;
     this.closed = false;
     this.strictErrors = true;
@@ -100,6 +104,10 @@ class GameClient {
       this.rejectAll(new Error('游戏登录被拒绝（GcLogin.success=false）'));
       return;
     }
+    if (msgType === MSG.GC_MONOPOLY_NEWS) {
+      this.captureNews(msg);
+      return;
+    }
 
     for (let i = this.waiters.length - 1; i >= 0; i--) {
       const w = this.waiters[i];
@@ -109,6 +117,43 @@ class GameClient {
       clearTimeout(w.timer);
       w.resolve(msg);
     }
+  }
+
+  captureNews(msg) {
+    for (const raw of Array.isArray(msg.news) ? msg.news : []) {
+      if (!raw) continue;
+      const item = { ...raw };
+      const key = `${raw.metaId}|${raw.capitalId}|${raw.productId}`;
+      const idx = this.news.findIndex(n => n._key === key);
+      if (idx >= 0) this.news[idx] = { ...item, _key: key };
+      else this.news.push({ ...item, _key: key });
+    }
+    if (!this.newsSeen) {
+      this.newsSeen = true;
+      this.resolveFirstNews(true);
+    }
+  }
+
+  getNews() {
+    return this.news.map(({ _key, ...item }) => item);
+  }
+
+  waitForNews(timeoutMs = 1500) {
+    if (this.newsSeen) return Promise.resolve(true);
+    return new Promise(resolve => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      }, timeoutMs);
+      this.firstNews.then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   rejectAll(err) {

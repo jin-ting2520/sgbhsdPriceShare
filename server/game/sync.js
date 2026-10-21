@@ -10,7 +10,8 @@
 const fs = require('node:fs');
 const nodePath = require('node:path');
 const {
-  query, get, tx, upsertServer, findDictId, createDictItem, setCityTax, nowText, COMMODITY_LIST,
+  query, get, tx, upsertServer, findDictId, createDictItem, setCityTax, nowText, formatTime,
+  COMMODITY_LIST, saveCityEvents,
 } = require('../db');
 const { login } = require('./login');
 const { GameClient } = require('./client');
@@ -26,6 +27,8 @@ try {
 const CITY_QUERY_TIMEOUT_MS = 4000;
 const CITIES_PER_SYNC_LIMIT = 300;
 const QUERY_CONCURRENCY = 4;
+const CITY_BY_NODE = new Map(CITY_MAP.map(c => [c.nodeNo, c]));
+const CITY_BY_META = new Map(CITY_MAP.map(c => [c.metaId, c]));
 
 /** 商品配置 id（1-25 及 201-225 复刻）→ 商品名 */
 function productName(id) {
@@ -39,6 +42,57 @@ function gamePrice(v) {
   const n = Number(v) / 100;
   if (!Number.isFinite(n)) return null;
   return Math.round(n * 100) / 100;
+}
+
+function newsTimeMs(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n < 100000000000 ? Math.round(n * 1000) : Math.round(n);
+}
+
+function newsCity(capitalId, base) {
+  let raw;
+  try { raw = BigInt(capitalId); } catch { return null; }
+  if (raw <= 0n) return null;
+  const candidates = [];
+  if (raw > base) candidates.push(raw - base);
+  if (raw <= 1000000n) candidates.push(raw);
+  if (raw > 1100000n) candidates.push(raw - 1100000n);
+  for (const node of candidates) {
+    if (node <= 0n || node > 1000000n) continue;
+    const city = CITY_BY_NODE.get(Number(node));
+    if (city) return city;
+  }
+  return CITY_BY_META.get(Number(raw)) || null;
+}
+
+function parseCityNews(list, serverBase, nowMs = Date.now()) {
+  let base;
+  try { base = typeof serverBase === 'bigint' ? serverBase : BigInt(serverBase); } catch { return []; }
+  const out = new Map();
+  for (const raw of Array.isArray(list) ? list : []) {
+    if (!raw) continue;
+    const city = newsCity(raw.capitalId, base);
+    if (!city) continue;
+    const commodity = productName(Number(raw.productId));
+    if (!commodity) continue;
+    const startMs = newsTimeMs(raw.startTime);
+    const endMs = newsTimeMs(raw.endTime);
+    if (endMs && endMs <= nowMs) continue;
+    if (startMs && endMs && endMs <= startMs) continue;
+    const metaId = (String(raw.metaId || '').trim()
+      || `news:${raw.capitalId}:${raw.startTime}:${raw.endTime}`).slice(0, 128);
+    const event = {
+      city: city.name,
+      commodity,
+      metaId,
+      startsAt: startMs ? formatTime(startMs) : formatTime(nowMs),
+      endsAt: endMs ? formatTime(endMs) : null,
+    };
+    out.set(`${city.nodeNo}|${commodity}|${metaId}`, event);
+  }
+  return [...out.values()];
 }
 
 /** 并发限制的 map */
@@ -164,6 +218,7 @@ async function syncPrices(opts) {
     saved: 0,
     created: 0,
     updated: 0,
+    events: 0,
     newCities: [],
     failed: [],
     syncedAt: nowText(),
@@ -175,6 +230,7 @@ async function syncPrices(opts) {
   try {
     await client.open();
     await client.login(info, alipayUserId);
+    await client.waitForNews(1500);
 
     const queried = await mapLimit(cities, QUERY_CONCURRENCY, async city => {
       const capId = base + BigInt(city.nodeNo);
@@ -270,6 +326,21 @@ async function syncPrices(opts) {
         }
       }
     }
+
+    const eventRows = [];
+    for (const event of parseCityNews(client.getNews(), base)) {
+      const { id: cityId } = await ensureCityId(event.city);
+      const commodityId = await findDictId('commodity', event.commodity);
+      if (!cityId || !commodityId) continue;
+      eventRows.push({
+        cityId,
+        commodityId,
+        metaId: event.metaId,
+        startsAt: event.startsAt,
+        endsAt: event.endsAt,
+      });
+    }
+    result.events = await saveCityEvents(serverId, eventRows);
   } finally {
     client.close();
   }
@@ -280,4 +351,5 @@ async function syncPrices(opts) {
 module.exports = {
   syncPrices, inspectToken, serverOfLogin,
   parseProducts, productName, gamePrice, ensureCityId, CITY_MAP,
+  parseCityNews, newsTimeMs, newsCity,
 };

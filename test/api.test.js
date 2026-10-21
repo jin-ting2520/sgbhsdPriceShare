@@ -220,6 +220,61 @@ test('比价：跨城池价格矩阵含最低买入城', async () => {
   assert.equal(r.json.data.summary.bestBuyCity, '江陵');
 });
 
+test('大事件：同区服共享标记、过期过滤、重复推送更新', async () => {
+  const serverId = await db.upsertServer('T1');
+  const cityId = await db.findDictId('city', '桂阳');
+  const commodityId = await db.findDictId('commodity', '谷物');
+  const now = Date.now();
+  const activeEnd = now + 3600000;
+
+  await db.saveCityEvents(serverId, [
+    {
+      cityId, commodityId, metaId: '1',
+      startsAt: db.formatTime(now - 60000), endsAt: db.formatTime(activeEnd),
+    },
+    {
+      cityId, commodityId, metaId: 'news-expired',
+      startsAt: db.formatTime(now - 7200000), endsAt: db.formatTime(now - 3600000),
+    },
+  ]);
+
+  const query = await a.get('/api/prices?server=T1&city=桂阳');
+  assert.equal(query.json.data.events.length, 1);
+  assert.equal(query.json.data.events[0].metaId, '1');
+  assert.equal(query.json.data.events[0].commodity, '谷物');
+  assert.equal(query.json.data.events[0].priceCorrection, 0.35);
+  assert.equal(query.json.data.events[0].description, '桂阳多地遭黄巾残部劫粮焚仓，粮食储备锐减，谷物价格大涨35%');
+  const gu = query.json.data.items.find(i => i.commodity === '谷物');
+  assert.equal(gu.events.length, 1);
+  assert.equal(gu.events[0].startsAt, db.formatTime(now - 60000));
+  assert.equal(gu.buy, 33.8);
+  assert.equal(gu.sell, 41.9);
+
+  const matrix = await a.get('/api/prices/matrix?server=T1&commodity=谷物');
+  const guiyang = matrix.json.data.items.find(i => i.city === '桂阳');
+  assert.equal(guiyang.events.length, 1);
+  assert.equal(matrix.json.data.events.length, 1);
+
+  const b = await registerAccount(base, admin, { name: '事件共享玩家', password: 'pass-3333' });
+  const shared = await b.get('/api/prices?server=T1&city=桂阳');
+  assert.equal(shared.json.data.events.length, 1, '同区服其他账号可见');
+
+  const newEnd = now + 7200000;
+  await db.saveCityEvents(serverId, [{
+    cityId, commodityId, metaId: '1',
+    startsAt: db.formatTime(now - 120000), endsAt: db.formatTime(newEnd),
+  }]);
+  const updated = await db.getActiveCityEvents(serverId, cityId);
+  assert.equal(updated.length, 1, '相同事件只保留一条');
+  assert.equal(updated[0].endsAt, db.formatTime(newEnd));
+
+  await db.saveCityEvents(serverId, [{
+    cityId, commodityId, metaId: '1',
+    startsAt: db.formatTime(now - 7200000), endsAt: db.formatTime(now - 3600000),
+  }]);
+  assert.equal((await db.getActiveCityEvents(serverId, cityId)).length, 0);
+});
+
 test('导出：CSV 含表头与 BOM', async () => {
   const r = await a.get('/api/prices/export?server=T1&city=桂阳');
   assert.equal(r.status, 200);

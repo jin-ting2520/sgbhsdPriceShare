@@ -210,12 +210,15 @@
         <span>商品 <b>{{ rows.length }}</b> 项</span>
         <span>已填写 <b class="ok">{{ stats.filled }}</b> 项</span>
         <span v-if="viewMasterPrices">主账号共享 <b class="ok">{{ sharedCount }}</b> 项</span>
+        <span v-if="cityEvents.length">大事件 <b class="danger">{{ activeEventCount }}</b> 种商品</span>
         <span>待保存 <b :class="changedCount ? 'danger' : ''">{{ changedCount }}</b> 项</span>
         <span v-if="!queried" style="margin-left:auto">区服、城池、买价、卖价显示 “-”，选择后即可录入</span>
       </div>
 
       <el-alert v-if="conflictCount" type="warning" :closable="false" show-icon style="margin-bottom:10px"
         :title="`有 ${conflictCount} 项价格已被他人更新，你本地有未保存修改；保存时会提示冲突，可覆盖或改用最新数据`"></el-alert>
+      <el-alert v-if="queried && cityEvents.length" type="warning" :closable="false" show-icon style="margin-bottom:10px"
+        :title="cityEventText"></el-alert>
 
       <!-- 桌面端：表格 -->
       <el-table class="desktop-table" :data="rows" size="default" border stripe
@@ -234,6 +237,11 @@
                 <span class="burden-tag" v-if="scope.row.burden != null">负重{{ scope.row.burden }}</span>
                 <el-tag v-if="scope.row.source === 'master'" size="small" type="warning" effect="plain"
                   style="margin-left:6px">主账号</el-tag>
+                <el-tooltip v-if="scope.row.events.length" :content="eventTip(scope.row.events)">
+                  <el-tag size="small" type="danger" effect="plain" style="margin-left:6px">
+                    {{ eventLabel(scope.row.events) }}
+                  </el-tag>
+                </el-tooltip>
                 <span v-if="isDirty(scope.row)" class="dirty-dot">*</span>
                 <el-tag v-if="scope.row._remoteConflict" size="small" type="warning" effect="plain"
                   style="margin-left:6px">已被他人更新</el-tag>
@@ -289,6 +297,11 @@
               <span class="burden-tag" v-if="row.burden != null">负重{{ row.burden }}</span>
               <el-tag v-if="row.source === 'master'" size="small" type="warning" effect="plain"
                 style="margin-left:6px">主账号</el-tag>
+              <el-tooltip v-if="row.events.length" :content="eventTip(row.events)">
+                <el-tag size="small" type="danger" effect="plain" style="margin-left:6px">
+                  {{ eventLabel(row.events) }}
+                </el-tag>
+              </el-tooltip>
               <span v-if="isDirty(row)" class="dirty-dot">*</span>
               <el-tag v-if="row._remoteConflict" size="small" type="warning" effect="plain"
                 style="margin-left:6px">已被他人更新</el-tag>
@@ -340,7 +353,7 @@
       <div class="help-grid">
         <div class="help-item">
           <h4>游戏直连同步</h4>
-          <p>点「同步」粘贴游戏登录 token（网页端 localStorage 的 x-game-token-pcweb），即可通过官方接口实时抓取全服 175 城价格，无需截图逐条录入；token 保存在当前账号下（其他账号不可见）并可留空复用。数据库存税前原价与各城税率，页面按「我的赋税减免」实时换算（卖出=原价−赋税，买入=原价+赋税），每城仅 3 个商品可买入。</p>
+          <p>点「同步」粘贴游戏登录 token（网页端 localStorage 的 x-game-token-pcweb），即可通过官方接口实时抓取全服 175 城价格，无需截图逐条录入；token 保存在当前账号下（其他账号不可见）并可留空复用。数据库存税前原价与各城税率，页面按「我的赋税减免」实时换算（卖出=原价−赋税，买入=原价+赋税），每城仅 3 个商品可买入。同步时还会自动接收游戏大事件推送（2136），按区服、城池和商品在列表中显示事件文案与涨跌幅度，价格已按事件修正计算。</p>
         </div>
         <div class="help-item">
           <h4>实时协作</h4>
@@ -615,6 +628,9 @@
           <template #default="s">
             {{ s.row.city }}
             <el-tag v-if="s.row.source === 'master'" size="small" type="warning" effect="plain">主</el-tag>
+            <el-tooltip v-if="s.row.events.length" :content="eventTip(s.row.events)">
+              <el-tag size="small" type="danger" effect="plain">{{ eventLabel(s.row.events) }}</el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="买价" prop="buy" width="90" align="right" sortable>

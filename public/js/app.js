@@ -402,13 +402,58 @@ createApp({
       if (!Number.isFinite(t) || t <= 0) return 0
       return t * (1 - taxRelief.value / 100)
     }
-    const viewBuy = (raw, tax) => (raw == null ? null : Math.round(Number(raw) * (1 + effTax(tax)) * 10) / 10)
-    const viewSell = (raw, tax) => (raw == null ? null : Math.round(Number(raw) * (1 - effTax(tax)) * 10) / 10)
+    const eventCorrection = events => {
+      const list = Array.isArray(events) ? events : []
+      for (const event of list) {
+        if (!event || event.priceCorrection == null) continue
+        const correction = Number(event.priceCorrection)
+        if (Number.isFinite(correction)) return correction
+      }
+      return 0
+    }
+    const correctionFactor = correction => {
+      const n = Number(correction)
+      return Number.isFinite(n) ? Math.max(0.01, 1 + n) : 1
+    }
+    const viewBuy = (raw, tax, correction = 0) => (raw == null
+      ? null
+      : Math.round(Number(raw) * (1 + effTax(tax)) * correctionFactor(correction) * 10) / 10)
+    const viewSell = (raw, tax, correction = 0) => (raw == null
+      ? null
+      : Math.round(Number(raw) * (1 - effTax(tax)) * correctionFactor(correction) * 10) / 10)
 
     const rows = ref([])
+    const cityEvents = ref([])
     const queried = ref(false)
     const loading = ref(false)
     const saving = ref(false)
+
+    const eventTip = events => {
+      const list = Array.isArray(events) ? events : []
+      const descriptions = list.map(e => e && e.description).filter(Boolean)
+      const endsAt = list.map(e => e.endsAt).filter(Boolean).sort()
+      const title = descriptions.length ? descriptions.join('；') : '大事件进行中，价格可能上涨或下跌'
+      return `${title}${endsAt.length ? `；最近结束 ${String(endsAt[0]).slice(5, 16)}` : ''}`
+    }
+    const eventLabel = events => {
+      const list = Array.isArray(events) ? events : []
+      if (list.length > 1) return `大事件×${list.length}`
+      const correction = Number(list[0] && list[0].priceCorrection)
+      if (Number.isFinite(correction) && correction !== 0) {
+        const percent = Math.round(Math.abs(correction) * 10000) / 100
+        return `大事件 ${correction > 0 ? '↑' : '↓'}${percent}%`
+      }
+      return '大事件'
+    }
+    const activeEventCount = computed(() => new Set(
+      cityEvents.value.map(e => Number(e.commodityId)).filter(Number.isFinite)
+    ).size)
+    const cityEventText = computed(() => {
+      const descriptions = cityEvents.value.map(e => e && e.description).filter(Boolean)
+      return descriptions.length
+        ? descriptions.join('；')
+        : `本城有 ${activeEventCount.value} 种商品受大事件影响，价格可能上涨或下跌`
+    })
 
     const loadDict = async () => {
       const [cityRes, commodityRes] = await Promise.all([
@@ -427,7 +472,7 @@ createApp({
 
     /* 未查询时也用全部商品铺满列表（其他列显示 -） */
     const buildRowsFromDict = () => rows.value = commodities.value.map(c => ({
-      commodityId: c.id, commodity: c.name, burden: c.burden, source: null,
+      commodityId: c.id, commodity: c.name, burden: c.burden, source: null, events: [],
       buy: '', sell: '', updatedAt: null, operator: null, _base: { buy: null, sell: null }, _baseUpdatedAt: null,
     }))
 
@@ -628,9 +673,11 @@ createApp({
         const res = await api(`/api/prices?${q.toString()}`)
         applyMasterMeta(res)
         currentTax.value = res.tax == null ? null : Number(res.tax)
+        cityEvents.value = Array.isArray(res.events) ? res.events : []
         rows.value = res.items.map(r => ({
           ...r,
           source: r.source || null,
+          events: Array.isArray(r.events) ? r.events : [],
           buy: r.buy == null ? '' : String(r.buy),
           sell: r.sell == null ? '' : String(r.sell),
           _base: { buy: r.buy, sell: r.sell },
@@ -656,6 +703,7 @@ createApp({
       form.commodity = ''
       queried.value = false
       currentTax.value = null
+      cityEvents.value = []
       buildRowsFromDict()
     }
 
@@ -841,8 +889,9 @@ createApp({
       for (const item of payload.items) {
         const row = rows.value.find(r => Number(r.commodityId) === Number(item.commodityId))
         if (!row) continue
-        const buy = viewBuy(item.buy, payload.tax)
-        const sell = viewSell(item.sell, payload.tax)
+        const correction = eventCorrection(row.events)
+        const buy = viewBuy(item.buy, payload.tax, correction)
+        const sell = viewSell(item.sell, payload.tax, correction)
         if (isDirty(row)) {
           row._remoteConflict = {
             buy, sell, operator: item.operator, updatedAt: item.updatedAt,
@@ -927,7 +976,7 @@ createApp({
       }
       if (msg.type === 'sync.finished' && msg.result) {
         const r = msg.result
-        ElMessage.success(`游戏同步完成：${r.queried}/${r.cities} 城，写入 ${r.saved} 条${r.failed && r.failed.length ? `，失败 ${r.failed.length} 城` : ''}`)
+        ElMessage.success(`游戏同步完成：${r.queried}/${r.cities} 城，写入 ${r.saved} 条${r.events ? `，大事件 ${r.events} 项` : ''}${r.failed && r.failed.length ? `，失败 ${r.failed.length} 城` : ''}`)
         if (r.newCities && r.newCities.length) loadDict().catch(() => {})
         loadServers().catch(() => {})
         if (queried.value && msg.result.server === form.server.trim()) {
@@ -1495,8 +1544,9 @@ createApp({
         syncResult.value = result
         syncServer.value = result.server
         accountServer.value = result.server
-        if (result.saved > 0) ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
-        else ElMessage.warning(`同步完成，但没有写入价格（${result.queried}/${result.cities} 城）`)
+        const eventSuffix = result.events ? `，大事件 ${result.events} 项` : ''
+        if (result.saved > 0) ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条${eventSuffix}`)
+        else ElMessage.warning(`同步完成，但没有写入价格（${result.queried}/${result.cities} 城）${eventSuffix}`)
         if (result.newCities && result.newCities.length) await loadDict()
         await loadServers()
         if (form.server.trim() === result.server && queried.value) await doFetch(false)
@@ -1613,7 +1663,7 @@ createApp({
       settingsRunning.value = true
       try {
         const result = await api('/api/sync-settings/run', { method: 'POST' })
-        ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条`)
+        ElMessage.success(`同步完成：${result.queried}/${result.cities} 城，写入 ${result.saved} 条${result.events ? `，大事件 ${result.events} 项` : ''}`)
         const [data, logs] = await Promise.all([
           api('/api/sync-settings'),
           api('/api/sync-settings/logs?limit=10'),
@@ -1779,6 +1829,7 @@ createApp({
       expiryText, expiryShortText, expiryTooltip, expiryTagType,
       // 基础
       isMobile, form, cities, commodities, serverList, rows, queried, loading, sharedCount,
+      cityEvents, activeEventCount, cityEventText, eventTip, eventLabel,
       // 赋税减免
       taxRelief, currentTax, onReliefChange,
       // 实时协作

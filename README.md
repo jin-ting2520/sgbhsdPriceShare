@@ -49,7 +49,7 @@
 | 实时协作 | WebSocket 推送同账号其他设备的改价，正在查看的城池立即刷新；本地未保存修改时标记冲突 |
 | 主账号价格共享 | 管理员可在「区服」页为每个区服单独指定主账号，也可在「账号」页按账号当前区服设置/取消主账号；设置后该区服普通账号默认开启共享，管理员也可对特定账号全局禁用（禁用后该账号隐藏「主账号价」开关）；普通账号只关联自己**当前区服**的主账号，本人已录入的商品整行优先，缺失商品回退展示主账号价格并标记来源；主账号保存/导入/游戏同步后仅实时通知本区服查看者。历史、趋势、跨城比价、CSV 导出同样按当前区服回退，报表不混入共享数据 |
 | 并发保护 | 保存携带 `baseUpdatedAt`，被其他设备抢先更新时返回 `40903`，可选「覆盖保存」或「使用最新数据」 |
-| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，默认自动识别 token 所属区服并逐城抓取 175 城价格；管理员可逐账号开启 `server` 覆盖权限 |
+| 游戏直连同步 | 凭 `x-game-token-pcweb` 登录游戏服务器，默认自动识别 token 所属区服并逐城抓取 175 城价格；同步时自动接收 `GcMonopolyNews(2136)` 大事件推送，按区服/城池/商品显示事件文案与涨跌幅度并修正显示价；管理员可逐账号开启 `server` 覆盖权限 |
 | 赋税换算 | 各城税率自动同步；账号可设「我的赋税减免」（默认 5%），价格按个人减免实时换算 |
 | 定时同步 | 页面配置开关、cron 频率与 token；默认按 token 自动识别区服，授权账号可保存 `server_override`；按账号独立调度、独立运行记录 |
 | 报表 | 涨跌幅榜、改价与同步热度图 |
@@ -88,7 +88,7 @@ npm install --registry=https://registry.npmmirror.com   # 国内网络建议
 npm run build:ui   # 可选：生成混淆产物；不做则回退源码
 npm start          # http://localhost:3000
 npm run dev        # 文件变化自动重启
-npm test           # 62 项后端/账号/设备/游戏/报表/按区服主账号测试
+npm test           # 66 项后端/账号/设备/游戏/大事件/报表/按区服主账号测试
 npm run test:smoke # 冒烟自检（健康检查 + 写入/查询 + 并发冲突）
 npm run db:vacuum  # SQLite VACUUM / MySQL OPTIMIZE
 ```
@@ -163,10 +163,13 @@ sgbhsdPriceShare/
 │   │   ├── login.js        # JWT → authCode → SDK 登录 → v1/login
 │   │   ├── client.js       # 游戏 WebSocket 客户端
 │   │   ├── sync.js         # 逐城抓取 → 原价 + 税率落库
+│   │   ├── news.js         # 2136 大事件文案与价格修正
 │   │   ├── frame.js        # 10 字节帧头
 │   │   ├── thrift.js       # Thrift Compact Protocol
 │   │   ├── thrift_schema.json
-│   │   └── data/city_map.json  # 175 城池映射（nodeNo/metaId/gridX/gridY）
+│   │   └── data/
+│   │       ├── city_map.json       # 175 城池映射（nodeNo/metaId/gridX/gridY）
+│   │       └── monopoly_news.json  # CfgMonopolyBigNews 文案模板与价格修正
 │   └── scripts/
 │       ├── game-sync.js        # CLI 同步（<账号ID> <token> [操作人]，区服自动识别）
 │       ├── migrate-to-mysql.js # SQLite → MySQL（兼容旧共享库）
@@ -183,7 +186,7 @@ sgbhsdPriceShare/
 │   ├── manifest.webmanifest
 │   └── icons/icon.svg
 ├── scripts/build-ui.js     # esbuild 打包 + javascript-obfuscator 混淆
-├── test/                   # api / auth / game / reports / master 共 62 项
+├── test/                   # api / auth / game / reports / master 共 66 项
 ├── data/                   # SQLite（本地/兜底/迁移源，勿提交）
 ├── backup/                 # 备份目录（MySQL dump / SQLite 副本）
 ├── docker-compose.yml      # app + mysql + redis
@@ -233,9 +236,9 @@ X-Sign:          HMAC-SHA256(sessionToken, METHOD + "\n" + originalUrl + "\n" + 
 | GET/DELETE | `/api/admin/sync-logs` | 全部账号同步日志 |
 | GET | `/api/dict?type=city\|commodity` | 下拉数据源（登录可读） |
 | GET | `/api/servers` | 区服列表 |
-| GET | `/api/prices?server&city&commodity?&relief=5` | 查询价格（按个人减免换算为游戏显示价）；返回 `masterAccountName`、`sharedCount`，每条价格带 `source: own/master` |
+| GET | `/api/prices?server&city&commodity?&relief=5` | 查询价格（按个人减免与大事件修正换算为游戏显示价）；返回 `masterAccountName`、`sharedCount`、当前城池生效的 `events`（含 `description`、`priceCorrection`、`direction`），每条价格带 `source: own/master` 与所属商品的 `events` |
 | POST | `/api/prices` | 保存价格；支持 `items[].baseUpdatedAt` 乐观并发，冲突返回 40903；主账号保存后通知共享查看者 |
-| GET | `/api/prices/history`、`/trend`、`/matrix`、`/export` | 历史 / 趋势 / 跨城比价 / CSV 导出；启用共享时按整行回退并在响应或来源列标记主账号 |
+| GET | `/api/prices/history`、`/trend`、`/matrix`、`/export` | 历史 / 趋势 / 跨城比价 / CSV 导出；启用共享时按整行回退并在响应或来源列标记主账号；`matrix` 每条城池价格带该商品的大事件 `events`，查询/导出价格含事件修正 |
 | POST | `/api/prices/import` | Excel/结构化导入（`merge` 可选；未知商品需管理员先维护） |
 | GET | `/api/game/meta` | 同步支持城池清单 |
 | POST | `/api/game/token-info` | 识别 token 所属区服（仅展示，不保存 token；不接收区服参数） |
@@ -283,9 +286,10 @@ Chrome / Edge 在 Application → Local Storage；Firefox 在 存储 → 本地�
 
 ### 同步细节
 
-- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%，按账号保存）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100))，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100))，保留 1 位小数。
-- 手工录入 / Excel 导入填写的是税后价，服务端按当前减免与该城税率反推原价入库；税率未知的城池按原价处理。
+- 赋税：2104 响应含每城税率（0.1~0.9），页面按「我的赋税减免」（默认 5%，按账号保存）实时换算：显示卖出 = 原价 × (1 − 税率 × (1 − 减免/100)) × (1 + 事件修正)，显示买入 = 原价 × (1 + 税率 × (1 − 减免/100)) × (1 + 事件修正)，保留 1 位小数。
+- 手工录入 / Excel 导入填写的是税后价，服务端按当前减免、该城税率与生效事件修正反推原价入库；税率未知的城池按原价处理。
 - 每城仅 3 个商品可买入（2104 中 type=2），全部 25 个商品均可卖出（type=0/1）；非可购商品的买入价落库为 NULL。
+- 大事件：同步期间接收服务器推送的 `GcMonopolyNews(2136)`（`metaId/capitalId/startTime/endTime/productId`），将 `capitalId` 按 `serverId × 100000000000 + nodeNo` 映射到城池、`productId` 按 1–25 / 201–225 映射到商品，写入 `city_events`。事件按区服共享（不按账号隔离），同一事件重复推送会更新起止时间；`metaId` 对应 `CfgMonopolyBigNews`，由 `server/game/data/monopoly_news.json` 提供事件文案模板与 `priceCorrection`，查询时按城池、商品和涨跌幅生成完整描述。价格查询和跨城比价只返回当前生效事件，页面显示事件文案与涨跌幅度；生效事件会修正显示价，但不修改落库的税前原价。
 - 单次同步全部 175 城约 30~60 秒；赛季未开放的州城（当前为 node 156-175，lv5-7）可能超时并列入 `failed`，不影响其他城池。
 - 调度器按账号注册 cron，同账号同步串行；修改定时设置后自动重建任务。
 - 命令行：`node server/scripts/game-sync.js <账号ID> <token> [操作人]` 直接按 token 自动识别；`--settings` 方式执行本账号定时配置，授权账号会使用已保存的 `server_override`。
@@ -305,6 +309,7 @@ Chrome / Edge 在 Application → Local Storage；Firefox 在 存储 → 本地�
 | `prices` | 税前原价（`account_id+server_id+city_id+commodity_id` 唯一） |
 | `price_history` | 改价流水（按账号隔离，按 `HISTORY_LIMIT` 裁剪） |
 | `city_taxes` | 城池税率（`account_id+server_id+city_id` 唯一，游戏同步写入） |
+| `city_events` | 游戏大事件（`server_id+city_id+commodity_id+meta_id` 唯一，区服内共享；起止时间按北京时间） |
 | `city_nodes` | 城池游戏节点与地图坐标（全局共享） |
 | `sync_settings` | 每账号一行定时配置（开关/cron/更新人/上次状态；`server_name` 为展示缓存，`server_override` 为授权账号的区服覆盖值） |
 | `sync_log` | 同步运行记录（按账号隔离） |
@@ -338,7 +343,7 @@ docker compose exec app npm run db:migrate -- --force # 目标库已有数据时
 
 ## 十二、测试与 CI
 
-- `npm test`：62 项，覆盖账号/卡密一次性占用/后台绑定/永久账号重新计时/试用启用/续期/到期/封禁、设备记录上限与同设备多会话/退出保留记录/指纹兜底/踢出、签名与重放、数据隔离、首次登录强制设置当前区服与切换、按区服主账号设置/隔离/默认共享/管理员禁用、整行回退、历史/趋势/比价/导出、税率回退、删除主账号清理、字典只读、价格并发、导入导出、游戏协议解析、报表、同步日志、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
+- `npm test`：66 项，覆盖账号/卡密一次性占用/后台绑定/永久账号重新计时/试用启用/续期/到期/封禁、设备记录上限与同设备多会话/退出保留记录/指纹兜底/踢出、签名与重放、数据隔离、首次登录强制设置当前区服与切换、按区服主账号设置/隔离/默认共享/管理员禁用、整行回退、历史/趋势/比价/导出、税率回退、删除主账号清理、字典只读、价格并发、导入导出、游戏协议解析、2136 大事件映射/去重/区服共享/过期过滤/文案与价格修正、报表、同步日志、定时设置、Markdown 清洗/公共配置与健康检查（SQLite 临时库）。
 - `npm run test:smoke`：启动真实 HTTP 服务（SQLite 默认使用临时库），验证卡密注册、HMAC 签名请求、价格写入/查询、40903 冲突与清理。
 - GitHub Actions：
   - `test`：SQLite 全量测试；

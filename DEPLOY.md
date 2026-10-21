@@ -214,7 +214,7 @@ docker compose up -d --build    # 重建 app；MySQL/Redis 数据卷不受影响
 npm ci
 npm run build:ui   # 可选：生成 public/dist 混淆产物
 npm run dev        # 默认 3000 端口，SQLite data/price.db
-npm test           # 62 项测试
+npm test           # 66 项测试
 npm run test:smoke # 冒烟自检
 
 # 管理后台

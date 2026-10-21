@@ -26,24 +26,29 @@ const effTax = (tax, relief) => {
 const round1 = n => Math.round(n * 10) / 10;
 const round2 = n => Math.round(n * 100) / 100;
 
-const displayBuy = (raw, tax, relief) => {
+const eventFactor = correction => {
+  const n = Number(correction);
+  return Number.isFinite(n) ? Math.max(0.01, 1 + n) : 1;
+};
+
+const displayBuy = (raw, tax, relief, correction = 0) => {
   if (raw == null) return null;
-  return round1(Number(raw) * (1 + effTax(tax, relief)));
+  return round1(Number(raw) * (1 + effTax(tax, relief)) * eventFactor(correction));
 };
 
-const displaySell = (raw, tax, relief) => {
+const displaySell = (raw, tax, relief, correction = 0) => {
   if (raw == null) return null;
-  return round1(Number(raw) * (1 - effTax(tax, relief)));
+  return round1(Number(raw) * (1 - effTax(tax, relief)) * eventFactor(correction));
 };
 
-const rawBuy = (displayed, tax, relief) => {
+const rawBuy = (displayed, tax, relief, correction = 0) => {
   if (displayed == null) return null;
-  return round2(Number(displayed) / (1 + effTax(tax, relief)));
+  return round2(Number(displayed) / ((1 + effTax(tax, relief)) * eventFactor(correction)));
 };
 
-const rawSell = (displayed, tax, relief) => {
+const rawSell = (displayed, tax, relief, correction = 0) => {
   if (displayed == null) return null;
-  return round2(Number(displayed) / Math.max(0.05, 1 - effTax(tax, relief)));
+  return round2(Number(displayed) / Math.max(0.05, (1 - effTax(tax, relief)) * eventFactor(correction)));
 };
 
 module.exports = {

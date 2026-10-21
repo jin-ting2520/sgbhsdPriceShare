@@ -5,13 +5,15 @@
 const express = require('express');
 const {
   query, get, tx, upsertServer, findServerId, findDictId,
-  getCityTax, getCityTaxMap, setCurrentServer, nowText,
+  getCityTax, getCityTaxMap, getActiveCityEvents, getActiveCommodityEvents,
+  setCurrentServer, nowText,
 } = require('../db');
 const cache = require('../cache');
 const { broadcast } = require('../ws');
 const { masterMeta, notifyMasterPriceChange } = require('../master');
 const { requireAccount } = require('../auth');
 const { clampRelief, displayBuy, displaySell, rawBuy, rawSell } = require('../tax');
+const { enrichMonopolyEvent, monopolyCorrection } = require('../game/news');
 const { ok, fail, asyncHandler, cleanName, isBlank, parsePrice } = require('../util');
 
 const router = express.Router();
@@ -57,6 +59,19 @@ async function readTaxMap(accountId, masterId, serverId) {
     if (!own.has(cityId)) own.set(cityId, tax);
   }
   return own;
+}
+
+async function readEventCorrections(serverId, cityId) {
+  const events = await getActiveCityEvents(serverId, cityId);
+  const groups = new Map();
+  for (const event of events) {
+    const key = Number(event.commodityId);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+  }
+  const corrections = new Map();
+  for (const [commodityId, list] of groups) corrections.set(commodityId, monopolyCorrection(list));
+  return corrections;
 }
 
 /** GET /api/prices?server=&city=&commodity= —— 查询价格（商品列固定展示全部商品） */
@@ -108,6 +123,15 @@ router.get('/', asyncHandler(async (req, res) => {
     }
   }
 
+  const events = (await getActiveCityEvents(serverId, cityId))
+    .map(event => enrichMonopolyEvent(event, city, event.commodity));
+  const eventsByCommodity = new Map();
+  for (const event of events) {
+    const key = Number(event.commodityId);
+    if (!eventsByCommodity.has(key)) eventsByCommodity.set(key, []);
+    eventsByCommodity.get(key).push(event);
+  }
+
   let sharedCount = 0;
   const items = commodities.map(c => {
     const own = priceMap[c.id];
@@ -115,15 +139,17 @@ router.get('/', asyncHandler(async (req, res) => {
     const p = own || shared;
     const source = own ? 'own' : (shared ? 'master' : null);
     if (source === 'master') sharedCount += 1;
+    const correction = monopolyCorrection(eventsByCommodity.get(Number(c.id)));
     return {
       commodityId: c.id,
       commodity: c.name,
       burden: c.burden,
-      buy: p ? displayBuy(p.buy, tax, relief) : null,
-      sell: p ? displaySell(p.sell, tax, relief) : null,
+      buy: p ? displayBuy(p.buy, tax, relief, correction) : null,
+      sell: p ? displaySell(p.sell, tax, relief, correction) : null,
       updatedAt: p ? p.updatedAt : null,
       operator: p ? p.operator : null,
       source,
+      events: eventsByCommodity.get(Number(c.id)) || [],
     };
   });
 
@@ -140,6 +166,7 @@ router.get('/', asyncHandler(async (req, res) => {
     sharedCount,
     serverRegistered: !!serverId,
     cityRegistered: !!cityId,
+    events,
     items,
   });
 }));
@@ -174,6 +201,7 @@ router.post('/', asyncHandler(async (req, res) => {
   const operator = operatorOf(req, req.body);
   const relief = reliefOf(req.body, 'relief', req.account.relief);
   const tax = await readTax(accountId, fallbackIdOf(meta), serverId, cityId);
+  const eventCorrections = await readEventCorrections(serverId, cityId);
 
   const ops = [];
   for (const raw of items) {
@@ -190,8 +218,8 @@ router.post('/', asyncHandler(async (req, res) => {
     ops.push({
       commodityId,
       commodity,
-      buy: rawBuy(buy.value, tax, relief),
-      sell: rawSell(sell.value, tax, relief),
+      buy: rawBuy(buy.value, tax, relief, eventCorrections.get(commodityId)),
+      sell: rawSell(sell.value, tax, relief, eventCorrections.get(commodityId)),
       baseUpdatedAt: raw && raw.baseUpdatedAt != null ? String(raw.baseUpdatedAt) : null,
     });
   }
@@ -215,8 +243,8 @@ router.post('/', asyncHandler(async (req, res) => {
           commodity: op.commodity,
           baseUpdatedAt: op.baseUpdatedAt,
           updatedAt: cur.updatedAt,
-          buy: displayBuy(cur.buy, tax, relief),
-          sell: displaySell(cur.sell, tax, relief),
+          buy: displayBuy(cur.buy, tax, relief, eventCorrections.get(op.commodityId)),
+          sell: displaySell(cur.sell, tax, relief, eventCorrections.get(op.commodityId)),
           operator: cur.operator,
         });
       }
@@ -477,6 +505,14 @@ router.get('/matrix', asyncHandler(async (req, res) => {
 
   const relief = reliefOf(req.query, 'relief', req.account.relief);
   const taxMap = await readTaxMap(accountId, fallbackId, serverId);
+  const events = (await getActiveCommodityEvents(serverId, commodityRow.id))
+    .map(event => enrichMonopolyEvent(event, event.city, commodity));
+  const eventsByCity = new Map();
+  for (const event of events) {
+    const key = Number(event.cityId);
+    if (!eventsByCity.has(key)) eventsByCity.set(key, []);
+    eventsByCity.get(key).push(event);
+  }
 
   const rows = await query(
     `SELECT c.id AS cityId, c.name AS city, c.sort_order AS sortOrder,
@@ -507,16 +543,18 @@ router.get('/matrix', asyncHandler(async (req, res) => {
     const source = own ? 'own' : (shared ? 'master' : null);
     if (source === 'master') sharedCount += 1;
     const tax = taxMap.get(Number(r.cityId)) ?? null;
+    const correction = monopolyCorrection(eventsByCity.get(Number(r.cityId)));
     return {
       cityId: r.cityId,
       city: r.city,
       sortOrder: r.sortOrder,
       tax,
-      buy: p ? displayBuy(p.buy, tax, relief) : null,
-      sell: p ? displaySell(p.sell, tax, relief) : null,
+      buy: p ? displayBuy(p.buy, tax, relief, correction) : null,
+      sell: p ? displaySell(p.sell, tax, relief, correction) : null,
       updatedAt: p ? p.updatedAt : null,
       operator: p ? p.operator : null,
       source,
+      events: eventsByCity.get(Number(r.cityId)) || [],
     };
   });
   items.sort((a, b) => {
@@ -550,6 +588,7 @@ router.get('/matrix', asyncHandler(async (req, res) => {
     masterPricesAllowed: meta.masterPricesAllowed,
     viewMasterPrices: meta.viewMasterPrices,
     sharedCount,
+    events,
     items,
     summary,
   });
@@ -568,10 +607,11 @@ router.get('/export', asyncHandler(async (req, res) => {
   const cityId = await findDictId('city', city);
   const relief = reliefOf(req.query, 'relief', req.account.relief);
   const tax = await readTax(accountId, fallbackId, serverId, cityId);
+  const eventCorrections = await readEventCorrections(serverId, cityId);
   let rows = [];
   let sharedRows = [];
   if (serverId && cityId) {
-    const selectSql = `SELECT d.name AS commodity, d.burden, p.buy_price AS buy, p.sell_price AS sell,
+    const selectSql = `SELECT d.id AS commodityId, d.name AS commodity, d.burden, p.buy_price AS buy, p.sell_price AS sell,
               p.operator, p.updated_at AS updatedAt
          FROM prices p JOIN dict_items d ON d.id = p.commodity_id
         WHERE p.account_id = ? AND p.server_id = ? AND p.city_id = ? ORDER BY d.sort_order, d.id`;
@@ -579,8 +619,8 @@ router.get('/export', asyncHandler(async (req, res) => {
     if (fallbackId) sharedRows = await query(selectSql, [fallbackId, serverId, cityId]);
     const adjust = row => ({
       ...row,
-      buy: displayBuy(row.buy, tax, relief),
-      sell: displaySell(row.sell, tax, relief),
+      buy: displayBuy(row.buy, tax, relief, eventCorrections.get(Number(row.commodityId))),
+      sell: displaySell(row.sell, tax, relief, eventCorrections.get(Number(row.commodityId))),
     });
     rows = rows.map(adjust);
     sharedRows = sharedRows.map(adjust);
@@ -678,19 +718,24 @@ router.post('/import', asyncHandler(async (req, res) => {
 
   if (errors.length) return fail(res, 400, `导入失败：${errors.slice(0, 3).join('；')}${errors.length > 3 ? ` 等（共 ${errors.length} 条错误）` : ''}`);
 
-  // 导入的是用户看到的税后价，按当前用户减免与该城税率反推税前原价
-  for (const p of parsed) {
-    p.buy = rawBuy(p.buy, tax, relief);
-    p.sell = rawSell(p.sell, tax, relief);
-  }
-
+  const eventCorrections = await readEventCorrections(serverId, cityId);
   const unknown = [];
+  const commodityIds = new Map();
   for (const name of [...new Set(parsed.map(p => p.commodity))]) {
     // eslint-disable-next-line no-await-in-loop
-    if (!(await findDictId('commodity', name))) unknown.push(name);
+    const id = await findDictId('commodity', name);
+    if (!id) unknown.push(name);
+    else commodityIds.set(name, id);
   }
   if (unknown.length) {
     return fail(res, 400, `商品 ${unknown.map(n => `「${n}」`).join('、')} 不在字典中，请联系管理员维护商品字典`);
+  }
+
+  // 导入的是用户看到的税后价，按当前用户减免、该城税率与大事件修正反推税前原价
+  for (const p of parsed) {
+    const correction = eventCorrections.get(commodityIds.get(p.commodity));
+    p.buy = rawBuy(p.buy, tax, relief, correction);
+    p.sell = rawSell(p.sell, tax, relief, correction);
   }
 
   const existingRows = await query(

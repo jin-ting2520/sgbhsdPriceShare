@@ -152,6 +152,20 @@ CREATE TABLE IF NOT EXISTS city_taxes (
   PRIMARY KEY (account_id, server_id, city_id)
 );
 
+CREATE TABLE IF NOT EXISTS city_events (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id    INTEGER NOT NULL REFERENCES servers(id)    ON DELETE CASCADE,
+  city_id      INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
+  commodity_id INTEGER NOT NULL REFERENCES dict_items(id) ON DELETE CASCADE,
+  meta_id      TEXT    NOT NULL,
+  starts_at    TEXT    NOT NULL,
+  ends_at      TEXT,
+  updated_at   TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+  UNIQUE (server_id, city_id, commodity_id, meta_id)
+);
+CREATE INDEX IF NOT EXISTS idx_city_events_scope ON city_events(server_id, city_id, commodity_id);
+CREATE INDEX IF NOT EXISTS idx_city_events_end ON city_events(ends_at);
+
 CREATE TABLE IF NOT EXISTS city_nodes (
   city_name TEXT PRIMARY KEY,
   cfg_name  TEXT,
@@ -330,6 +344,22 @@ const MYSQL_SCHEMA = [
     PRIMARY KEY (account_id, server_id, city_id),
     CONSTRAINT fk_city_taxes_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
     CONSTRAINT fk_city_taxes_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS city_events (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    server_id INT NOT NULL,
+    city_id INT NOT NULL,
+    commodity_id INT NOT NULL,
+    meta_id VARCHAR(128) NOT NULL,
+    starts_at DATETIME NOT NULL,
+    ends_at DATETIME NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE KEY uk_city_events_scope (server_id, city_id, commodity_id, meta_id),
+    KEY idx_city_events_scope (server_id, city_id, commodity_id),
+    KEY idx_city_events_end (ends_at),
+    CONSTRAINT fk_city_events_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE,
+    CONSTRAINT fk_city_events_city FOREIGN KEY (city_id) REFERENCES dict_items(id) ON DELETE CASCADE,
+    CONSTRAINT fk_city_events_commodity FOREIGN KEY (commodity_id) REFERENCES dict_items(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS city_nodes (
     city_name VARCHAR(20) PRIMARY KEY,
@@ -1156,6 +1186,69 @@ async function setCityTax(accountId, serverId, cityId, tax) {
   }
 }
 
+async function saveCityEvents(serverId, events) {
+  if (!serverId || !Array.isArray(events) || !events.length) return 0;
+  const sql = IS_MYSQL
+    ? `INSERT INTO city_events
+         (server_id, city_id, commodity_id, meta_id, starts_at, ends_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         starts_at = VALUES(starts_at), ends_at = VALUES(ends_at), updated_at = VALUES(updated_at)`
+    : `INSERT INTO city_events
+         (server_id, city_id, commodity_id, meta_id, starts_at, ends_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(server_id, city_id, commodity_id, meta_id) DO UPDATE SET
+         starts_at = excluded.starts_at, ends_at = excluded.ends_at, updated_at = excluded.updated_at`;
+  const t = nowText();
+  return tx(async conn => {
+    let saved = 0;
+    for (const ev of events) {
+      const cityId = Number(ev.cityId);
+      const commodityId = Number(ev.commodityId);
+      const startsAt = String(ev.startsAt || '').trim();
+      if (!Number.isInteger(cityId) || cityId <= 0) continue;
+      if (!Number.isInteger(commodityId) || commodityId <= 0) continue;
+      if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(startsAt)) continue;
+      const endsAt = ev.endsAt == null || ev.endsAt === '' ? null : String(ev.endsAt).trim();
+      if (endsAt && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(endsAt)) continue;
+      const metaId = (String(ev.metaId || '').trim() || 'unknown').slice(0, 128);
+      await conn.run(sql, [serverId, cityId, commodityId, metaId, startsAt, endsAt, t]);
+      saved += 1;
+    }
+    return saved;
+  });
+}
+
+async function getActiveCityEvents(serverId, cityId) {
+  if (serverId == null || cityId == null) return [];
+  const t = nowText();
+  return query(
+    `SELECT e.commodity_id AS commodityId, d.name AS commodity,
+            e.meta_id AS metaId, e.starts_at AS startsAt, e.ends_at AS endsAt
+       FROM city_events e
+       JOIN dict_items d ON d.id = e.commodity_id
+      WHERE e.server_id = ? AND e.city_id = ?
+        AND e.starts_at <= ? AND (e.ends_at IS NULL OR e.ends_at > ?)
+      ORDER BY (e.ends_at IS NULL) ASC, e.ends_at, e.id`,
+    [serverId, cityId, t, t]
+  );
+}
+
+async function getActiveCommodityEvents(serverId, commodityId) {
+  if (serverId == null || commodityId == null) return [];
+  const t = nowText();
+  return query(
+    `SELECT e.city_id AS cityId, c.name AS city,
+            e.meta_id AS metaId, e.starts_at AS startsAt, e.ends_at AS endsAt
+       FROM city_events e
+       JOIN dict_items c ON c.id = e.city_id
+      WHERE e.server_id = ? AND e.commodity_id = ?
+        AND e.starts_at <= ? AND (e.ends_at IS NULL OR e.ends_at > ?)
+      ORDER BY (e.ends_at IS NULL) ASC, e.ends_at, e.id`,
+    [serverId, commodityId, t, t]
+  );
+}
+
 function normalizeKeyRequiredAt(value) {
   const s = String(value || '').trim().replace('T', ' ');
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
@@ -1272,6 +1365,9 @@ module.exports = {
   getCityTax,
   getCityTaxMap,
   setCityTax,
+  saveCityEvents,
+  getActiveCityEvents,
+  getActiveCommodityEvents,
   getAppSettings,
   setCurrentServer,
   claimLegacyData,

@@ -15,7 +15,13 @@ for (const suffix of ['', '-wal', '-shm']) {
 }
 const app = require('../server');
 const db = require('../server/db');
-const { productName, gamePrice, parseProducts, ensureCityId, serverOfLogin, CITY_MAP } = require('../server/game/sync');
+const {
+  productName, gamePrice, parseProducts, ensureCityId, serverOfLogin, CITY_MAP,
+  parseCityNews, newsTimeMs, newsCity,
+} = require('../server/game/sync');
+const { GameClient, MSG } = require('../server/game/client');
+const { encode } = require('../server/game/thrift');
+const { newsDescription, enrichMonopolyEvent, monopolyCorrection } = require('../server/game/news');
 const { displayBuy, displaySell, rawBuy, rawSell, clampRelief } = require('../server/tax');
 const { createAdmin, registerAccount, createClient } = require('./helpers');
 
@@ -73,6 +79,68 @@ test('2104 商品解析：type=2 为买入价、type 0/1 为卖出价（税前�
   assert.equal(rows.size, 2);
 });
 
+test('大事件：capitalId 映射城池、productId 映射商品，秒与毫秒时间归一', () => {
+  const now = Date.now();
+  const base = 1336n * 100000000000n;
+  const rows = parseCityNews([
+    {
+      metaId: 'news-a', capitalId: (base + 1n).toString(),
+      startTime: Math.floor(now / 1000), endTime: now + 3600000, productId: 1,
+    },
+    {
+      metaId: 'news-b', capitalId: '1100002',
+      startTime: Math.floor(now / 1000), endTime: Math.floor((now + 7200000) / 1000), productId: 225,
+    },
+    {
+      metaId: 'expired', capitalId: (base + 2n).toString(),
+      startTime: Math.floor((now - 7200000) / 1000), endTime: Math.floor((now - 3600000) / 1000), productId: 1,
+    },
+    {
+      metaId: 'bad-product', capitalId: (base + 3n).toString(),
+      startTime: Math.floor(now / 1000), endTime: Math.floor((now + 3600000) / 1000), productId: 99,
+    },
+  ], base, now);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].city, '徙河');
+  assert.equal(rows[0].commodity, '谷物');
+  assert.equal(rows[0].metaId, 'news-a');
+  assert.match(rows[0].startsAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  assert.match(rows[0].endsAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  assert.equal(rows[1].city, '潞县');
+  assert.equal(rows[1].commodity, '金银器');
+  assert.equal(newsTimeMs(1700000000), 1700000000000);
+  assert.equal(newsTimeMs(1700000000000), 1700000000000);
+  assert.equal(newsTimeMs(0), null);
+  assert.equal(newsCity(base + 1n, base).name, '徙河');
+  assert.equal(newsCity(1n, base).name, '徙河');
+  assert.equal(newsCity(1100001n, base).name, '徙河');
+  assert.equal(newsCity(999999n, base), null);
+});
+
+test('GameClient 捕获 2136 大事件推送并按事件去重', () => {
+  const client = new GameClient({ serverHost: '127.0.0.1', serverPort: 1, serverId: 1 }, { timeoutMs: 10 });
+  const make = endTime => encode(MSG.GC_MONOPOLY_NEWS, {
+    news: [{ metaId: 'news-a', capitalId: 100n, startTime: 1000, endTime, productId: 1 }],
+  });
+  client.handleFrame({ msgType: MSG.GC_MONOPOLY_NEWS, body: make(2000) });
+  client.handleFrame({ msgType: MSG.GC_MONOPOLY_NEWS, body: make(3000) });
+  assert.equal(client.newsSeen, true);
+  assert.equal(client.getNews().length, 1);
+  assert.equal(client.getNews()[0].endTime, 3000);
+  client.close();
+});
+
+test('大事件配置：metaId 映射事件文案、涨跌幅与价格修正', () => {
+  const event = enrichMonopolyEvent({ metaId: '126', startsAt: '2026-10-21 10:00:00' }, '广汉', '葡萄酒');
+  assert.equal(event.description, '广汉颁布《禁酒令》严打私酿，葡萄酒积压价格大跌32%');
+  assert.equal(event.priceCorrection, -0.32);
+  assert.equal(event.direction, 'down');
+  assert.equal(monopolyCorrection([event]), -0.32);
+  assert.equal(newsDescription('1', '桂阳', '谷物'), '桂阳多地遭黄巾残部劫粮焚仓，粮食储备锐减，谷物价格大涨35%');
+  assert.equal(newsDescription('unknown', '广汉', '葡萄酒'), null);
+  assert.equal(monopolyCorrection([{ metaId: 'unknown' }]), 0);
+});
+
 test('赋税换算：原价 ↔ 个人减免后的显示价（默认 5%）', () => {
   assert.equal(displaySell(21.72, 0.1, 5), 19.7);
   assert.equal(displayBuy(21.72, 0.1, 5), 23.8);
@@ -82,6 +150,11 @@ test('赋税换算：原价 ↔ 个人减免后的显示价（默认 5%）', () 
   assert.equal(displayBuy(10, 0.1, 0), 11);
   assert.equal(displaySell(10, 0.1, 100), 10, '100% 减免等于无税');
   assert.equal(displayBuy(10, 0.1, 100), 10);
+  assert.equal(displayBuy(20, 0, 5, 0.35), 27);
+  assert.equal(displayBuy(20, 0, 5, -0.32), 13.6);
+  assert.equal(displaySell(20, 0, 5, -0.32), 13.6);
+  assert.equal(rawBuy(27, 0, 5, 0.35), 20);
+  assert.equal(rawSell(13.6, 0, 5, -0.32), 20);
   assert.equal(rawSell(19.7, 0.1, 5), 21.77);
   assert.equal(rawBuy(23.8, 0.1, 5), 21.74);
   assert.equal(displaySell(null, 0.1, 5), null);
