@@ -34,6 +34,15 @@ createApp({
         err.code = json.code
         err.data = json.data
         if (res.status === 401) {
+          // 40113 = 验签失败：多为浏览器仍在运行旧版前端包（缺 X-Timestamp/X-Nonce/X-Sign），
+          // 此时退出登录毫无意义，应引导强制刷新以拉取最新包
+          if (err.code === 40113) {
+            ElMessage.warning({
+              message: '请求验签失败，当前页面可能是旧版本：请强制刷新（Ctrl+Shift+R）后重试；频繁出现请校准设备时间',
+              duration: 8000,
+            })
+            throw err
+          }
           token.value = ''
           try { localStorage.removeItem(TOKEN_KEY) } catch { /* ignore */ }
           ElMessage.warning('管理登录已过期，请重新登录')

@@ -55,7 +55,7 @@ app.use('/vendor/xlsx', (req, res, next) => {
 app.get('/bundle/:name', (req, res) => {
   const name = String(req.params.name || '').replace(/[^A-Za-z0-9_.-]/g, '');
   const file = nodePath.join(DIST_DIR, name);
-  if (name && file.startsWith(DIST_DIR) && fs.existsSync(file)) {
+  if (name && !name.startsWith('.') && file.startsWith(DIST_DIR) && fs.existsSync(file)) {
     res.setHeader('Cache-Control', 'no-cache');
     return res.sendFile(file);
   }

@@ -194,7 +194,7 @@ docker compose up -d --build    # 重建 app；MySQL/Redis 数据卷不受影响
 - 新表（`account_devices` / `sessions` / `invite_keys` / `app_settings`）与 `account_id`、`device_ref_id` 列会在启动时自动创建/补齐；旧 `sessions` 会按 `device_id` 回填设备记录，`app_settings` 会自动增加卡密启用时间、卡密提示与 token 教程字段。旧库升级后历史数据归入最早注册账号。
 - 极旧版本的会话表没有 `account_id` 时会重建，用户需重新登录；正常升级会保留仍有效的会话并绑定到设备记录。
 - 若 `.env` 未设置 `ADMIN_PASSWORD`，升级后管理后台仍不可用。
-- 前端产物在镜像构建时生成；本地源码运行可执行 `npm run build:ui`，未构建时服务端自动回退源码。
+- 前端产物在镜像构建时生成；本地源码运行可执行 `npm run build:ui`，未构建时服务端自动回退源码。产物新鲜度按源码内容哈希判定（`public/dist/.build-manifest.json`），源码变动后重启服务会自动重建，无需关心文件时间戳。
 
 ## 9. 常见问题
 
@@ -209,6 +209,7 @@ docker compose up -d --build    # 重建 app；MySQL/Redis 数据卷不受影响
 | 注册页没有卡密提示 / 同步页 token 教程为空 | 在后台「设置」填写对应 Markdown 并保存，用户端刷新后生效 |
 | 实时协作显示未连接 | 反代需透传 WebSocket（见第 7 节）；确认 `/ws` 未被拦截；登录过期会以 4401 关闭 |
 | 请求返回 401/40112 | 会话过期、设备变化或签名失败；退出后重新登录 |
+| 管理后台登录后提示「缺少请求签名 / 验签失败」（40113） | 浏览器仍在运行旧版前端包（升级后未刷新）：关闭页面重新打开并强制刷新（Ctrl+Shift+R）；确认部署执行了 `docker compose up -d --build` 重建镜像 |
 | 定时同步不执行 | 「定时」中确认已启用、cron 有效、token 已保存（区服默认由 token 自动识别；仅后台授权的账号可填写区服覆盖）；查看本账号运行记录与容器日志 |
 | 数据没保存 | 确认 MySQL 健康且 app 使用 `DB_DRIVER=mysql`；`docker compose exec app env | grep MYSQL` |
 | 忘记 MySQL 密码 | 使用 `.env` 中的 `MYSQL_ROOT_PASSWORD` 重置，或（可丢数据时）`docker compose down -v` 重建 |

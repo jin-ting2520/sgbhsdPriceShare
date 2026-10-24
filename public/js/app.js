@@ -141,7 +141,18 @@ async function api(path, options = {}) {
     err.status = res.status
     err.code = json.code
     err.data = json.data
-    if (res.status === 401 && path !== '/api/auth/login' && onAuthInvalid) onAuthInvalid()
+    if (res.status === 401 && path !== '/api/auth/login') {
+      // 40112 = 请求验签失败：多为浏览器仍在运行旧版前端包（未携带 X-Timestamp/X-Nonce/X-Sign），
+      // 此时重新登录也会继续失败，应引导强制刷新以拉取最新包
+      if (json.code === 40112) {
+        ElMessage.warning({
+          message: '请求验签失败，当前页面可能是旧版本：请强制刷新（Ctrl+Shift+R）后重试；频繁出现请校准设备时间',
+          duration: 8000,
+        })
+      } else if (onAuthInvalid) {
+        onAuthInvalid()
+      }
+    }
     throw err
   }
   return json.data
