@@ -100,6 +100,8 @@ app.get('/api/public/config', async (req, res) => {
 });
 
 app.use(require('./auth').attach);
+// 工具（SgbhsdTool）SSO：自带一次性票据校验，不走会话 HMAC 签名，必须挂在 requireSignature 之前
+app.use('/api/sso', require('./routes/sso'));
 app.use(sign.requireSignature);
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/auth', require('./routes/auth'));

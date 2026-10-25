@@ -65,6 +65,8 @@ if (!fs.existsSync(srcFile)) {
       ${pick(accountCols, 'allow_sync_server', 'allowSyncServer', '0')},
       ${pick(accountCols, 'view_master_prices', 'viewMasterPrices', '0')},
       ${pick(accountCols, 'allow_master_prices', 'allowMasterPrices', '1')},
+      ${pick(accountCols, 'sso_source', 'ssoSource', 'NULL')},
+      ${pick(accountCols, 'sso_subject', 'ssoSubject', 'NULL')},
       ${pick(accountCols, 'created_at', 'createdAt', 'NULL')},
       ${pick(accountCols, 'updated_at', 'updatedAt', 'NULL')}
     FROM accounts ORDER BY id`) : [];
@@ -96,12 +98,13 @@ if (!fs.existsSync(srcFile)) {
     const info = await db.run(
       `INSERT INTO accounts (name, password_hash, token, relief, status, expires_at, key_code,
                              device_limit, current_server, allow_sync_server, view_master_prices,
-                             allow_master_prices, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             allow_master_prices, sso_source, sso_subject, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [a.name, a.passwordHash, a.token || null, a.relief == null ? 5 : a.relief,
         a.status || 'active', a.expiresAt || null, a.keyCode || null,
         Number(a.deviceLimit) || 3, a.currentServer || '', Number(a.allowSyncServer) ? 1 : 0,
         Number(a.viewMasterPrices) ? 1 : 0, a.allowMasterPrices == null ? 1 : (Number(a.allowMasterPrices) ? 1 : 0),
+        a.ssoSource || null, a.ssoSubject || null,
         a.createdAt || t, a.updatedAt || t]
     );
     accountIdMap.set(a.id, info.insertId);

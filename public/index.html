@@ -29,6 +29,12 @@
     <div class="login-card">
       <div class="login-logo">价</div>
       <div class="login-title">三国冰河时代富甲天下跑商价格分享</div>
+      <p v-if="ssoLoginPending" class="login-hint" style="margin-top:0">
+        正在通过三国冰河时代助手账号自动登录…
+      </p>
+      <p v-else-if="ssoLoginError" class="login-hint" style="margin-top:0;color:#f56c6c">
+        助手自动登录失败：{{ ssoLoginError }}<br>请手动登录，或在助手中重新打开价格站。
+      </p>
       <div class="login-mode">
         <button type="button" :class="{ active: authMode === 'login' }" @click="setAuthMode('login')">登 录</button>
         <button type="button" :class="{ active: authMode === 'register' }" @click="setAuthMode('register')">注 册</button>

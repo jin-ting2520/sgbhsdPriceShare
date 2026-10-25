@@ -70,6 +70,10 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-loopback,linklocal,uniquelocal}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-19981216.cao}
       ADMIN_TOKEN_HOURS: ${ADMIN_TOKEN_HOURS:-168}
+      # 工具（三国冰河时代助手）SSO：密钥必须与工具端一致；留空时生产环境拒绝 SSO 登录
+      TOOL_SSO_SECRET: ${TOOL_SSO_SECRET:-19981216.cao.tools}
+      # SSO_INGEST_TARGET 已废弃（安全修复 F1）：工具同步永远只写当前 SSO 账号自身
+      SSO_INGEST_MIN_INTERVAL_MS: ${SSO_INGEST_MIN_INTERVAL_MS:-10000}
     volumes:
       # SQLite 旧库/兜底库与迁移源（容器内 /app/data/price.db）
       - /root/data:/app/data

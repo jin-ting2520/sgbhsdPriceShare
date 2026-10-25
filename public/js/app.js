@@ -98,6 +98,22 @@ let DEVICE_ID = readDeviceId()
 let DEVICE_NAME = deviceLabel(DEVICE_ID)
 const DEVICE_META = collectDeviceMeta()
 
+const SSO_TICKET_PARAM = 'sso_ticket'
+
+/** 读取 URL 里的工具 SSO 票据，并立刻从地址栏抹掉（不留在历史记录/截图里） */
+const takeSsoTicket = () => {
+  let ticket = ''
+  try {
+    const url = new URL(location.href)
+    ticket = (url.searchParams.get(SSO_TICKET_PARAM) || '').trim()
+    if (ticket) {
+      url.searchParams.delete(SSO_TICKET_PARAM)
+      history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`)
+    }
+  } catch (e) { /* 不支持 URL/history 的环境忽略 */ }
+  return ticket
+}
+
 let accountSession = (readSavedAccount() || {}).session || ''
 let onAuthInvalid = null
 
@@ -141,7 +157,7 @@ async function api(path, options = {}) {
     err.status = res.status
     err.code = json.code
     err.data = json.data
-    if (res.status === 401 && path !== '/api/auth/login') {
+    if (res.status === 401 && path !== '/api/auth/login' && !path.startsWith('/api/sso/')) {
       // 40112 = 请求验签失败：多为浏览器仍在运行旧版前端包（未携带 X-Timestamp/X-Nonce/X-Sign），
       // 此时重新登录也会继续失败，应引导强制刷新以拉取最新包
       if (json.code === 40112) {
@@ -173,6 +189,9 @@ createApp({
     /* ---------- 账号（昵称 + 密码 + 卡密，本机缓存会话） ---------- */
     const savedAccount = readSavedAccount()
     const nickname = ref(savedAccount ? savedAccount.name : '')
+    const accountIsSso = ref(!!(savedAccount && savedAccount.sso))
+    const ssoLoginPending = ref(false)
+    const ssoLoginError = ref('')
     const nicknameInput = ref('')
     const passwordInput = ref('')
     const keyInput = ref('')
@@ -279,12 +298,24 @@ createApp({
     })
     const expiryText = computed(() => {
       if (!expiryLoaded.value) return '到期时间…'
+      if (accountIsSso.value) {
+        return accountExpiresAt.value
+          ? `工具授权至 ${String(accountExpiresAt.value).slice(0, 16)}`
+          : '跟随工具授权'
+      }
       if (!accountHasKey.value) return '试用中'
       if (!accountExpiresAt.value) return '永久有效'
       return `有效期至 ${String(accountExpiresAt.value).slice(0, 16)}`
     })
     const expiryShortText = computed(() => {
       if (!expiryLoaded.value) return '到期时间…'
+      if (accountIsSso.value) {
+        if (!accountExpiresAt.value) return '工具账号'
+        const ts = Date.parse(`${String(accountExpiresAt.value).replace(' ', 'T')}+08:00`)
+        if (!Number.isFinite(ts)) return '工具账号'
+        if (ts <= Date.now()) return '已到期'
+        return `剩余 ${Math.max(1, Math.ceil((ts - Date.now()) / 86400000))} 天`
+      }
       if (!accountHasKey.value) return '试用中'
       if (!accountExpiresAt.value) return '永久有效'
       const ts = Date.parse(`${String(accountExpiresAt.value).replace(' ', 'T')}+08:00`)
@@ -293,13 +324,19 @@ createApp({
       return `剩余 ${Math.max(1, Math.ceil((ts - Date.now()) / 86400000))} 天`
     })
     const expiryTooltip = computed(() => {
-      if (!expiryLoaded.value) return '正在读取卡密到期时间'
+      if (!expiryLoaded.value) return '正在读取账号到期时间'
+      if (accountIsSso.value) {
+        return accountExpiresAt.value
+          ? `由三国冰河时代助手授权账号自动创建，到期时间跟随工具：${accountExpiresAt.value}`
+          : '由三国冰河时代助手授权账号自动创建，当前长期有效（跟随工具授权）'
+      }
       if (!accountHasKey.value) return `试用期至 ${keyRequiredAtText.value}；启用卡密后需输入卡密继续使用`
       if (!accountExpiresAt.value) return '卡密永久有效'
       return `卡密到期时间：${accountExpiresAt.value}`
     })
     const expiryTagType = computed(() => {
       if (!expiryLoaded.value) return 'info'
+      if (accountIsSso.value) return expirySoon.value ? 'warning' : 'info'
       if (!accountHasKey.value) return 'success'
       if (!accountExpiresAt.value) return 'info'
       return expirySoon.value ? 'warning' : 'info'
@@ -420,6 +457,60 @@ createApp({
       renewVisible.value = true
     }
 
+    /** 登录成功后的状态落盘（密码登录 / 工具 SSO 共用） */
+    const applyAuthData = (data, { sso = false } = {}) => {
+      ssoLoginError.value = ''
+      if (data.deviceId && data.deviceId !== DEVICE_ID) {
+        DEVICE_ID = data.deviceId
+        DEVICE_NAME = deviceLabel(DEVICE_ID)
+        deviceName.value = DEVICE_NAME
+        rememberDeviceId(DEVICE_ID)
+      }
+      accountSession = data.session
+      sessionOk.value = true
+      nickname.value = data.name
+      accountIsSso.value = data.sso !== undefined ? !!data.sso : !!sso
+      accountToken.value = data.token || ''
+      accountServer.value = data.currentServer || ''
+      allowSyncServer.value = !!data.allowSyncServer
+      applyExpiry(data)
+      applyMasterMeta(data)
+      if (!form.server && accountServer.value) form.server = accountServer.value
+      taxRelief.value = clampRelief(data.relief)
+      savedRelief.value = taxRelief.value
+      try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
+      passwordInput.value = ''
+      keyInput.value = ''
+      renewKey.value = ''
+      renewVisible.value = false
+      try {
+        localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: data.name, session: data.session, sso: !!accountIsSso.value }))
+      } catch (e) { /* 忽略隐私模式等 */ }
+    }
+
+    /** URL 带 ?sso_ticket=：用工具票据自动登录（失败则回到普通登录页并显示原因） */
+    const runSsoAutoLogin = async () => {
+      const ticket = takeSsoTicket()
+      if (!ticket) return false
+      ssoLoginPending.value = true
+      ssoLoginError.value = ''
+      try {
+        const data = await api('/api/sso/tool-login', {
+          method: 'POST',
+          body: { ticket, deviceId: DEVICE_ID, deviceName: DEVICE_NAME, deviceMeta: DEVICE_META },
+        })
+        applyAuthData(data, { sso: true })
+        ElMessage.success(`${data.created ? '已创建并绑定' : '已绑定'}助手账号「${data.name}」`)
+        return true
+      } catch (e) {
+        ssoLoginError.value = e.message || '自动登录失败'
+        ElMessage.warning(`助手账号自动登录失败：${ssoLoginError.value}，请手动登录`)
+        return false
+      } finally {
+        ssoLoginPending.value = false
+      }
+    }
+
     /** 登录 / 注册共用提交：只有注册模式读取卡密，登录模式不发送 key */
     const submitAuth = async ({ mode = authMode.value, key = '', kick = false } = {}) => {
       const name = nicknameInput.value.trim().replace(/\s+/g, ' ')
@@ -440,31 +531,7 @@ createApp({
         if (key) body.key = key
         if (kick) body.kick = 'all'
         const data = await api('/api/auth/login', { method: 'POST', body })
-        if (data.deviceId && data.deviceId !== DEVICE_ID) {
-          DEVICE_ID = data.deviceId
-          DEVICE_NAME = deviceLabel(DEVICE_ID)
-          deviceName.value = DEVICE_NAME
-          rememberDeviceId(DEVICE_ID)
-        }
-        accountSession = data.session
-        sessionOk.value = true
-        nickname.value = data.name
-        accountToken.value = data.token || ''
-        accountServer.value = data.currentServer || ''
-        allowSyncServer.value = !!data.allowSyncServer
-        applyExpiry(data)
-        applyMasterMeta(data)
-        if (!form.server && accountServer.value) form.server = accountServer.value
-        taxRelief.value = clampRelief(data.relief)
-        savedRelief.value = taxRelief.value
-        try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
-        passwordInput.value = ''
-        keyInput.value = ''
-        renewKey.value = ''
-        renewVisible.value = false
-        try {
-          localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: data.name, session: data.session }))
-        } catch (e) { /* 忽略隐私模式等 */ }
+        applyAuthData(data)
         const expiry = !data.hasKey
           ? (data.expiresAt ? `，试用中（至 ${String(data.expiresAt).slice(0, 10)}）` : '，试用中')
           : (data.expiresAt ? `，有效期至 ${String(data.expiresAt).slice(0, 10)}` : '，永久有效')
@@ -536,6 +603,7 @@ createApp({
       accountSession = ''
       sessionOk.value = false
       nickname.value = ''
+      accountIsSso.value = false
       accountToken.value = ''
       accountServer.value = ''
       serverVisible.value = false
@@ -562,6 +630,7 @@ createApp({
       accountSession = ''
       sessionOk.value = false
       nickname.value = ''
+      accountIsSso.value = false
       accountToken.value = ''
       serverVisible.value = false
       serverRequired.value = false
@@ -1704,12 +1773,16 @@ createApp({
         if (saved.commodity) form.commodity = saved.commodity
       } catch (e) { /* ignore */ }
 
+      // 工具（SgbhsdTool）打开时带 ?sso_ticket=，优先自动登录；失败则回退普通登录页
+      await runSsoAutoLogin()
+
       if (entered.value) {
         try {
           const me = await api('/api/auth/me')
           accountToken.value = me.token || ''
           accountServer.value = me.currentServer || ''
           allowSyncServer.value = !!me.allowSyncServer
+          if (me.sso !== undefined) accountIsSso.value = !!me.sso
           applyExpiry(me)
           applyMasterMeta(me)
           if (!form.server && accountServer.value) form.server = accountServer.value
@@ -1718,7 +1791,7 @@ createApp({
           try { localStorage.setItem(RELIEF_KEY, String(taxRelief.value)) } catch (e) { /* 忽略隐私模式等 */ }
           if (me.name && me.name !== nickname.value) {
             nickname.value = me.name
-            try { localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: me.name, session: accountSession })) } catch (e) { /* 忽略 */ }
+            try { localStorage.setItem(ACCOUNT_KEY, JSON.stringify({ name: me.name, session: accountSession, sso: accountIsSso.value })) } catch (e) { /* 忽略 */ }
           }
         } catch (e) {
           if (e.status === 401 || e.status === 403) {
@@ -1750,6 +1823,7 @@ createApp({
       // 账号入口
       nickname, nicknameInput, passwordInput, keyInput, entering, entered, enterSite, switchAccount,
       authMode, setAuthMode, authHint, renewVisible, renewKey, renewMessage, openRenew, submitRenew,
+      accountIsSso, ssoLoginPending, ssoLoginError,
       accountServer, serverVisible, serverInput, serverSaving, serverRequired,
       openServerPicker, saveServer, allowSyncServer, deviceName,
       masterAccountId, masterAccountName, isMaster, masterPricesAllowed, viewMasterPrices, masterSaving, onViewMasterChange,

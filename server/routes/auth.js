@@ -17,6 +17,7 @@ const {
 const { clampRelief } = require('../tax');
 const { validateKey, useKey, expiresAtFor, KEY_TYPE_NAMES } = require('../keys');
 const { masterMeta } = require('../master');
+const { publicAccount } = require('../account-view');
 const { broadcast, closeSessions, issueTicket } = require('../ws');
 const rateLimit = require('../ratelimit');
 
@@ -30,30 +31,6 @@ function readCredentials(body) {
   const name = cleanName(body && body.name, 20);
   const password = body && typeof body.password === 'string' ? body.password : '';
   return { name, password };
-}
-
-async function publicAccount(row, created, session, extra = {}) {
-  const meta = await masterMeta(row);
-  return {
-    name: row.name,
-    session,
-    token: row.token || '',
-    relief: clampRelief(row.relief),
-    created: !!created,
-    currentServer: row.current_server || '',
-    allowSyncServer: !!Number(row.allow_sync_server),
-    deviceLimit: Math.max(1, Number(row.device_limit) || 3),
-    expiresAt: row.expires_at || null,
-    hasKey: !!row.key_code,
-    trial: !row.key_code,
-    keyType: row.key_code ? (extra.keyType || null) : null,
-    masterAccountId: meta.masterAccountId,
-    masterAccountName: meta.masterAccountName,
-    isMaster: meta.isMaster,
-    masterPricesAllowed: meta.masterPricesAllowed,
-    viewMasterPrices: meta.viewMasterPrices,
-    ...extra,
-  };
 }
 
 function renewBaseMs(expiresAt) {
@@ -240,7 +217,7 @@ router.post('/logout', requireAccount, asyncHandler(async (req, res) => {
 /** GET /api/auth/me 当前账号信息 */
 router.get('/me', requireAccount, asyncHandler(async (req, res) => {
   const row = await get(
-    'SELECT name, token, relief, created_at AS createdAt, current_server AS currentServer, allow_sync_server AS allowSyncServer, status, expires_at AS expiresAt, device_limit AS deviceLimit, key_code AS keyCode, view_master_prices AS viewMasterPrices, allow_master_prices AS masterPricesAllowed FROM accounts WHERE id = ?',
+    'SELECT name, token, relief, created_at AS createdAt, current_server AS currentServer, allow_sync_server AS allowSyncServer, status, expires_at AS expiresAt, device_limit AS deviceLimit, key_code AS keyCode, view_master_prices AS viewMasterPrices, allow_master_prices AS masterPricesAllowed, sso_source AS ssoSource FROM accounts WHERE id = ?',
     [req.account.id]
   );
   const meta = await masterMeta({
@@ -260,6 +237,7 @@ router.get('/me', requireAccount, asyncHandler(async (req, res) => {
     expiresAt: row.expiresAt || null,
     deviceLimit: Math.max(1, Number(row.deviceLimit) || 3),
     hasKey: !!row.keyCode,
+    sso: !!row.ssoSource,
     masterAccountId: meta.masterAccountId,
     masterAccountName: meta.masterAccountName,
     isMaster: meta.isMaster,

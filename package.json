@@ -8,6 +8,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "test": "node --test \"test/*.test.js\"",
+    "check": "node scripts/check.js",
     "test:smoke": "node server/scripts/smoke.js",
     "build:ui": "node scripts/build-ui.js",
     "db:vacuum": "node server/scripts/vacuum.js",

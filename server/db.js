@@ -191,9 +191,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   allow_sync_server INTEGER NOT NULL DEFAULT 0,
   view_master_prices INTEGER NOT NULL DEFAULT 0,
   allow_master_prices INTEGER NOT NULL DEFAULT 1,
+  sso_source    TEXT,
+  sso_subject   TEXT,
   created_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
   updated_at    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uk_accounts_sso ON accounts(sso_source, sso_subject);
 
 CREATE TABLE IF NOT EXISTS server_masters (
   server_id  INTEGER PRIMARY KEY REFERENCES servers(id)  ON DELETE CASCADE,
@@ -385,10 +388,13 @@ const MYSQL_SCHEMA = [
     allow_sync_server TINYINT NOT NULL DEFAULT 0,
     view_master_prices TINYINT NOT NULL DEFAULT 0,
     allow_master_prices TINYINT NOT NULL DEFAULT 1,
+    sso_source VARCHAR(32) NULL,
+    sso_subject VARCHAR(64) NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
     UNIQUE KEY uk_accounts_name (name),
-    UNIQUE KEY uk_accounts_session (session_token)
+    UNIQUE KEY uk_accounts_session (session_token),
+    UNIQUE KEY uk_accounts_sso (sso_source, sso_subject)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS server_masters (
     server_id INT PRIMARY KEY,
@@ -643,6 +649,10 @@ function migrateSqlite() {
   if (!hasCol('accounts', 'allow_sync_server')) sqlite.exec('ALTER TABLE accounts ADD COLUMN allow_sync_server INTEGER NOT NULL DEFAULT 0');
   if (!hasCol('accounts', 'view_master_prices')) sqlite.exec('ALTER TABLE accounts ADD COLUMN view_master_prices INTEGER NOT NULL DEFAULT 0');
   if (!hasCol('accounts', 'allow_master_prices')) sqlite.exec('ALTER TABLE accounts ADD COLUMN allow_master_prices INTEGER NOT NULL DEFAULT 1');
+  // 工具 SSO 绑定：sso_source + sso_subject 唯一（NULL 可重复，普通账号不受影响）
+  if (!hasCol('accounts', 'sso_source')) sqlite.exec('ALTER TABLE accounts ADD COLUMN sso_source TEXT');
+  if (!hasCol('accounts', 'sso_subject')) sqlite.exec('ALTER TABLE accounts ADD COLUMN sso_subject TEXT');
+  sqlite.exec('CREATE UNIQUE INDEX IF NOT EXISTS uk_accounts_sso ON accounts(sso_source, sso_subject)');
 
   if (!hasCol('app_settings', 'key_help_md')) {
     sqlite.exec("ALTER TABLE app_settings ADD COLUMN key_help_md TEXT NOT NULL DEFAULT ''");
@@ -851,6 +861,14 @@ async function migrateMysql() {
   if (!(await hasCol('accounts', 'allow_master_prices'))) {
     await pool.query('ALTER TABLE accounts ADD COLUMN allow_master_prices TINYINT NOT NULL DEFAULT 1 AFTER view_master_prices');
   }
+  // 工具 SSO 绑定：sso_source + sso_subject 唯一（MySQL 唯一索引允许多个 NULL，普通账号不受影响）
+  if (!(await hasCol('accounts', 'sso_source'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN sso_source VARCHAR(32) NULL AFTER allow_master_prices');
+  }
+  if (!(await hasCol('accounts', 'sso_subject'))) {
+    await pool.query('ALTER TABLE accounts ADD COLUMN sso_subject VARCHAR(64) NULL AFTER sso_source');
+  }
+  await tryQuery('ALTER TABLE accounts ADD UNIQUE KEY uk_accounts_sso (sso_source, sso_subject)');
   if (!(await hasCol('app_settings', 'key_help_md'))) {
     await pool.query('ALTER TABLE app_settings ADD COLUMN key_help_md MEDIUMTEXT NULL');
     await pool.query('UPDATE app_settings SET key_help_md = ? WHERE id = 1 AND (key_help_md IS NULL OR key_help_md = ?)', [DEFAULT_KEY_HELP_MD, '']);
